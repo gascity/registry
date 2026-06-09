@@ -66,6 +66,18 @@
   font-weight: 700;
 }
 
+.reviewComposer .checkboxRow {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+}
+
+.reviewComposer .checkboxRow input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
 .reviewComposer input,
 .reviewComposer textarea,
 .accountPanel input,
