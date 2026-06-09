@@ -13,6 +13,7 @@ export type AuthState = {
   user: PublicUser | null;
   csrfToken: string | null;
   authConfigured: boolean;
+  authProvider?: "oidc" | "workos" | null;
   devAuthEnabled: boolean;
   store?: "file" | "postgres";
 };

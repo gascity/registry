@@ -57,7 +57,8 @@ async function handleApi(request: Request) {
     return json({
       user: session?.user ?? null,
       csrfToken: session?.csrfToken ?? null,
-      authConfigured: Boolean(config.oidc),
+      authConfigured: Boolean(config.authProvider),
+      authProvider: config.authProvider ?? null,
       devAuthEnabled: config.devAuthEnabled,
       store: store.kind,
     });

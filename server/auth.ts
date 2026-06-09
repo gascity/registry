@@ -50,6 +50,14 @@ export function requireCsrf(request: Request, session: SessionRecord | null) {
 }
 
 export async function startLogin(request: Request, config: ServerConfig) {
+  if (!config.authProvider) {
+    throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
+  }
+  if (config.authProvider === "workos") return startWorkosLogin(request, config);
+  return startOidcLogin(request, config);
+}
+
+async function startOidcLogin(request: Request, config: ServerConfig) {
   if (!config.oidc) {
     throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
   }
@@ -84,8 +92,39 @@ export async function startLogin(request: Request, config: ServerConfig) {
   return redirect(authorizationUrl.toString(), headers);
 }
 
+async function startWorkosLogin(request: Request, config: ServerConfig) {
+  if (!config.workos) {
+    throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
+  }
+  const url = new URL(request.url);
+  const redirectTo = safeRedirectPath(url.searchParams.get("redirect"));
+  const state: OAuthState = {
+    state: randomToken(18),
+    nonce: "",
+    codeVerifier: "",
+    redirectTo,
+    createdAt: Date.now(),
+  };
+  const authorizationUrl = new URL(`${config.workos.apiBaseUrl}/user_management/authorize`);
+  authorizationUrl.searchParams.set("provider", "authkit");
+  authorizationUrl.searchParams.set("client_id", config.workos.clientId);
+  authorizationUrl.searchParams.set("redirect_uri", callbackUrl(config));
+  authorizationUrl.searchParams.set("response_type", "code");
+  authorizationUrl.searchParams.set("state", state.state);
+
+  const headers = new Headers();
+  appendCookie(headers, oauthCookie, signValue(JSON.stringify(state), config.sessionSecret), {
+    httpOnly: true,
+    secure: config.isProduction,
+    sameSite: "Lax",
+    maxAge: oauthMaxAgeSeconds,
+    path: "/",
+  });
+  return redirect(authorizationUrl.toString(), headers);
+}
+
 export async function finishLogin(request: Request, config: ServerConfig, store: RegistryStore) {
-  if (!config.oidc) {
+  if (!config.authProvider) {
     throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
   }
   const url = new URL(request.url);
@@ -101,6 +140,35 @@ export async function finishLogin(request: Request, config: ServerConfig, store:
     throw new AuthError(400, "BAD_CALLBACK", "OAuth state is invalid.");
   }
 
+  const identity =
+    config.authProvider === "workos"
+      ? await finishWorkosLogin(request, config, code)
+      : await finishOidcLogin(config, code, oauthState);
+  const user = await store.ensureUser(identity);
+  const session = await store.createSession(user.id);
+
+  const headers = new Headers();
+  appendCookie(headers, sessionCookie, session.token, {
+    httpOnly: true,
+    secure: config.isProduction,
+    sameSite: "Lax",
+    maxAge: sessionMaxAgeSeconds,
+    path: "/",
+  });
+  appendCookie(headers, oauthCookie, "", {
+    httpOnly: true,
+    secure: config.isProduction,
+    sameSite: "Lax",
+    maxAge: 0,
+    path: "/",
+  });
+  return redirect(oauthState.redirectTo, headers);
+}
+
+async function finishOidcLogin(config: ServerConfig, code: string, oauthState: OAuthState) {
+  if (!config.oidc) {
+    throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
+  }
   const discovery = await getDiscovery(config);
   const tokenResponse = await fetch(discovery.token_endpoint, {
     method: "POST",
@@ -130,26 +198,38 @@ export async function finishLogin(request: Request, config: ServerConfig, store:
   const userInfo = tokenPayload.access_token
     ? await fetchUserInfo(discovery, tokenPayload.access_token)
     : {};
-  const identity = identityFromClaims({ ...claims, ...userInfo }, config);
-  const user = await store.ensureUser(identity);
-  const session = await store.createSession(user.id);
+  return identityFromClaims({ ...claims, ...userInfo }, config);
+}
 
-  const headers = new Headers();
-  appendCookie(headers, sessionCookie, session.token, {
-    httpOnly: true,
-    secure: config.isProduction,
-    sameSite: "Lax",
-    maxAge: sessionMaxAgeSeconds,
-    path: "/",
+async function finishWorkosLogin(request: Request, config: ServerConfig, code: string) {
+  if (!config.workos) {
+    throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
+  }
+  const response = await fetch(`${config.workos.apiBaseUrl}/user_management/authenticate`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.workos.apiKey}`,
+    },
+    body: JSON.stringify({
+      grant_type: "authorization_code",
+      client_id: config.workos.clientId,
+      client_secret: config.workos.apiKey,
+      code,
+      user_agent: request.headers.get("user-agent"),
+      ip_address: clientIp(request),
+    }),
   });
-  appendCookie(headers, oauthCookie, "", {
-    httpOnly: true,
-    secure: config.isProduction,
-    sameSite: "Lax",
-    maxAge: 0,
-    path: "/",
-  });
-  return redirect(oauthState.redirectTo, headers);
+  if (!response.ok) {
+    throw new AuthError(401, "TOKEN_EXCHANGE_FAILED", "Sign-in failed.");
+  }
+  const payload = (await response.json()) as {
+    user?: WorkosUser;
+    organization_id?: string | null;
+  };
+  if (!payload.user?.id) throw new AuthError(401, "TOKEN_EXCHANGE_FAILED", "Sign-in failed.");
+  return identityFromWorkos(payload.user, payload.organization_id ?? undefined);
 }
 
 export async function createDevSession(request: Request, config: ServerConfig, store: RegistryStore) {
@@ -255,8 +335,42 @@ function identityFromClaims(claims: JWTPayload, config: ServerConfig): IdentityC
   };
 }
 
+type WorkosUser = {
+  id: string;
+  email?: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  profile_picture_url?: string | null;
+};
+
+function identityFromWorkos(user: WorkosUser, organizationId?: string | null): IdentityClaims {
+  const displayName = [user.first_name, user.last_name]
+    .map((part) => (typeof part === "string" ? part.trim() : ""))
+    .filter(Boolean)
+    .join(" ");
+  const email = stringClaim(user.email);
+  return {
+    subject: `workos:${user.id}`,
+    gasCityUserId: user.id,
+    gasCityAccountId: stringClaim(organizationId),
+    email,
+    handle: email?.split("@")[0],
+    displayName: displayName || email,
+    avatarUrl: stringClaim(user.profile_picture_url),
+  };
+}
+
 function stringClaim(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function clientIp(request: Request) {
+  return (
+    request.headers.get("cf-connecting-ip") ??
+    request.headers.get("x-real-ip") ??
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    undefined
+  );
 }
 
 function callbackUrl(config: ServerConfig) {

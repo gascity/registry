@@ -4,12 +4,18 @@ export type ServerConfig = {
   sessionSecret: string;
   databaseUrl?: string;
   localDataPath: string;
+  authProvider?: "oidc" | "workos";
   oidc?: {
     issuer: string;
     clientId: string;
     clientSecret: string;
     gasCityUserIdClaim: string;
     gasCityAccountIdClaim?: string;
+  };
+  workos?: {
+    apiBaseUrl: string;
+    apiKey: string;
+    clientId: string;
   };
   isProduction: boolean;
   devAuthEnabled: boolean;
@@ -27,6 +33,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const clientSecret = env.OIDC_CLIENT_SECRET?.trim();
   const gasCityUserIdClaim = env.OIDC_GASCITY_USER_ID_CLAIM?.trim() || "sub";
   const gasCityAccountIdClaim = env.OIDC_GASCITY_ACCOUNT_ID_CLAIM?.trim() || undefined;
+  const workosApiKey = env.WORKOS_API_KEY?.trim();
+  const workosClientId = env.WORKOS_CLIENT_ID?.trim();
+  const workosApiBaseUrl = trimTrailingSlash(env.WORKOS_API_BASE_URL?.trim() || "https://api.workos.com");
+  const requestedAuthProvider = parseAuthProvider(env.REGISTRY_AUTH_PROVIDER);
   const oidc =
     issuer && clientId && clientSecret
       ? {
@@ -37,6 +47,25 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
           gasCityAccountIdClaim,
         }
       : undefined;
+  const workos =
+    workosApiKey && workosClientId
+      ? {
+          apiBaseUrl: workosApiBaseUrl,
+          apiKey: workosApiKey,
+          clientId: workosClientId,
+        }
+      : undefined;
+  const authProvider = requestedAuthProvider
+    ? requestedAuthProvider === "workos" && workos
+      ? "workos"
+      : requestedAuthProvider === "oidc" && oidc
+        ? "oidc"
+        : undefined
+    : workos
+      ? "workos"
+      : oidc
+        ? "oidc"
+        : undefined;
 
   return {
     port: Number.isFinite(port) && port > 0 ? port : 8080,
@@ -44,10 +73,17 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     sessionSecret,
     databaseUrl: env.DATABASE_URL?.trim() || undefined,
     localDataPath: env.REGISTRY_DATA_PATH?.trim() || ".registry-data/registry.local.json",
+    authProvider,
     oidc,
+    workos,
     isProduction: env.NODE_ENV === "production" || Boolean(env.RAILWAY_ENVIRONMENT),
     devAuthEnabled: env.REGISTRY_DEV_AUTH === "1" && env.NODE_ENV !== "production",
   };
+}
+
+function parseAuthProvider(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "oidc" || normalized === "workos" ? normalized : undefined;
 }
 
 function trimTrailingSlash(value: string) {

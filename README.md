@@ -68,6 +68,23 @@ Production review/account state requires:
 APP_URL=https://registry.gascity.com
 DATABASE_URL=postgres://...
 SESSION_SECRET=<random secret>
+REGISTRY_AUTH_PROVIDER=workos
+WORKOS_API_KEY=<WorkOS API key>
+WORKOS_CLIENT_ID=<WorkOS client id>
+WORKOS_API_BASE_URL=https://api.workos.com
+```
+
+The production login path uses the same WorkOS/AuthKit application family as
+Gasworks, so users see the configured Google Workspace and GitHub sign-in
+options. The WorkOS redirect URI must include:
+
+```text
+https://registry.gascity.com/api/auth/callback
+```
+
+OIDC is still supported for future `auth.gascity.com`/Keycloak federation:
+
+```text
 OIDC_ISSUER=https://auth.gascity.com/realms/<realm>
 OIDC_CLIENT_ID=<registry client id>
 OIDC_CLIENT_SECRET=<registry client secret>
@@ -78,11 +95,9 @@ OIDC_GASCITY_ACCOUNT_ID_CLAIM=gascity_account_id
 When `DATABASE_URL` is absent the server intentionally falls back to the local
 JSON store, which is suitable for development but not for production.
 
-The registry stores reviews against `gascity_user_id`. Until
-`auth.gascity.com` emits a dedicated `gascity_user_id` claim, the app defaults
-to the OIDC `sub` claim so local and early production login still work. Once
-Keycloak is federated to WorkOS/Gasworks, configure the claim env vars above so
-registry-local rows keep the same Gas City identity across subdomain apps.
+The registry stores reviews against `gascity_user_id`. With WorkOS auth this is
+the stable WorkOS user id. With OIDC auth, the app defaults to the OIDC `sub`
+claim until `auth.gascity.com` emits a dedicated `gascity_user_id` claim.
 
 The app defaults to the generated aggregate JSON:
 
