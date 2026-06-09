@@ -1,0 +1,36 @@
+name: Production Smoke
+
+on:
+  push:
+    branches: [production]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for live registry
+        env:
+          BASE_URL: https://registry.gascity.com
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + 900))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if curl -fsS "$BASE_URL/health" >/tmp/registry-health \
+              && curl -fsS "$BASE_URL/registry.toml" >/tmp/registry.toml \
+              && curl -fsS "$BASE_URL/api/me" >/tmp/registry-me.json \
+              && jq -e '.authConfigured == true and .devAuthEnabled == false and .store == "postgres"' /tmp/registry-me.json >/dev/null; then
+              echo "registry.gascity.com is healthy with the postgres store"
+              exit 0
+            fi
+
+            sleep 15
+          done
+
+          echo "registry.gascity.com did not become healthy before timeout" >&2
+          cat /tmp/registry-health 2>/dev/null || true
+          cat /tmp/registry-me.json 2>/dev/null || true
+          exit 1

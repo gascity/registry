@@ -38,6 +38,7 @@ Local development needs no external services:
 ## Quality Gates
 
 ```bash
+bun audit
 bun run generate:check
 bun run typecheck
 bun run build
@@ -50,6 +51,16 @@ Railway builds this repository from `Dockerfile` via `railway.toml`.
 The runtime image starts the Bun server, serves the built Vite assets, exposes
 `/registry.toml` for the CLI, and listens on Railway's `PORT` environment
 variable.
+
+Deployment follows the Wasteland pattern:
+
+- `main` is the tested integration branch. CI runs on pushes to `main` and on
+  pull requests.
+- The scheduled aggregate refresh commits generated catalog updates back to
+  `main`.
+- Railway auto-deploys from the `production` branch. Merging `main` into
+  `production` is the release action, and the production smoke workflow polls
+  `https://registry.gascity.com` until the Postgres-backed app is live.
 
 Production review/account state requires:
 
