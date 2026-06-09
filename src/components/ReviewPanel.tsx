@@ -1,9 +1,10 @@
-import { Flag, Loader2, Save, Star, ThumbsUp, Trash2 } from "lucide-react";
+import { Flag, Loader2, Save, ShieldCheck, Star, ThumbsUp, Trash2 } from "lucide-react";
 import type React from "react";
 import { useEffect, useMemo, useState } from "react";
 import {
   apiRequest,
   type AuthState,
+  type PackOwnership,
   type ReviewInput,
   type ReviewListResult,
   type ReviewRow,
@@ -26,6 +27,7 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
   const [reportingId, setReportingId] = useState<string | null>(null);
   const [reportReason, setReportReason] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [verifiedPublisherId, setVerifiedPublisherId] = useState<string | null>(null);
 
   const viewerReview = state?.viewerReview ?? null;
   const [rating, setRating] = useState(5);
@@ -55,6 +57,30 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
   useEffect(() => {
     void load();
   }, [load, auth.user?.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setVerifiedPublisherId(null);
+    apiRequest<PackOwnership>(
+      `/api/ownership?packKey=${encodeURIComponent(pack.packKey)}&sourceUrl=${encodeURIComponent(
+        pack.source,
+      )}`,
+    )
+      .then((ownership) => {
+        if (cancelled) return;
+        setVerifiedPublisherId(
+          ownership.verificationStatus === "verified" && ownership.publisher
+            ? ownership.publisher.id
+            : null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setVerifiedPublisherId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pack.packKey, pack.source]);
 
   useEffect(() => {
     if (!viewerReview) {
@@ -271,9 +297,15 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
               <div className="reviewItemHeader">
                 <div>
                   <strong>{review.title || `${review.rating}/5 review`}</strong>
-                  <span>
-                    @{review.user.handle} · {new Date(review.updatedAt).toLocaleDateString()}
-                  </span>
+                  <div className="reviewMeta">
+                    <span>@{review.user.handle} · {new Date(review.updatedAt).toLocaleDateString()}</span>
+                    {verifiedPublisherId === review.user.id ? (
+                      <span className="verifiedAuthorBadge" title="Verified pack author">
+                        <ShieldCheck size={13} aria-hidden="true" />
+                        Verified author
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
                 <span className="reviewRating">
                   <Star size={14} fill="currentColor" /> {review.rating}

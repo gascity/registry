@@ -514,7 +514,7 @@ function TrustTab({
           ) : ownership?.verificationStatus === "verified" && ownership.publisher ? (
             <p className="ownershipStatus verified">
               <ShieldCheck size={15} aria-hidden="true" />
-              Verified publisher @{ownership.publisher.handle}
+              Verified author @{ownership.publisher.handle}
             </p>
           ) : (
             <p className="ownershipStatus">Unverified source</p>
@@ -557,9 +557,6 @@ function TrustTab({
         {error ? <p className="formError">{error}</p> : null}
         {!isLoading && auth.user && !ownership?.githubApp?.configured ? (
           <p className="mutedText">GitHub App verification is not configured in this environment.</p>
-        ) : null}
-        {!isLoading && ownership?.githubApp?.clientId ? (
-          <p className="mutedText">Verifier client id: {ownership.githubApp.clientId}</p>
         ) : null}
       </div>
     </div>

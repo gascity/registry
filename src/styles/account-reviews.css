@@ -163,13 +163,35 @@
   padding: 14px;
 }
 
-.reviewItemHeader span,
 .accountReviewList span {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   color: var(--ink-muted);
   font-size: 0.84rem;
+}
+
+.reviewMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 8px;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+}
+
+.reviewMeta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.verifiedAuthorBadge {
+  border: 1px solid rgba(242, 217, 149, 0.38);
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: rgba(242, 217, 149, 0.08);
+  color: var(--gc-gold-bright);
 }
 
 .reviewItem p,
