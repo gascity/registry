@@ -75,6 +75,32 @@ test("pack detail exposes README and tabbed metadata", async ({ page }) => {
   await expect(page.getByText(/content-addressed/)).toBeVisible();
   await expect(page.getByText("Source attribution")).toBeVisible();
   await expect(page.getByText("Unverified source")).toBeVisible();
+  await expect(page.getByRole("link", { name: /How verification works/ })).toHaveAttribute(
+    "href",
+    "/verify",
+  );
+  await expectHealthyPage(page, errors);
+});
+
+test("footer links expose source, verifier, and publishing pages", async ({ page }) => {
+  const errors = trackRuntimeErrors(page);
+
+  await page.goto("/");
+  const footer = page.getByRole("contentinfo");
+  await expect(footer.getByRole("link", { name: /Source/ })).toHaveAttribute(
+    "href",
+    "https://github.com/gascity/registry",
+  );
+
+  await footer.getByRole("link", { name: "Verification flow" }).click();
+  await expect(page).toHaveURL(/\/verify$/);
+  await expect(page.getByRole("heading", { name: "Pack Ownership Verification" })).toBeVisible();
+  await expect(page.getByText("Iv23libht048ujfs7SL4")).toBeVisible();
+
+  await page.getByRole("contentinfo").getByRole("link", { name: "Publish a pack" }).click();
+  await expect(page).toHaveURL(/\/publish$/);
+  await expect(page.getByRole("heading", { name: "Publish A Pack" })).toBeVisible();
+  await expect(page.getByText("gc pack release validate registry.toml")).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 

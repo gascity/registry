@@ -1,6 +1,7 @@
-import { LogIn, LogOut, Package, UserRound } from "lucide-react";
+import { ExternalLink, LogIn, LogOut, Package, UserRound } from "lucide-react";
 import type React from "react";
 import type { AuthState } from "../lib/api";
+import { GASCITY_HOME_URL, REGISTRY_SOURCE_URL } from "../lib/links";
 
 export function AppFrame({
   children,
@@ -8,6 +9,7 @@ export function AppFrame({
   isAuthLoading,
   navigateHome,
   navigateAccount,
+  navigateTo,
   signIn,
   devSignIn,
   signOut,
@@ -17,6 +19,7 @@ export function AppFrame({
   isAuthLoading: boolean;
   navigateHome: () => void;
   navigateAccount: () => void;
+  navigateTo: (path: string) => void;
   signIn: () => void;
   devSignIn: () => void;
   signOut: () => void;
@@ -43,10 +46,7 @@ export function AppFrame({
           >
             Browse
           </a>
-          <a href="https://github.com/gastownhall/gascity-packs" rel="noreferrer">
-            Source
-          </a>
-          <a href="https://github.com/gastownhall/gascity" rel="noreferrer">
+          <a href={GASCITY_HOME_URL} rel="noreferrer">
             Gas City
           </a>
         </nav>
@@ -81,6 +81,36 @@ export function AppFrame({
         </div>
       </header>
       {children}
+      <footer className="siteFooter">
+        <div>
+          <strong>Gas City Registry</strong>
+          <span>Aggregate catalog and trust metadata for published packs.</span>
+        </div>
+        <nav className="footerNav" aria-label="Registry resources">
+          <a
+            href="/publish"
+            onClick={(event) => {
+              event.preventDefault();
+              navigateTo("/publish");
+            }}
+          >
+            Publish a pack
+          </a>
+          <a
+            href="/verify"
+            onClick={(event) => {
+              event.preventDefault();
+              navigateTo("/verify");
+            }}
+          >
+            Verification flow
+          </a>
+          <a href={REGISTRY_SOURCE_URL} rel="noreferrer">
+            Source
+            <ExternalLink size={14} aria-hidden="true" />
+          </a>
+        </nav>
+      </footer>
     </div>
   );
 }

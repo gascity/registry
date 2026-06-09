@@ -100,6 +100,10 @@ export function githubAppConfigured(config: ServerConfig) {
   return Boolean(config.githubApp);
 }
 
+export function githubAppClientId(config: ServerConfig) {
+  return config.githubApp?.clientId;
+}
+
 export function githubAuthorizationUrl(config: ServerConfig, state: string) {
   if (!config.githubApp) {
     throw new RequestError(503, "GITHUB_APP_NOT_CONFIGURED", "GitHub ownership is not configured.");
@@ -257,10 +261,16 @@ async function exchangeGitHubCode(config: ServerConfig, code: string) {
   }
   const payload = (await response.json()) as GitHubTokenResponse;
   if (!payload.access_token) {
+    console.error("[registry] GitHub token exchange failed", {
+      error: payload.error,
+      errorDescription: payload.error_description,
+      clientId: config.githubApp.clientId,
+      appSlug: config.githubApp.appSlug,
+    });
     throw new RequestError(
       401,
       "GITHUB_TOKEN_EXCHANGE_FAILED",
-      payload.error_description || "GitHub verification failed.",
+      "GitHub verification failed. The registry verifier app credentials may be misconfigured.",
     );
   }
   return payload.access_token;

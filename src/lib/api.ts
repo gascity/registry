@@ -74,6 +74,7 @@ export type PackOwnership = {
   githubApp?: {
     configured: boolean;
     installUrl?: string;
+    clientId?: string;
   };
 };
 

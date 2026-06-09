@@ -16,6 +16,8 @@ import {
 import { AccountPage } from "./routes/AccountPage";
 import { HomePage } from "./routes/HomePage";
 import { PackDetail } from "./routes/PackDetail";
+import { PublishPage } from "./routes/PublishPage";
+import { VerifierPage } from "./routes/VerifierPage";
 import "./styles.css";
 
 function App() {
@@ -68,6 +70,12 @@ function App() {
     setRoute({ kind: "account" });
   }, []);
 
+  const navigateTo = useCallback((path: string) => {
+    updateUrl(path, "");
+    setRoute(parseRoute(path));
+    setSearchState(readSearchState(""));
+  }, []);
+
   const catalog =
     catalogStatus.state === "ready"
       ? catalogStatus.catalog
@@ -84,6 +92,7 @@ function App() {
       isAuthLoading={isAuthLoading}
       navigateHome={() => navigateHome(searchState, true)}
       navigateAccount={navigateAccount}
+      navigateTo={navigateTo}
       signIn={() => signIn()}
       devSignIn={() => devSignIn()}
       signOut={() => void signOut()}
@@ -103,6 +112,14 @@ function App() {
     );
   }
 
+  if (route.kind === "verify") {
+    return frame(<VerifierPage navigateTo={navigateTo} />);
+  }
+
+  if (route.kind === "publish") {
+    return frame(<PublishPage navigateTo={navigateTo} />);
+  }
+
   if (route.kind === "pack") {
     return frame(
       <PackDetail
@@ -113,6 +130,7 @@ function App() {
         signIn={() => signIn()}
         devSignIn={() => devSignIn()}
         onBack={() => navigateHome(searchState)}
+        navigateTo={navigateTo}
       />,
     );
   }
@@ -138,9 +156,17 @@ function updatePageMetadata(
     ? `${activePack.name} | Gas City Registry`
     : route.kind === "account"
       ? "Account | Gas City Registry"
+      : route.kind === "verify"
+        ? "Pack Ownership Verification | Gas City Registry"
+        : route.kind === "publish"
+          ? "Publish A Pack | Gas City Registry"
       : "Registry | Gas City";
   const description = isPack
     ? activePack.description
+    : route.kind === "verify"
+      ? "How Gas City Registry verifies pack ownership through the GitHub App verifier."
+      : route.kind === "publish"
+        ? "How to publish a new pack pointer to the Gas City Registry aggregate."
     : "Browse versioned Gas City packs, registry releases, and import commands.";
   const imagePath = isPack ? activePack.ogImage : catalog.ogImage;
   const image = imagePath ? new URL(imagePath, window.location.origin).toString() : undefined;

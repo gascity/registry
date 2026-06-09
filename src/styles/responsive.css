@@ -43,9 +43,20 @@
     padding-bottom: 14px;
   }
 
+  .siteFooter {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .siteNav,
-  .accountNav {
+  .accountNav,
+  .footerNav {
     justify-content: space-between;
+  }
+
+  .footerNav a {
+    flex: 1 1 140px;
+    justify-content: center;
   }
 
   .hero {
@@ -183,5 +194,20 @@
   .copyButton {
     width: 100%;
     height: 38px;
+  }
+
+  .docsGrid,
+  .twoColumnDocs {
+    grid-template-columns: 1fr;
+  }
+
+  .docsCallout,
+  .stepList li,
+  .docsDefinitionList div {
+    grid-template-columns: 1fr;
+  }
+
+  .stepList li::before {
+    grid-row: auto;
   }
 }

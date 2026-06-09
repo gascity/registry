@@ -15,6 +15,7 @@ import { RequestError, assertOrigin, errorJson, json, readJsonBody } from "./htt
 import { enforceRateLimit, withSecurityHeaders } from "./security";
 import {
   githubAppConfigured,
+  githubAppClientId,
   githubAppInstallUrl,
   githubAuthorizationUrl,
   parseGitHubSource,
@@ -117,6 +118,7 @@ async function handleApi(request: Request) {
       githubApp: {
         configured: githubAppConfigured(config),
         installUrl: githubAppInstallUrl(config),
+        clientId: githubAppClientId(config),
       },
     });
   }

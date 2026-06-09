@@ -1,6 +1,11 @@
 export type SortKey = "featured" | "name" | "latest" | "releases";
 export type ViewMode = "list" | "grid";
-export type RouteState = { kind: "home" } | { kind: "pack"; name: string } | { kind: "account" };
+export type RouteState =
+  | { kind: "home" }
+  | { kind: "pack"; name: string }
+  | { kind: "account" }
+  | { kind: "verify" }
+  | { kind: "publish" };
 
 export const sortOptions: Array<{ value: SortKey; label: string }> = [
   { value: "featured", label: "Featured" },
@@ -18,6 +23,8 @@ export const categoryOptions = [
 
 export function parseRoute(pathname: string): RouteState {
   if (pathname === "/account" || pathname === "/account/") return { kind: "account" };
+  if (pathname === "/verify" || pathname === "/verify/") return { kind: "verify" };
+  if (pathname === "/publish" || pathname === "/publish/") return { kind: "publish" };
   const match = pathname.match(/^\/packs\/([^/]+)\/?$/);
   if (!match) return { kind: "home" };
   return { kind: "pack", name: decodeURIComponent(match[1]) };

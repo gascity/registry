@@ -49,6 +49,7 @@ export function PackDetail({
   signIn,
   devSignIn,
   onBack,
+  navigateTo,
 }: {
   catalogStatus: CatalogStatus;
   pack: CatalogPack | undefined;
@@ -57,6 +58,7 @@ export function PackDetail({
   signIn: () => void;
   devSignIn: () => void;
   onBack: () => void;
+  navigateTo: (path: string) => void;
 }) {
   const [reviewSummary, setReviewSummary] = useState<{
     count: number;
@@ -153,6 +155,7 @@ export function PackDetail({
         auth={auth}
         signIn={signIn}
         devSignIn={devSignIn}
+        navigateTo={navigateTo}
       />
       <ReviewPanel
         pack={pack}
@@ -172,6 +175,7 @@ function PackDetailTabs({
   auth,
   signIn,
   devSignIn,
+  navigateTo,
 }: {
   pack: CatalogPack;
   latest: CatalogRelease | undefined;
@@ -179,6 +183,7 @@ function PackDetailTabs({
   auth: AuthState;
   signIn: () => void;
   devSignIn: () => void;
+  navigateTo: (path: string) => void;
 }) {
   const defaultTab = pack.readme ? "readme" : "install";
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -274,7 +279,13 @@ function PackDetailTabs({
         {activeTab === "metadata" ? <MetadataTab pack={pack} latest={latest} /> : null}
         {activeTab === "source" ? <SourceTab pack={pack} /> : null}
         {activeTab === "trust" ? (
-          <TrustTab pack={pack} auth={auth} signIn={signIn} devSignIn={devSignIn} />
+          <TrustTab
+            pack={pack}
+            auth={auth}
+            signIn={signIn}
+            devSignIn={devSignIn}
+            navigateTo={navigateTo}
+          />
         ) : null}
       </div>
     </section>
@@ -416,11 +427,13 @@ function TrustTab({
   auth,
   signIn,
   devSignIn,
+  navigateTo,
 }: {
   pack: CatalogPack;
   auth: AuthState;
   signIn: () => void;
   devSignIn: () => void;
+  navigateTo: (path: string) => void;
 }) {
   const [ownership, setOwnership] = useState<PackOwnership | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -478,6 +491,17 @@ function TrustTab({
           by Gas City's pack registry implementation. The website catalog is regenerated from source
           registries and does not add author-managed package metadata.
         </p>
+        <a
+          className="inlineDocLink"
+          href="/verify"
+          onClick={(event) => {
+            event.preventDefault();
+            navigateTo("/verify");
+          }}
+        >
+          How verification works
+          <BookOpen size={14} aria-hidden="true" />
+        </a>
       </div>
       <div className="ownershipPanel">
         <div>
@@ -533,6 +557,9 @@ function TrustTab({
         {error ? <p className="formError">{error}</p> : null}
         {!isLoading && auth.user && !ownership?.githubApp?.configured ? (
           <p className="mutedText">GitHub App verification is not configured in this environment.</p>
+        ) : null}
+        {!isLoading && ownership?.githubApp?.clientId ? (
+          <p className="mutedText">Verifier client id: {ownership.githubApp.clientId}</p>
         ) : null}
       </div>
     </div>
