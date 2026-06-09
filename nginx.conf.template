@@ -11,6 +11,18 @@ server {
     return 200 "ok\n";
   }
 
+  location = /registry.toml {
+    default_type text/plain;
+    add_header Cache-Control "public, max-age=60";
+    try_files $uri =404;
+  }
+
+  location = /catalog.json {
+    default_type application/json;
+    add_header Cache-Control "public, max-age=60";
+    try_files $uri =404;
+  }
+
   location / {
     try_files $uri $uri/ /index.html;
   }
