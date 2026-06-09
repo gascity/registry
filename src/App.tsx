@@ -15,8 +15,6 @@ import {
   Search,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles,
-  Terminal,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
