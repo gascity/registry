@@ -17,6 +17,12 @@ export type ServerConfig = {
     apiKey: string;
     clientId: string;
   };
+  githubApp?: {
+    appSlug: string;
+    clientId: string;
+    clientSecret: string;
+    webhookSecret?: string;
+  };
   isProduction: boolean;
   devAuthEnabled: boolean;
 };
@@ -36,6 +42,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const workosApiKey = env.WORKOS_API_KEY?.trim();
   const workosClientId = env.WORKOS_CLIENT_ID?.trim();
   const workosApiBaseUrl = trimTrailingSlash(env.WORKOS_API_BASE_URL?.trim() || "https://api.workos.com");
+  const githubAppSlug = env.GITHUB_APP_SLUG?.trim();
+  const githubAppClientId = env.GITHUB_APP_CLIENT_ID?.trim();
+  const githubAppClientSecret = env.GITHUB_APP_CLIENT_SECRET?.trim();
+  const githubAppWebhookSecret = env.GITHUB_APP_WEBHOOK_SECRET?.trim();
   const requestedAuthProvider = parseAuthProvider(env.REGISTRY_AUTH_PROVIDER);
   const oidc =
     issuer && clientId && clientSecret
@@ -66,6 +76,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       : oidc
         ? "oidc"
         : undefined;
+  const githubApp =
+    githubAppSlug && githubAppClientId && githubAppClientSecret
+      ? {
+          appSlug: githubAppSlug,
+          clientId: githubAppClientId,
+          clientSecret: githubAppClientSecret,
+          webhookSecret: githubAppWebhookSecret || undefined,
+        }
+      : undefined;
 
   return {
     port: Number.isFinite(port) && port > 0 ? port : 8080,
@@ -76,6 +95,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     authProvider,
     oidc,
     workos,
+    githubApp,
     isProduction: env.NODE_ENV === "production" || Boolean(env.RAILWAY_ENVIRONMENT),
     devAuthEnabled: env.REGISTRY_DEV_AUTH === "1" && env.NODE_ENV !== "production",
   };

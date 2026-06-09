@@ -72,6 +72,10 @@ REGISTRY_AUTH_PROVIDER=workos
 WORKOS_API_KEY=<WorkOS API key>
 WORKOS_CLIENT_ID=<WorkOS client id>
 WORKOS_API_BASE_URL=https://api.workos.com
+GITHUB_APP_SLUG=<registry GitHub App slug>
+GITHUB_APP_CLIENT_ID=<registry GitHub App client id>
+GITHUB_APP_CLIENT_SECRET=<registry GitHub App client secret>
+GITHUB_APP_WEBHOOK_SECRET=<registry GitHub App webhook secret>
 ```
 
 The production login path uses the same WorkOS/AuthKit application family as
@@ -98,6 +102,26 @@ JSON store, which is suitable for development but not for production.
 The registry stores reviews against `gascity_user_id`. With WorkOS auth this is
 the stable WorkOS user id. With OIDC auth, the app defaults to the OIDC `sub`
 claim until `auth.gascity.com` emits a dedicated `gascity_user_id` claim.
+
+Pack ownership uses a GitHub App verification flow. The app should be configured
+with:
+
+```text
+Callback URL: https://registry.gascity.com/api/ownership/github/callback
+Setup URL: https://registry.gascity.com/
+Webhook URL: https://registry.gascity.com/api/github/webhook
+Repository permissions: Metadata read-only
+Webhooks: installation, installation_repositories
+Request user authorization during installation: enabled
+```
+
+The source code is safe to publish as long as environment values stay out of
+git. `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_WEBHOOK_SECRET`, `WORKOS_API_KEY`,
+`DATABASE_URL`, and `SESSION_SECRET` are secrets. The GitHub App slug and client
+id are identifiers, but they still live in environment configuration so the same
+code can run in local, staging, and production. The registry discards GitHub user
+access tokens after each ownership verification and stores only immutable GitHub
+owner/repository ids plus the local publisher mapping.
 
 The app defaults to the generated aggregate JSON:
 

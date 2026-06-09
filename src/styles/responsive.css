@@ -160,6 +160,18 @@
     grid-template-columns: 1fr;
   }
 
+  .ownershipPanel {
+    grid-template-columns: 1fr;
+  }
+
+  .ownershipActions {
+    justify-content: stretch;
+  }
+
+  .ownershipActions > * {
+    flex: 1 1 140px;
+  }
+
   .reviewsHeader,
   .reviewComposerHeader,
   .reviewItemHeader,

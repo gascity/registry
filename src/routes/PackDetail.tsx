@@ -5,6 +5,7 @@ import {
   ExternalLink,
   FileCode2,
   GitBranch,
+  Loader2,
   ShieldCheck,
 } from "lucide-react";
 import type React from "react";
@@ -22,7 +23,7 @@ import {
   StatusBadge,
   type CatalogStatus,
 } from "../components/RegistryPrimitives";
-import type { AuthState } from "../lib/api";
+import { apiRequest, type AuthState, type PackOwnership } from "../lib/api";
 import {
   buildImportCommands,
   categoryForPack,
@@ -145,7 +146,14 @@ export function PackDetail({
         </section>
       ) : null}
 
-      <PackDetailTabs pack={pack} latest={latest} sortedReleases={sortedReleases} />
+      <PackDetailTabs
+        pack={pack}
+        latest={latest}
+        sortedReleases={sortedReleases}
+        auth={auth}
+        signIn={signIn}
+        devSignIn={devSignIn}
+      />
       <ReviewPanel
         pack={pack}
         auth={auth}
@@ -161,10 +169,16 @@ function PackDetailTabs({
   pack,
   latest,
   sortedReleases,
+  auth,
+  signIn,
+  devSignIn,
 }: {
   pack: CatalogPack;
   latest: CatalogRelease | undefined;
   sortedReleases: CatalogRelease[];
+  auth: AuthState;
+  signIn: () => void;
+  devSignIn: () => void;
 }) {
   const defaultTab = pack.readme ? "readme" : "install";
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -259,7 +273,9 @@ function PackDetailTabs({
         {activeTab === "releases" ? <ReleasesTab releases={sortedReleases} /> : null}
         {activeTab === "metadata" ? <MetadataTab pack={pack} latest={latest} /> : null}
         {activeTab === "source" ? <SourceTab pack={pack} /> : null}
-        {activeTab === "trust" ? <TrustTab /> : null}
+        {activeTab === "trust" ? (
+          <TrustTab pack={pack} auth={auth} signIn={signIn} devSignIn={devSignIn} />
+        ) : null}
       </div>
     </section>
   );
@@ -395,15 +411,130 @@ function SourceTab({ pack }: { pack: CatalogPack }) {
   );
 }
 
-function TrustTab() {
+function TrustTab({
+  pack,
+  auth,
+  signIn,
+  devSignIn,
+}: {
+  pack: CatalogPack;
+  auth: AuthState;
+  signIn: () => void;
+  devSignIn: () => void;
+}) {
+  const [ownership, setOwnership] = useState<PackOwnership | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    setError(null);
+    apiRequest<PackOwnership>(
+      `/api/ownership?packKey=${encodeURIComponent(pack.packKey)}&sourceUrl=${encodeURIComponent(
+        pack.source,
+      )}`,
+    )
+      .then((result) => {
+        if (!cancelled) setOwnership(result);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load ownership.");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pack.packKey, pack.source]);
+
+  const verifyOwnership = async () => {
+    setIsVerifying(true);
+    setError(null);
+    try {
+      const result = await apiRequest<{ authorizationUrl: string }>(
+        "/api/ownership/github/start",
+        {
+          method: "POST",
+          body: JSON.stringify({ packKey: pack.packKey, sourceUrl: pack.source }),
+        },
+        auth.csrfToken,
+      );
+      window.location.href = result.authorizationUrl;
+    } catch (err) {
+      setIsVerifying(false);
+      setError(err instanceof Error ? err.message : "Unable to start GitHub verification.");
+    }
+  };
+
   return (
-    <div className="trustCopy">
-      <ShieldCheck size={24} aria-hidden="true" />
-      <p className="mutedText">
-        Releases are content-addressed by the same <code>sha256:&lt;hex&gt;</code> field validated
-        by Gas City's pack registry implementation. The website catalog is regenerated from source
-        registries and does not add author-managed package metadata.
-      </p>
+    <div className="trustStack">
+      <div className="trustCopy">
+        <ShieldCheck size={24} aria-hidden="true" />
+        <p className="mutedText">
+          Releases are content-addressed by the same <code>sha256:&lt;hex&gt;</code> field validated
+          by Gas City's pack registry implementation. The website catalog is regenerated from source
+          registries and does not add author-managed package metadata.
+        </p>
+      </div>
+      <div className="ownershipPanel">
+        <div>
+          <p className="eyebrow">Source attribution</p>
+          <h3>{ownership?.sourceRepository?.fullName ?? shortSource(pack.source)}</h3>
+          {isLoading ? (
+            <p className="mutedText">
+              <Loader2 className="spin" size={14} aria-hidden="true" /> Checking ownership
+            </p>
+          ) : ownership?.verificationStatus === "verified" && ownership.publisher ? (
+            <p className="ownershipStatus verified">
+              <ShieldCheck size={15} aria-hidden="true" />
+              Verified publisher @{ownership.publisher.handle}
+            </p>
+          ) : (
+            <p className="ownershipStatus">Unverified source</p>
+          )}
+        </div>
+        {ownership?.verificationStatus === "verified" ? null : auth.user ? (
+          <div className="ownershipActions">
+            {ownership?.githubApp?.installUrl ? (
+              <a className="smallMutedButton" href={ownership.githubApp.installUrl} rel="noreferrer">
+                <GitBranch size={15} aria-hidden="true" />
+                Install app
+              </a>
+            ) : null}
+            <button
+              className="iconTextButton"
+              type="button"
+              disabled={!ownership?.githubApp?.configured || isVerifying}
+              onClick={() => void verifyOwnership()}
+            >
+              {isVerifying ? (
+                <Loader2 className="spin" size={15} aria-hidden="true" />
+              ) : (
+                <GitBranch size={15} aria-hidden="true" />
+              )}
+              Verify
+            </button>
+          </div>
+        ) : (
+          <div className="ownershipActions">
+            {auth.devAuthEnabled ? (
+              <button className="smallMutedButton" type="button" onClick={devSignIn}>
+                Dev sign in
+              </button>
+            ) : null}
+            <button className="iconTextButton" type="button" onClick={signIn}>
+              Sign in
+            </button>
+          </div>
+        )}
+        {error ? <p className="formError">{error}</p> : null}
+        {!isLoading && auth.user && !ownership?.githubApp?.configured ? (
+          <p className="mutedText">GitHub App verification is not configured in this environment.</p>
+        ) : null}
+      </div>
     </div>
   );
 }

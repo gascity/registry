@@ -50,6 +50,33 @@ export type ReviewInput = {
   recommend: boolean;
 };
 
+export type PackOwnership = {
+  packKey: string;
+  sourceUrl: string;
+  sourceRepository?: {
+    host: "github.com";
+    owner: string;
+    name: string;
+    fullName: string;
+  };
+  verificationStatus: "unverified" | "verified";
+  verificationMethod?: "github_app_user_token" | "manual";
+  publisher?: {
+    id: string;
+    handle: string;
+    displayName: string;
+    kind: "user" | "org";
+    trusted: boolean;
+    githubOwnerLogin?: string;
+    githubOwnerId?: string;
+  };
+  verifiedAt?: string;
+  githubApp?: {
+    configured: boolean;
+    installUrl?: string;
+  };
+};
+
 const signedOutState: AuthState = {
   user: null,
   csrfToken: null,

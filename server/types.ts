@@ -66,6 +66,46 @@ export type AccountReview = ReviewRow & {
   packKey: string;
 };
 
+export type PublisherSummary = {
+  id: string;
+  handle: string;
+  displayName: string;
+  kind: "user" | "org";
+  trusted: boolean;
+  githubOwnerLogin?: string;
+  githubOwnerId?: string;
+};
+
+export type SourceRepository = {
+  host: "github.com";
+  owner: string;
+  name: string;
+  fullName: string;
+};
+
+export type PackOwnership = {
+  packKey: string;
+  sourceUrl: string;
+  githubRepositoryId?: string;
+  sourceRepository?: SourceRepository;
+  verificationStatus: "unverified" | "verified";
+  verificationMethod?: "github_app_user_token" | "manual";
+  publisher?: PublisherSummary;
+  verifiedAt?: string;
+};
+
+export type VerifiedPackOwnershipInput = {
+  packKey: string;
+  sourceUrl: string;
+  githubRepositoryId: string;
+  githubRepositoryFullName: string;
+  githubRepositoryName: string;
+  githubOwnerId: string;
+  githubOwnerLogin: string;
+  githubOwnerType: "User" | "Organization";
+  verificationMethod: "github_app_user_token" | "manual";
+};
+
 export interface RegistryStore {
   readonly kind: "file" | "postgres";
   init(): Promise<void>;
@@ -87,4 +127,13 @@ export interface RegistryStore {
   }>;
   listAccountReviews(userId: string): Promise<AccountReview[]>;
   setStar(userId: string, packKey: string, starred: boolean): Promise<{ starred: boolean }>;
+  getPackOwnership(packKey: string, sourceUrl: string): Promise<PackOwnership | null>;
+  upsertVerifiedPackOwnership(
+    userId: string,
+    input: VerifiedPackOwnershipInput,
+  ): Promise<PackOwnership>;
+  deletePackOwnershipsForGithubRepositoryIds(
+    repositoryIds: string[],
+    reason: string,
+  ): Promise<number>;
 }

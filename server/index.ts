@@ -9,8 +9,20 @@ import {
   startLogin,
   AuthError,
 } from "./auth";
+import { requireCatalogPackSource } from "./catalog";
 import { createStore, StoreValidationError } from "./store";
 import { RequestError, assertOrigin, errorJson, json, readJsonBody } from "./http";
+import {
+  githubAppConfigured,
+  githubAppInstallUrl,
+  githubAuthorizationUrl,
+  parseGitHubSource,
+  revokedRepositoryIdsFromWebhook,
+  signGitHubClaimState,
+  validateGitHubWebhook,
+  verifyGitHubClaimState,
+  verifyGitHubPackOwnership,
+} from "./github";
 import type { ReviewInput } from "./types";
 
 const config = loadConfig();
@@ -78,6 +90,86 @@ async function handleApi(request: Request) {
     return await clearSession(request, config, store);
   }
 
+  if (request.method === "GET" && url.pathname === "/api/ownership") {
+    const packKey = requirePackKey(url);
+    const sourceUrl = requireSourceUrl(url);
+    await requireCatalogPackSource(packKey, sourceUrl);
+    const sourceRepository = parseGitHubSource(sourceUrl);
+    const ownership = await store.getPackOwnership(packKey, sourceUrl);
+    return json({
+      packKey,
+      sourceUrl,
+      sourceRepository,
+      verificationStatus: ownership?.verificationStatus ?? "unverified",
+      verificationMethod: ownership?.verificationMethod,
+      publisher: ownership?.publisher,
+      verifiedAt: ownership?.verifiedAt,
+      githubApp: {
+        configured: githubAppConfigured(config),
+        installUrl: githubAppInstallUrl(config),
+      },
+    });
+  }
+  if (request.method === "POST" && url.pathname === "/api/ownership/github/start") {
+    requireCsrf(request, session);
+    const body = await readJsonBody<{ packKey?: string; sourceUrl?: string }>(request);
+    const packKey = body.packKey?.trim();
+    const sourceUrl = body.sourceUrl?.trim();
+    if (!packKey || !sourceUrl) {
+      throw new RequestError(422, "VALIDATION_ERROR", "Pack key and source URL are required.");
+    }
+    const pack = await requireCatalogPackSource(packKey, sourceUrl);
+    const sourceRepository = parseGitHubSource(sourceUrl);
+    if (!sourceRepository) {
+      throw new RequestError(422, "UNSUPPORTED_SOURCE", "Only GitHub source repositories can be verified.");
+    }
+    const state = signGitHubClaimState(config, {
+      userId: session!.user.id,
+      packKey,
+      sourceUrl,
+      redirectTo: `/packs/${encodeURIComponent(pack.name)}#trust`,
+    });
+    return json({ authorizationUrl: githubAuthorizationUrl(config, state) });
+  }
+  if (request.method === "GET" && url.pathname === "/api/ownership/github/callback") {
+    if (!session) throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    if (!code || !state) {
+      throw new RequestError(400, "BAD_GITHUB_CALLBACK", "GitHub verification callback is incomplete.");
+    }
+    const claim = verifyGitHubClaimState(config, state);
+    if (claim.userId !== session.user.id) {
+      throw new RequestError(403, "BAD_GITHUB_STATE", "GitHub verification state is invalid.");
+    }
+    await requireCatalogPackSource(claim.packKey, claim.sourceUrl);
+    const sourceRepository = parseGitHubSource(claim.sourceUrl);
+    if (!sourceRepository) {
+      throw new RequestError(422, "UNSUPPORTED_SOURCE", "Only GitHub source repositories can be verified.");
+    }
+    const verified = await verifyGitHubPackOwnership(config, code, sourceRepository);
+    await store.upsertVerifiedPackOwnership(session.user.id, {
+      ...verified,
+      packKey: claim.packKey,
+      sourceUrl: claim.sourceUrl,
+    });
+    return new Response(null, {
+      status: 302,
+      headers: { Location: claim.redirectTo },
+    });
+  }
+  if (request.method === "POST" && url.pathname === "/api/github/webhook") {
+    const webhook = await validateGitHubWebhook(request, config);
+    const revokedRepositoryIds = revokedRepositoryIdsFromWebhook(webhook.event, webhook.payload);
+    if (revokedRepositoryIds.length > 0) {
+      await store.deletePackOwnershipsForGithubRepositoryIds(
+        revokedRepositoryIds,
+        `github.${webhook.event}`,
+      );
+    }
+    return new Response(null, { status: 204 });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/reviews") {
     const packKey = requirePackKey(url);
     return json(await store.listReviews(packKey, session?.user.id));
@@ -128,6 +220,12 @@ function requirePackKey(url: URL) {
   const packKey = url.searchParams.get("packKey")?.trim();
   if (!packKey) throw new RequestError(422, "VALIDATION_ERROR", "Pack key required.");
   return packKey;
+}
+
+function requireSourceUrl(url: URL) {
+  const sourceUrl = url.searchParams.get("sourceUrl")?.trim();
+  if (!sourceUrl) throw new RequestError(422, "VALIDATION_ERROR", "Source URL required.");
+  return sourceUrl;
 }
 
 async function serveStatic(url: URL) {

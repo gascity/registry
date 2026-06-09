@@ -297,6 +297,65 @@
   gap: 14px;
 }
 
+.trustStack {
+  display: grid;
+  gap: 18px;
+}
+
+.ownershipPanel {
+  display: grid;
+  max-width: 760px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(169, 206, 255, 0.04);
+  padding: 14px;
+}
+
+.ownershipPanel h3 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.ownershipStatus {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 9px;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+}
+
+.ownershipStatus.verified {
+  border-color: rgba(242, 217, 149, 0.4);
+  background: rgba(242, 217, 149, 0.08);
+  color: var(--gc-gold-bright);
+}
+
+.ownershipActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ownershipPanel .formError,
+.ownershipPanel > .mutedText {
+  grid-column: 1 / -1;
+}
+
+.ownershipPanel .mutedText {
+  margin: 0;
+}
+
 .releaseTable {
   display: grid;
   gap: 10px;

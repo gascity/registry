@@ -73,6 +73,8 @@ test("pack detail exposes README and tabbed metadata", async ({ page }) => {
 
   await page.getByRole("tab", { name: /Trust/ }).click();
   await expect(page.getByText(/content-addressed/)).toBeVisible();
+  await expect(page.getByText("Source attribution")).toBeVisible();
+  await expect(page.getByText("Unverified source")).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 

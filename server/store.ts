@@ -5,6 +5,8 @@ import { randomToken, sha256 } from "./crypto";
 import type {
   AccountReview,
   IdentityClaims,
+  PackOwnership,
+  PublisherSummary,
   PublicUser,
   RegistryStore,
   ReviewInput,
@@ -12,6 +14,7 @@ import type {
   ReviewRow,
   SessionRecord,
   SessionUser,
+  VerifiedPackOwnershipInput,
 } from "./types";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -21,6 +24,7 @@ const idPrefix = {
   review: "rev",
   report: "rpt",
   audit: "aud",
+  publisher: "pub",
 } as const;
 
 export function createStore(databaseUrl: string | undefined, localDataPath?: string): RegistryStore {
@@ -42,6 +46,10 @@ function normalizeHandle(value: string | undefined) {
   return handle.replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 }
 
+function normalizePublisherHandle(value: string | undefined) {
+  return normalizeHandle(value) ?? "publisher";
+}
+
 function publicUser(row: {
   id: string;
   handle: string;
@@ -57,6 +65,26 @@ function publicUser(row: {
     avatarUrl: row.avatar_url ?? undefined,
     email: row.email ?? undefined,
     role: row.role === "admin" || row.role === "moderator" ? row.role : "user",
+  };
+}
+
+function publicPublisher(row: {
+  id: string;
+  handle: string;
+  display_name: string;
+  kind: string;
+  trusted?: boolean | null;
+  github_owner_login?: string | null;
+  github_owner_id?: string | null;
+}): PublisherSummary {
+  return {
+    id: row.id,
+    handle: row.handle,
+    displayName: row.display_name,
+    kind: row.kind === "org" ? "org" : "user",
+    trusted: Boolean(row.trusted),
+    githubOwnerLogin: row.github_owner_login ?? undefined,
+    githubOwnerId: row.github_owner_id ?? undefined,
   };
 }
 
@@ -110,6 +138,34 @@ function reviewFromRows(review: any, user: PublicUser, viewerUserId?: string): R
       Boolean(viewerUserId && viewerUserId === user.id) ||
       user.role === "admin" ||
       user.role === "moderator",
+  };
+}
+
+function ownershipFromRows(row: any): PackOwnership {
+  return {
+    packKey: row.pack_key,
+    sourceUrl: row.source_url,
+    githubRepositoryId: row.github_repository_id,
+    sourceRepository: {
+      host: "github.com",
+      owner: row.github_owner_login,
+      name: row.github_repository_name,
+      fullName: row.github_repository_full_name,
+    },
+    verificationStatus: "verified",
+    verificationMethod: row.verification_method,
+    verifiedAt: row.verified_at ? toIso(row.verified_at) : undefined,
+    publisher: row.publisher_id
+      ? publicPublisher({
+          id: row.publisher_id,
+          handle: row.publisher_handle,
+          display_name: row.publisher_display_name,
+          kind: row.publisher_kind,
+          trusted: row.publisher_trusted,
+          github_owner_login: row.publisher_github_owner_login,
+          github_owner_id: row.publisher_github_owner_id,
+        })
+      : undefined,
   };
 }
 
@@ -208,6 +264,55 @@ export class PostgresRegistryStore implements RegistryStore {
         PRIMARY KEY (pack_key, user_id)
       )
     `;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS publishers (
+        id text PRIMARY KEY,
+        handle text NOT NULL,
+        display_name text NOT NULL,
+        kind text NOT NULL CHECK (kind IN ('user', 'org')),
+        trusted boolean NOT NULL DEFAULT false,
+        github_owner_login text,
+        github_owner_id text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `;
+    await this.sql`CREATE UNIQUE INDEX IF NOT EXISTS publishers_handle_unique ON publishers (lower(handle))`;
+    await this.sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS publishers_github_owner_id_unique
+      ON publishers (github_owner_id)
+      WHERE github_owner_id IS NOT NULL
+    `;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS publisher_members (
+        publisher_id text NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
+        user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role text NOT NULL CHECK (role IN ('owner', 'admin', 'publisher')),
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (publisher_id, user_id)
+      )
+    `;
+    await this.sql`CREATE INDEX IF NOT EXISTS publisher_members_user_idx ON publisher_members (user_id)`;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS pack_ownerships (
+        pack_key text PRIMARY KEY,
+        source_url text NOT NULL,
+        publisher_id text NOT NULL REFERENCES publishers(id) ON DELETE RESTRICT,
+        github_repository_id text NOT NULL,
+        github_repository_full_name text NOT NULL,
+        github_repository_name text NOT NULL,
+        github_owner_id text NOT NULL,
+        github_owner_login text NOT NULL,
+        verification_method text NOT NULL,
+        verified_by_user_id text REFERENCES users(id) ON DELETE SET NULL,
+        verified_at timestamptz NOT NULL DEFAULT now(),
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `;
+    await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_publisher_idx ON pack_ownerships (publisher_id)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_github_repository_idx ON pack_ownerships (github_repository_id)`;
     await this.sql`
       CREATE TABLE IF NOT EXISTS audit_logs (
         id text PRIMARY KEY,
@@ -503,6 +608,104 @@ export class PostgresRegistryStore implements RegistryStore {
     return { starred };
   }
 
+  async getPackOwnership(packKey: string, sourceUrl: string): Promise<PackOwnership | null> {
+    const rows = await this.sql`
+      SELECT
+        pack_ownerships.*,
+        publishers.id AS publisher_id,
+        publishers.handle AS publisher_handle,
+        publishers.display_name AS publisher_display_name,
+        publishers.kind AS publisher_kind,
+        publishers.trusted AS publisher_trusted,
+        publishers.github_owner_login AS publisher_github_owner_login,
+        publishers.github_owner_id AS publisher_github_owner_id
+      FROM pack_ownerships
+      JOIN publishers ON publishers.id = pack_ownerships.publisher_id
+      WHERE pack_ownerships.pack_key = ${packKey}
+        AND pack_ownerships.source_url = ${sourceUrl}
+      LIMIT 1
+    `;
+    return rows[0] ? ownershipFromRows(rows[0]) : null;
+  }
+
+  async upsertVerifiedPackOwnership(
+    userId: string,
+    input: VerifiedPackOwnershipInput,
+  ): Promise<PackOwnership> {
+    const existing = await this.sql`
+      SELECT source_url FROM pack_ownerships WHERE pack_key = ${input.packKey} LIMIT 1
+    `;
+    if (existing[0] && existing[0].source_url !== input.sourceUrl) {
+      throw new StoreValidationError("Pack ownership source does not match the catalog.");
+    }
+
+    const publisher = await this.ensureGithubPublisher(input);
+    const memberRole = input.githubOwnerType === "User" ? "owner" : "publisher";
+    await this.sql`
+      INSERT INTO publisher_members (publisher_id, user_id, role)
+      VALUES (${publisher.id}, ${userId}, ${memberRole})
+      ON CONFLICT (publisher_id, user_id) DO UPDATE SET
+        role = CASE
+          WHEN publisher_members.role = 'owner' THEN 'owner'
+          WHEN publisher_members.role = 'admin' AND EXCLUDED.role <> 'owner' THEN 'admin'
+          ELSE EXCLUDED.role
+        END,
+        updated_at = now()
+    `;
+
+    await this.sql`
+      INSERT INTO pack_ownerships (
+        pack_key, source_url, publisher_id, github_repository_id, github_repository_full_name,
+        github_repository_name, github_owner_id, github_owner_login, verification_method,
+        verified_by_user_id, verified_at, created_at, updated_at
+      )
+      VALUES (
+        ${input.packKey}, ${input.sourceUrl}, ${publisher.id}, ${input.githubRepositoryId},
+        ${input.githubRepositoryFullName}, ${input.githubRepositoryName}, ${input.githubOwnerId},
+        ${input.githubOwnerLogin}, ${input.verificationMethod}, ${userId}, now(), now(), now()
+      )
+      ON CONFLICT (pack_key) DO UPDATE SET
+        source_url = EXCLUDED.source_url,
+        publisher_id = EXCLUDED.publisher_id,
+        github_repository_id = EXCLUDED.github_repository_id,
+        github_repository_full_name = EXCLUDED.github_repository_full_name,
+        github_repository_name = EXCLUDED.github_repository_name,
+        github_owner_id = EXCLUDED.github_owner_id,
+        github_owner_login = EXCLUDED.github_owner_login,
+        verification_method = EXCLUDED.verification_method,
+        verified_by_user_id = EXCLUDED.verified_by_user_id,
+        verified_at = EXCLUDED.verified_at,
+        updated_at = EXCLUDED.updated_at
+    `;
+    await this.audit(userId, "pack_ownership.verify", "pack", input.packKey, {
+      sourceUrl: input.sourceUrl,
+      githubRepositoryId: input.githubRepositoryId,
+      githubRepositoryFullName: input.githubRepositoryFullName,
+      publisherId: publisher.id,
+      verificationMethod: input.verificationMethod,
+    });
+    const ownership = await this.getPackOwnership(input.packKey, input.sourceUrl);
+    if (!ownership) throw new Error("Pack ownership verification failed.");
+    return ownership;
+  }
+
+  async deletePackOwnershipsForGithubRepositoryIds(repositoryIds: string[], reason: string) {
+    const ids = [...new Set(repositoryIds.filter(Boolean))];
+    if (ids.length === 0) return 0;
+    const rows = await this.sql`
+      DELETE FROM pack_ownerships
+      WHERE github_repository_id IN ${this.sql(ids)}
+      RETURNING pack_key, github_repository_id
+    `;
+    for (const row of rows) {
+      await this.auditSystem("pack_ownership.revoke", "pack", row.pack_key, {
+        githubRepositoryId: row.github_repository_id,
+        reason,
+      });
+    }
+    return rows.length;
+  }
+
   private async resolveHandle(rawHandle: string | undefined, userId: string) {
     const base = normalizeHandle(rawHandle) ?? "user";
     for (let index = 1; index <= 50; index += 1) {
@@ -514,6 +717,52 @@ export class PostgresRegistryStore implements RegistryStore {
       if (rows.length === 0) return candidate;
     }
     return `${base.slice(0, 31)}-${randomToken(4).toLowerCase()}`;
+  }
+
+  private async resolvePublisherHandle(rawHandle: string | undefined, publisherId: string) {
+    const base = normalizePublisherHandle(rawHandle);
+    for (let index = 1; index <= 50; index += 1) {
+      const suffix = index === 1 ? "" : `-${index}`;
+      const candidate = `${base.slice(0, 40 - suffix.length)}${suffix}`;
+      const rows = await this.sql`
+        SELECT id FROM publishers WHERE lower(handle) = lower(${candidate}) AND id <> ${publisherId} LIMIT 1
+      `;
+      if (rows.length === 0) return candidate;
+    }
+    return `${base.slice(0, 31)}-${randomToken(4).toLowerCase()}`;
+  }
+
+  private async ensureGithubPublisher(input: VerifiedPackOwnershipInput): Promise<PublisherSummary> {
+    const existing = await this.sql`
+      SELECT * FROM publishers WHERE github_owner_id = ${input.githubOwnerId} LIMIT 1
+    `;
+    const kind = input.githubOwnerType === "Organization" ? "org" : "user";
+    if (existing[0]) {
+      const [updated] = await this.sql`
+        UPDATE publishers
+        SET github_owner_login = ${input.githubOwnerLogin},
+            display_name = COALESCE(NULLIF(display_name, ''), ${input.githubOwnerLogin}),
+            kind = ${kind},
+            updated_at = now()
+        WHERE id = ${existing[0].id}
+        RETURNING *
+      `;
+      return publicPublisher(updated as any);
+    }
+
+    const id = newId("publisher");
+    const handle = await this.resolvePublisherHandle(input.githubOwnerLogin, id);
+    const [created] = await this.sql`
+      INSERT INTO publishers (
+        id, handle, display_name, kind, trusted, github_owner_login, github_owner_id
+      )
+      VALUES (
+        ${id}, ${handle}, ${input.githubOwnerLogin}, ${kind}, false,
+        ${input.githubOwnerLogin}, ${input.githubOwnerId}
+      )
+      RETURNING *
+    `;
+    return publicPublisher(created as any);
   }
 
   private async audit(
@@ -530,6 +779,20 @@ export class PostgresRegistryStore implements RegistryStore {
       )})
     `;
   }
+
+  private async auditSystem(
+    action: string,
+    targetType: string,
+    targetId: string,
+    metadata: Record<string, unknown>,
+  ) {
+    await this.sql`
+      INSERT INTO audit_logs (id, actor_user_id, action, target_type, target_id, metadata)
+      VALUES (${newId("audit")}, NULL, ${action}, ${targetType}, ${targetId}, ${this.sql.json(
+        metadata as any,
+      )})
+    `;
+  }
 }
 
 type FileState = {
@@ -538,6 +801,9 @@ type FileState = {
   reviews: ReviewRow[];
   reports: string[];
   stars: string[];
+  publishers?: PublisherSummary[];
+  publisherMembers?: Array<{ publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>;
+  ownerships?: PackOwnership[];
 };
 
 class FileRegistryStore implements RegistryStore {
@@ -550,6 +816,9 @@ class FileRegistryStore implements RegistryStore {
   private reviews = new Map<string, ReviewRow>();
   private reports = new Set<string>();
   private stars = new Set<string>();
+  private publishers = new Map<string, PublisherSummary>();
+  private publisherMembers = new Map<string, { publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>();
+  private ownerships = new Map<string, PackOwnership>();
   private readonly filePath: string;
 
   constructor(filePath: string) {
@@ -586,6 +855,11 @@ class FileRegistryStore implements RegistryStore {
       for (const review of raw.reviews ?? []) this.reviews.set(review.id, review);
       this.reports = new Set(raw.reports ?? []);
       this.stars = new Set(raw.stars ?? []);
+      for (const publisher of raw.publishers ?? []) this.publishers.set(publisher.id, publisher);
+      for (const member of raw.publisherMembers ?? []) {
+        this.publisherMembers.set(`${member.publisherId}:${member.userId}`, member);
+      }
+      for (const ownership of raw.ownerships ?? []) this.ownerships.set(ownership.packKey, ownership);
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error;
     }
@@ -734,6 +1008,61 @@ class FileRegistryStore implements RegistryStore {
     return { starred };
   }
 
+  async getPackOwnership(packKey: string, sourceUrl: string): Promise<PackOwnership | null> {
+    const ownership = this.ownerships.get(packKey);
+    if (!ownership || ownership.sourceUrl !== sourceUrl) return null;
+    return ownership;
+  }
+
+  async upsertVerifiedPackOwnership(userId: string, input: VerifiedPackOwnershipInput) {
+    const existing = this.ownerships.get(input.packKey);
+    if (existing && existing.sourceUrl !== input.sourceUrl) {
+      throw new StoreValidationError("Pack ownership source does not match the catalog.");
+    }
+
+    const publisher = this.ensureGithubPublisher(input);
+    const role = input.githubOwnerType === "User" ? "owner" : "publisher";
+    const memberKey = `${publisher.id}:${userId}`;
+    const existingMember = this.publisherMembers.get(memberKey);
+    this.publisherMembers.set(memberKey, {
+      publisherId: publisher.id,
+      userId,
+      role: existingMember?.role === "owner" || existingMember?.role === "admin" ? existingMember.role : role,
+    });
+
+    const ownership: PackOwnership = {
+      packKey: input.packKey,
+      sourceUrl: input.sourceUrl,
+      githubRepositoryId: input.githubRepositoryId,
+      sourceRepository: {
+        host: "github.com",
+        owner: input.githubOwnerLogin,
+        name: input.githubRepositoryName,
+        fullName: input.githubRepositoryFullName,
+      },
+      verificationStatus: "verified",
+      verificationMethod: input.verificationMethod,
+      verifiedAt: new Date().toISOString(),
+      publisher,
+    };
+    this.ownerships.set(input.packKey, ownership);
+    await this.save();
+    return ownership;
+  }
+
+  async deletePackOwnershipsForGithubRepositoryIds(repositoryIds: string[], _reason: string) {
+    const ids = new Set(repositoryIds);
+    let deleted = 0;
+    for (const [packKey, ownership] of this.ownerships) {
+      if (ownership.githubRepositoryId && ids.has(ownership.githubRepositoryId)) {
+        this.ownerships.delete(packKey);
+        deleted += 1;
+      }
+    }
+    if (deleted > 0) await this.save();
+    return deleted;
+  }
+
   private async save() {
     await mkdir(dirname(this.filePath), { recursive: true });
     const state: FileState = {
@@ -748,8 +1077,45 @@ class FileRegistryStore implements RegistryStore {
       reviews: [...this.reviews.values()],
       reports: [...this.reports],
       stars: [...this.stars],
+      publishers: [...this.publishers.values()],
+      publisherMembers: [...this.publisherMembers.values()],
+      ownerships: [...this.ownerships.values()],
     };
     await writeFile(this.filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  }
+
+  private ensureGithubPublisher(input: VerifiedPackOwnershipInput): PublisherSummary {
+    const existing = [...this.publishers.values()].find(
+      (publisher) => publisher.githubOwnerId === input.githubOwnerId,
+    );
+    const kind = input.githubOwnerType === "Organization" ? "org" : "user";
+    if (existing) {
+      existing.githubOwnerLogin = input.githubOwnerLogin;
+      existing.displayName = existing.displayName || input.githubOwnerLogin;
+      existing.kind = kind;
+      this.publishers.set(existing.id, existing);
+      return existing;
+    }
+
+    const id = newId("publisher");
+    const base = normalizePublisherHandle(input.githubOwnerLogin);
+    const taken = new Set([...this.publishers.values()].map((publisher) => publisher.handle));
+    let handle = base;
+    for (let index = 2; taken.has(handle); index += 1) {
+      const suffix = `-${index}`;
+      handle = `${base.slice(0, 40 - suffix.length)}${suffix}`;
+    }
+    const publisher: PublisherSummary = {
+      id,
+      handle,
+      displayName: input.githubOwnerLogin,
+      kind,
+      trusted: false,
+      githubOwnerLogin: input.githubOwnerLogin,
+      githubOwnerId: input.githubOwnerId,
+    };
+    this.publishers.set(id, publisher);
+    return publisher;
   }
 }
 
