@@ -16,16 +16,25 @@ export type CatalogRelease = {
   withdrawnReason?: string;
 };
 
+export type CatalogReadme = {
+  url: string;
+  content: string;
+};
+
 export type CatalogPack = {
+  registry: string;
   name: string;
   description: string;
   source: string;
   sourceKind: string;
+  readme?: CatalogReadme;
+  ogImage?: string;
   releases: CatalogRelease[];
 };
 
 export type RegistryCatalogState = {
   packs: CatalogPack[];
+  ogImage?: string;
   sourceUrl: string;
   loadedFromFallback: boolean;
 };
@@ -55,6 +64,7 @@ type RawRelease = {
 
 type RawJsonCatalog = {
   schema?: unknown;
+  og_image?: unknown;
   packs?: unknown;
 };
 
@@ -64,7 +74,14 @@ type RawJsonPack = {
   description?: unknown;
   source?: unknown;
   source_kind?: unknown;
+  readme?: unknown;
+  og_image?: unknown;
   releases?: unknown;
+};
+
+type RawJsonReadme = {
+  url?: unknown;
+  content?: unknown;
 };
 
 export async function fetchRegistryCatalog(): Promise<RegistryCatalogState> {
@@ -94,7 +111,7 @@ async function fetchCatalogFrom(sourceUrl: string, loadedFromFallback: boolean) 
   return { ...catalog, sourceUrl, loadedFromFallback };
 }
 
-function normalizeCatalog(raw: RawCatalog): { packs: CatalogPack[] } {
+function normalizeCatalog(raw: RawCatalog): { packs: CatalogPack[]; ogImage?: string } {
   const schema = typeof raw.schema === "number" ? raw.schema : 1;
   if (schema !== 1) {
     throw new Error(`Unsupported registry catalog schema ${schema}.`);
@@ -106,7 +123,7 @@ function normalizeCatalog(raw: RawCatalog): { packs: CatalogPack[] } {
   };
 }
 
-function normalizeJsonCatalog(raw: RawJsonCatalog): { packs: CatalogPack[] } {
+function normalizeJsonCatalog(raw: RawJsonCatalog): { packs: CatalogPack[]; ogImage?: string } {
   const schema = typeof raw.schema === "number" ? raw.schema : 1;
   if (schema !== 1) {
     throw new Error(`Unsupported registry catalog schema ${schema}.`);
@@ -114,6 +131,7 @@ function normalizeJsonCatalog(raw: RawJsonCatalog): { packs: CatalogPack[] } {
 
   const rawPacks = Array.isArray(raw.packs) ? raw.packs : [];
   return {
+    ogImage: optionalString(raw.og_image),
     packs: rawPacks
       .map((pack) => normalizeJsonPack(pack as RawJsonPack))
       .sort((a, b) => a.name.localeCompare(b.name)),
@@ -123,10 +141,13 @@ function normalizeJsonCatalog(raw: RawJsonCatalog): { packs: CatalogPack[] } {
 function normalizeJsonPack(raw: RawJsonPack): CatalogPack {
   const name = requireString(raw.name, "pack.name");
   return {
+    registry: optionalString(raw.registry) ?? "aggregate",
     name,
     description: requireString(raw.description, `${name}.description`),
     source: requireString(raw.source, `${name}.source`),
     sourceKind: requireString(raw.source_kind, `${name}.source_kind`),
+    readme: normalizeJsonReadme(raw.readme),
+    ogImage: optionalString(raw.og_image),
     releases: (Array.isArray(raw.releases) ? raw.releases : []).map((release) =>
       normalizeRelease(name, release as RawRelease),
     ),
@@ -136,6 +157,7 @@ function normalizeJsonPack(raw: RawJsonPack): CatalogPack {
 function normalizePack(raw: RawPack): CatalogPack {
   const name = requireString(raw.name, "pack.name");
   return {
+    registry: "registry.toml",
     name,
     description: requireString(raw.description, `${name}.description`),
     source: requireString(raw.source, `${name}.source`),
@@ -144,6 +166,15 @@ function normalizePack(raw: RawPack): CatalogPack {
       normalizeRelease(name, release as RawRelease),
     ),
   };
+}
+
+function normalizeJsonReadme(raw: unknown): CatalogReadme | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const record = raw as RawJsonReadme;
+  const url = optionalString(record.url);
+  const content = optionalString(record.content);
+  if (!url || !content) return undefined;
+  return { url, content };
 }
 
 function normalizeRelease(packName: string, raw: RawRelease): CatalogRelease {
@@ -167,6 +198,10 @@ function requireString(value: unknown, field: string) {
     throw new Error(`Registry catalog is missing ${field}.`);
   }
   return value;
+}
+
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 export function latestActiveRelease(pack: CatalogPack) {

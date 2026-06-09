@@ -26,13 +26,13 @@ jobs:
 
       - name: Commit aggregate updates
         run: |
-          if git diff --quiet -- public/registry.toml public/catalog.json; then
+          if git diff --quiet -- public/registry.toml public/catalog.json public/og; then
             echo "aggregate registry already current"
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/registry.toml public/catalog.json
+          git add public/registry.toml public/catalog.json public/og
           git commit -m "chore: update aggregate registry"
           git push

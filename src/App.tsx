@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   ArrowDownToLine,
+  BookOpen,
   Box,
   CheckCircle2,
   ChevronRight,
@@ -16,7 +17,9 @@ import {
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   buildImportCommands,
   categoryForPack,
@@ -106,11 +109,50 @@ function updateUrl(pathname: string, search: string, replace = false) {
   }
 }
 
+function updatePageMetadata(
+  route: RouteState,
+  catalog: RegistryCatalogState,
+  activePack: CatalogPack | undefined,
+) {
+  const isPack = route.kind === "pack" && activePack;
+  const title = isPack ? `${activePack.name} | Gas City Registry` : "Registry | Gas City";
+  const description = isPack
+    ? activePack.description
+    : "Browse versioned Gas City packs, registry releases, and import commands.";
+  const imagePath = isPack ? activePack.ogImage : catalog.ogImage;
+  const image = imagePath ? new URL(imagePath, window.location.origin).toString() : undefined;
+  const url = new URL(
+    `${window.location.pathname}${window.location.search}`,
+    window.location.origin,
+  ).toString();
+
+  document.title = title;
+  setMeta("name", "description", description);
+  setMeta("property", "og:title", title);
+  setMeta("property", "og:description", description);
+  setMeta("property", "og:type", "website");
+  setMeta("property", "og:url", url);
+  setMeta("name", "twitter:card", "summary_large_image");
+  if (image) {
+    setMeta("property", "og:image", image);
+    setMeta("name", "twitter:image", image);
+  }
+}
+
+function setMeta(attribute: "name" | "property", key: string, content: string) {
+  let tag = document.head.querySelector<HTMLMetaElement>(`meta[${attribute}="${key}"]`);
+  if (!tag) {
+    tag = document.createElement("meta");
+    tag.setAttribute(attribute, key);
+    document.head.appendChild(tag);
+  }
+  tag.content = content;
+}
+
 function App() {
   const [catalogStatus, setCatalogStatus] = useState<CatalogStatus>({ state: "loading" });
   const [route, setRoute] = useState<RouteState>(() => parseRoute(window.location.pathname));
   const [searchState, setSearchState] = useState(() => readSearchState(window.location.search));
-  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -159,15 +201,7 @@ function App() {
   const activePack =
     route.kind === "pack" ? catalog.packs.find((pack) => pack.name === route.name) : undefined;
 
-  const copyCommand = async (command: string) => {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopiedCommand(command);
-      window.setTimeout(() => setCopiedCommand(null), 1800);
-    } catch {
-      setCopiedCommand(null);
-    }
-  };
+  useEffect(() => updatePageMetadata(route, catalog, activePack), [route, catalog, activePack]);
 
   if (route.kind === "pack") {
     return (
@@ -177,8 +211,6 @@ function App() {
           pack={activePack}
           requestedName={route.name}
           onBack={() => navigateHome(searchState)}
-          onCopy={copyCommand}
-          copiedCommand={copiedCommand}
         />
       </AppFrame>
     );
@@ -520,15 +552,11 @@ function PackDetail({
   pack,
   requestedName,
   onBack,
-  onCopy,
-  copiedCommand,
 }: {
   catalogStatus: CatalogStatus;
   pack: CatalogPack | undefined;
   requestedName: string;
   onBack: () => void;
-  onCopy: (command: string) => void;
-  copiedCommand: string | null;
 }) {
   if (catalogStatus.state !== "ready") {
     return (
@@ -556,8 +584,8 @@ function PackDetail({
   }
 
   const latest = latestActiveRelease(pack);
-  const commands = latest ? buildImportCommands(pack, latest.version) : null;
   const sortedReleases = [...pack.releases].sort((a, b) => -compareVersions(a.version, b.version));
+  const activeReleases = pack.releases.filter((release) => !release.withdrawn).length;
 
   return (
     <main className="detailPage">
@@ -575,121 +603,341 @@ function PackDetail({
           <h1>{pack.name}</h1>
           <p>{pack.description}</p>
         </div>
-        <aside className="installPanel" aria-label="Import commands">
-          <h2>Install</h2>
-          {commands ? (
-            <>
-              <CommandBlock
-                label="This version or later"
-                command={commands.floating}
-                copied={copiedCommand === commands.floating}
-                onCopy={() => onCopy(commands.floating)}
-              />
-              <CommandBlock
-                label="Exactly this version"
-                command={commands.exact}
-                copied={copiedCommand === commands.exact}
-                onCopy={() => onCopy(commands.exact)}
-              />
-            </>
-          ) : (
-            <p className="mutedText">This pack has no active release to import.</p>
-          )}
-        </aside>
-      </section>
-
-      <section className="detailGrid">
-        <div className="detailMain">
-          <Panel title="Releases" icon={<ArrowDownToLine size={18} />}>
-            <div className="releaseTable">
-              {sortedReleases.map((release) => (
-                <ReleaseRow key={`${release.version}-${release.commit}`} release={release} />
-              ))}
+        <aside className="detailSnapshot" aria-label="Pack summary">
+          <dl className="metadataList">
+            <div>
+              <dt>Registry</dt>
+              <dd>{pack.registry}</dd>
             </div>
-          </Panel>
-        </div>
-
-        <aside className="detailAside">
-          <Panel title="Metadata" icon={<FileCode2 size={18} />}>
-            <dl className="metadataList">
-              <div>
-                <dt>Source kind</dt>
-                <dd>{pack.sourceKind}</dd>
-              </div>
-              <div>
-                <dt>Latest</dt>
-                <dd>{latest ? `v${latest.version}` : "None"}</dd>
-              </div>
-              <div>
-                <dt>Active releases</dt>
-                <dd>{pack.releases.filter((release) => !release.withdrawn).length}</dd>
-              </div>
-              <div>
-                <dt>Withdrawn releases</dt>
-                <dd>{pack.releases.filter((release) => release.withdrawn).length}</dd>
-              </div>
-            </dl>
-          </Panel>
-
-          <Panel title="Source" icon={<GitBranch size={18} />}>
-            <a className="sourceLink" href={pack.source} rel="noreferrer">
-              <span>{shortSource(pack.source)}</span>
-              <ExternalLink size={16} aria-hidden="true" />
-            </a>
-          </Panel>
-
-          <Panel title="Trust model" icon={<ShieldCheck size={18} />}>
-            <p className="mutedText">
-              Releases are content-addressed by the same <code>sha256:&lt;hex&gt;</code> field
-              validated by Gas City's pack registry implementation.
-            </p>
-          </Panel>
+            <div>
+              <dt>Latest</dt>
+              <dd>{latest ? `v${latest.version}` : "None"}</dd>
+            </div>
+            <div>
+              <dt>Active releases</dt>
+              <dd>{activeReleases}</dd>
+            </div>
+          </dl>
         </aside>
       </section>
+
+      <PackDetailTabs pack={pack} latest={latest} sortedReleases={sortedReleases} />
     </main>
+  );
+}
+
+type DetailTabId = "readme" | "install" | "releases" | "metadata" | "source" | "trust";
+
+type DetailTab = {
+  id: DetailTabId;
+  label: string;
+  icon: React.ReactNode;
+};
+
+function PackDetailTabs({
+  pack,
+  latest,
+  sortedReleases,
+}: {
+  pack: CatalogPack;
+  latest: CatalogRelease | undefined;
+  sortedReleases: CatalogRelease[];
+}) {
+  const defaultTab = pack.readme ? "readme" : "install";
+  const tabs = useMemo(
+    () =>
+      [
+        pack.readme ? { id: "readme", label: "README", icon: <BookOpen size={16} /> } : null,
+        { id: "install", label: "Install", icon: <Copy size={16} /> },
+        { id: "releases", label: "Releases", icon: <ArrowDownToLine size={16} /> },
+        { id: "metadata", label: "Metadata", icon: <FileCode2 size={16} /> },
+        { id: "source", label: "Source", icon: <GitBranch size={16} /> },
+        { id: "trust", label: "Trust", icon: <ShieldCheck size={16} /> },
+      ].filter(Boolean) as DetailTab[],
+    [pack.readme],
+  );
+  const [activeTab, setActiveTab] = useState<DetailTabId>(() =>
+    readDetailTabFromHash(tabs, defaultTab),
+  );
+
+  useEffect(() => {
+    const syncHash = () => setActiveTab(readDetailTabFromHash(tabs, defaultTab));
+    syncHash();
+    window.addEventListener("hashchange", syncHash);
+    return () => window.removeEventListener("hashchange", syncHash);
+  }, [defaultTab, pack.name, tabs]);
+
+  const selectTab = (tab: DetailTabId) => {
+    setActiveTab(tab);
+    const hash = tab === defaultTab ? "" : `#${tab}`;
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}${hash}`,
+    );
+  };
+
+  return (
+    <section className="tabCard" aria-label="Pack details">
+      <div className="tabHeader" role="tablist" aria-label={`${pack.name} detail tabs`}>
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={activeTab === tab.id ? "tabButton active" : "tabButton"}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            aria-controls={`pack-tabpanel-${tab.id}`}
+            id={`pack-tab-${tab.id}`}
+            onClick={() => selectTab(tab.id)}
+          >
+            <span aria-hidden="true">{tab.icon}</span>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div
+        className="tabBody"
+        role="tabpanel"
+        id={`pack-tabpanel-${activeTab}`}
+        aria-labelledby={`pack-tab-${activeTab}`}
+      >
+        {activeTab === "readme" ? <ReadmeTab pack={pack} /> : null}
+        {activeTab === "install" ? <InstallTab pack={pack} latest={latest} /> : null}
+        {activeTab === "releases" ? <ReleasesTab releases={sortedReleases} /> : null}
+        {activeTab === "metadata" ? <MetadataTab pack={pack} latest={latest} /> : null}
+        {activeTab === "source" ? <SourceTab pack={pack} /> : null}
+        {activeTab === "trust" ? <TrustTab /> : null}
+      </div>
+    </section>
+  );
+}
+
+function readDetailTabFromHash(tabs: DetailTab[], defaultTab: DetailTabId) {
+  const hash = window.location.hash.replace(/^#/, "") as DetailTabId;
+  return tabs.some((tab) => tab.id === hash) ? hash : defaultTab;
+}
+
+function ReadmeTab({ pack }: { pack: CatalogPack }) {
+  if (!pack.readme) {
+    return (
+      <EmptyState
+        title="No README found"
+        body="The aggregate catalog did not find a README for this pack."
+      />
+    );
+  }
+
+  return (
+    <article className="markdownPanel">
+      <div className="readmeToolbar">
+        <span>Source README</span>
+        <a href={pack.readme.url} rel="noreferrer">
+          <ExternalLink size={15} aria-hidden="true" />
+          Raw
+        </a>
+      </div>
+      <div className="markdown">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            a({ href, children }) {
+              const resolvedHref = resolveReadmeHref(pack, href, "link");
+              return (
+                <a href={resolvedHref} rel="noreferrer">
+                  {children}
+                </a>
+              );
+            },
+            img({ src, alt }) {
+              const resolvedSrc = resolveReadmeHref(pack, src, "image");
+              return <img src={resolvedSrc} alt={alt ?? ""} loading="lazy" />;
+            },
+          }}
+        >
+          {pack.readme.content}
+        </ReactMarkdown>
+      </div>
+    </article>
+  );
+}
+
+function InstallTab({ pack, latest }: { pack: CatalogPack; latest: CatalogRelease | undefined }) {
+  const commands = latest ? buildImportCommands(pack, latest.version) : null;
+  return commands ? (
+    <div className="installCommands">
+      <CommandBlock label="This version or later" command={commands.floating} />
+      <CommandBlock label="Exactly this version" command={commands.exact} />
+    </div>
+  ) : (
+    <p className="mutedText">This pack has no active release to import.</p>
+  );
+}
+
+function ReleasesTab({ releases }: { releases: CatalogRelease[] }) {
+  return (
+    <div className="releaseTable">
+      {releases.map((release) => (
+        <ReleaseRow key={`${release.version}-${release.commit}`} release={release} />
+      ))}
+    </div>
+  );
+}
+
+function MetadataTab({ pack, latest }: { pack: CatalogPack; latest: CatalogRelease | undefined }) {
+  const activeReleases = pack.releases.filter((release) => !release.withdrawn).length;
+  return (
+    <dl className="metadataList metadataListWide">
+      <div>
+        <dt>Registry</dt>
+        <dd>{pack.registry}</dd>
+      </div>
+      <div>
+        <dt>Source kind</dt>
+        <dd>{pack.sourceKind}</dd>
+      </div>
+      <div>
+        <dt>Latest</dt>
+        <dd>{latest ? `v${latest.version}` : "None"}</dd>
+      </div>
+      <div>
+        <dt>Active releases</dt>
+        <dd>{activeReleases}</dd>
+      </div>
+      <div>
+        <dt>Withdrawn releases</dt>
+        <dd>{pack.releases.length - activeReleases}</dd>
+      </div>
+      <div>
+        <dt>README</dt>
+        <dd>{pack.readme ? "Aggregated" : "Not found"}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function SourceTab({ pack }: { pack: CatalogPack }) {
+  return (
+    <div className="sourceTab">
+      <a className="sourceLink" href={pack.source} rel="noreferrer">
+        <span>{shortSource(pack.source)}</span>
+        <ExternalLink size={16} aria-hidden="true" />
+      </a>
+      {pack.readme ? (
+        <a className="sourceLink" href={pack.readme.url} rel="noreferrer">
+          <span>{shortSource(pack.readme.url)}</span>
+          <ExternalLink size={16} aria-hidden="true" />
+        </a>
+      ) : null}
+    </div>
+  );
+}
+
+function TrustTab() {
+  return (
+    <div className="trustCopy">
+      <ShieldCheck size={24} aria-hidden="true" />
+      <p className="mutedText">
+        Releases are content-addressed by the same <code>sha256:&lt;hex&gt;</code> field validated
+        by Gas City's pack registry implementation. The website catalog is regenerated from source
+        registries and does not add author-managed package metadata.
+      </p>
+    </div>
   );
 }
 
 function CommandBlock({
   label,
   command,
-  copied,
-  onCopy,
 }: {
   label: string;
   command: string;
-  copied: boolean;
-  onCopy: () => void;
 }) {
   return (
     <div className="commandBlock">
       <span>{label}</span>
       <code>{command}</code>
-      <button type="button" onClick={onCopy} aria-label={`Copy ${label} command`}>
-        {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
-      </button>
+      <CopyButton text={command} ariaLabel={`Copy ${label} command`} />
     </div>
   );
 }
 
-function Panel({
-  title,
-  icon,
-  children,
-}: {
-  title: string;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="panel">
-      <div className="panelHeader">
-        <span aria-hidden="true">{icon}</span>
-        <h2>{title}</h2>
-      </div>
-      {children}
-    </section>
+type CopyState = "idle" | "copied" | "failed";
+
+function CopyButton({ text, ariaLabel }: { text: string; ariaLabel: string }) {
+  const [copyState, setCopyState] = useState<CopyState>("idle");
+  const resetTimeoutRef = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (resetTimeoutRef.current !== null) window.clearTimeout(resetTimeoutRef.current);
+    },
+    [],
   );
+
+  const scheduleReset = () => {
+    if (resetTimeoutRef.current !== null) window.clearTimeout(resetTimeoutRef.current);
+    resetTimeoutRef.current = window.setTimeout(() => {
+      setCopyState("idle");
+      resetTimeoutRef.current = null;
+    }, 2000);
+  };
+
+  const buttonLabel =
+    copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy";
+
+  return (
+    <button
+      className="copyButton"
+      type="button"
+      data-copy-state={copyState}
+      aria-label={ariaLabel}
+      onClick={() => {
+        void copyText(text)
+          .then((didCopy) => {
+            setCopyState(didCopy ? "copied" : "failed");
+            scheduleReset();
+          })
+          .catch(() => {
+            setCopyState("failed");
+            scheduleReset();
+          });
+      }}
+    >
+      {copyState === "copied" ? (
+        <CheckCircle2 size={16} aria-hidden="true" />
+      ) : (
+        <Copy size={16} aria-hidden="true" />
+      )}
+      <span aria-live="polite">{buttonLabel}</span>
+    </button>
+  );
+}
+
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+
+  if (typeof document.execCommand !== "function") return false;
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, text.length);
+
+  try {
+    return document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 function ReleaseRow({ release }: { release: CatalogRelease }) {
@@ -758,6 +1006,32 @@ function shortSource(source: string) {
   }
 }
 
+function resolveReadmeHref(
+  pack: CatalogPack,
+  value: string | undefined,
+  kind: "link" | "image",
+) {
+  if (!value) return undefined;
+  if (value.startsWith("#")) return value;
+
+  try {
+    const parsed = new URL(value);
+    return ["http:", "https:", "mailto:"].includes(parsed.protocol) ? parsed.toString() : undefined;
+  } catch {
+    const base =
+      kind === "image" && pack.readme ? pack.readme.url : ensureTrailingSlash(pack.source);
+    try {
+      return new URL(value, base).toString();
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function ensureTrailingSlash(value: string) {
+  return value.endsWith("/") ? value : `${value}/`;
+}
+
 function filterAndSortPacks(
   packs: CatalogPack[],
   searchState: ReturnType<typeof readSearchState>,
@@ -772,9 +1046,11 @@ function filterAndSortPacks(
     if (!normalizedQuery) return true;
     return [
       pack.name,
+      pack.registry,
       pack.description,
       pack.source,
       categoryForPack(pack).label,
+      pack.readme?.content ?? "",
       ...pack.releases.map((release) => `${release.version} ${release.description}`),
     ]
       .join(" ")

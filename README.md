@@ -2,11 +2,16 @@
 
 Website for the Gas City pack registry. It reads the public `registry.toml`
 catalog used by `gc pack registry search/show` and presents Clawhub-style
-browse and detail pages for packs and releases.
+browse and detail pages for packs, README content, releases, install commands,
+and trust metadata.
 
 Pack authors do not publish directly into this repository. They publish their
 own `registry.toml`, then add one pointer to `sources.toml`. The aggregate
 catalogs in `public/` are generated from those pointers.
+
+`public/registry.toml` stays compatible with the Gas City registry
+implementation. Website-only data such as README content and Open Graph preview
+images is synthesized into `public/catalog.json` and `public/og/`.
 
 ## Local Development
 
@@ -22,6 +27,7 @@ bun run dev
 bun run generate:check
 bun run typecheck
 bun run build
+bun run test:e2e
 ```
 
 ## Railway
@@ -58,5 +64,6 @@ bun run generate
 ```
 
 CI checks that `public/registry.toml` and `public/catalog.json` match
-`sources.toml`. The scheduled `Update Aggregate Registry` workflow refreshes
-the aggregate and commits changes when upstream registries publish new releases.
+`sources.toml`, including generated files in `public/og/`. The scheduled
+`Update Aggregate Registry` workflow refreshes the aggregate and commits
+changes when upstream registries publish new releases.
