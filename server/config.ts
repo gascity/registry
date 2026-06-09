@@ -8,6 +8,8 @@ export type ServerConfig = {
     issuer: string;
     clientId: string;
     clientSecret: string;
+    gasCityUserIdClaim: string;
+    gasCityAccountIdClaim?: string;
   };
   isProduction: boolean;
   devAuthEnabled: boolean;
@@ -23,12 +25,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const issuer = env.OIDC_ISSUER?.trim();
   const clientId = env.OIDC_CLIENT_ID?.trim();
   const clientSecret = env.OIDC_CLIENT_SECRET?.trim();
+  const gasCityUserIdClaim = env.OIDC_GASCITY_USER_ID_CLAIM?.trim() || "sub";
+  const gasCityAccountIdClaim = env.OIDC_GASCITY_ACCOUNT_ID_CLAIM?.trim() || undefined;
   const oidc =
     issuer && clientId && clientSecret
       ? {
           issuer: trimTrailingSlash(issuer),
           clientId,
           clientSecret,
+          gasCityUserIdClaim,
+          gasCityAccountIdClaim,
         }
       : undefined;
 

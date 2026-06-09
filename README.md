@@ -60,10 +60,18 @@ SESSION_SECRET=<random secret>
 OIDC_ISSUER=https://auth.gascity.com/realms/<realm>
 OIDC_CLIENT_ID=<registry client id>
 OIDC_CLIENT_SECRET=<registry client secret>
+OIDC_GASCITY_USER_ID_CLAIM=gascity_user_id
+OIDC_GASCITY_ACCOUNT_ID_CLAIM=gascity_account_id
 ```
 
 When `DATABASE_URL` is absent the server intentionally falls back to the local
 JSON store, which is suitable for development but not for production.
+
+The registry stores reviews against `gascity_user_id`. Until
+`auth.gascity.com` emits a dedicated `gascity_user_id` claim, the app defaults
+to the OIDC `sub` claim so local and early production login still work. Once
+Keycloak is federated to WorkOS/Gasworks, configure the claim env vars above so
+registry-local rows keep the same Gas City identity across subdomain apps.
 
 The app defaults to the generated aggregate JSON:
 

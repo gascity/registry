@@ -20,6 +20,8 @@ export type SessionRecord = {
 
 export type IdentityClaims = {
   subject: string;
+  gasCityUserId: string;
+  gasCityAccountId?: string;
   email?: string;
   handle?: string;
   displayName?: string;

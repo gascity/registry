@@ -129,7 +129,9 @@ export class PostgresRegistryStore implements RegistryStore {
     await this.sql`
       CREATE TABLE IF NOT EXISTS users (
         id text PRIMARY KEY,
-        gascity_account_id text UNIQUE NOT NULL,
+        gascity_user_id text NOT NULL,
+        gascity_account_id text,
+        oidc_subject text,
         email text,
         handle text NOT NULL,
         display_name text NOT NULL,
@@ -139,6 +141,25 @@ export class PostgresRegistryStore implements RegistryStore {
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       )
+    `;
+    await this.sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS gascity_user_id text`;
+    await this.sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS gascity_account_id text`;
+    await this.sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_subject text`;
+    await this.sql`ALTER TABLE users ALTER COLUMN gascity_account_id DROP NOT NULL`;
+    await this.sql`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_gascity_account_id_key`;
+    await this.sql`
+      UPDATE users
+      SET gascity_user_id = gascity_account_id
+      WHERE gascity_user_id IS NULL AND gascity_account_id IS NOT NULL
+    `;
+    await this.sql`UPDATE users SET gascity_user_id = id WHERE gascity_user_id IS NULL`;
+    await this.sql`ALTER TABLE users ALTER COLUMN gascity_user_id SET NOT NULL`;
+    await this.sql`CREATE UNIQUE INDEX IF NOT EXISTS users_gascity_user_id_unique ON users (gascity_user_id)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS users_gascity_account_id_idx ON users (gascity_account_id)`;
+    await this.sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS users_oidc_subject_unique
+      ON users (oidc_subject)
+      WHERE oidc_subject IS NOT NULL
     `;
     await this.sql`CREATE UNIQUE INDEX IF NOT EXISTS users_handle_unique ON users (lower(handle))`;
     await this.sql`
@@ -206,7 +227,11 @@ export class PostgresRegistryStore implements RegistryStore {
 
   async ensureUser(identity: IdentityClaims): Promise<SessionUser> {
     const existing = await this.sql`
-      SELECT * FROM users WHERE gascity_account_id = ${identity.subject} LIMIT 1
+      SELECT * FROM users
+      WHERE gascity_user_id = ${identity.gasCityUserId}
+         OR oidc_subject = ${identity.subject}
+      ORDER BY CASE WHEN gascity_user_id = ${identity.gasCityUserId} THEN 0 ELSE 1 END
+      LIMIT 1
     `;
     const now = new Date();
     const handle = normalizeHandle(identity.handle ?? identity.email?.split("@")[0]) ?? "user";
@@ -214,7 +239,10 @@ export class PostgresRegistryStore implements RegistryStore {
     if (existing.length > 0) {
       const [updated] = await this.sql`
         UPDATE users
-        SET email = ${identity.email ?? null},
+        SET gascity_user_id = ${identity.gasCityUserId},
+            gascity_account_id = ${identity.gasCityAccountId ?? null},
+            oidc_subject = ${identity.subject},
+            email = ${identity.email ?? null},
             handle = COALESCE(NULLIF(handle, ''), ${handle}),
             display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
             avatar_url = ${identity.avatarUrl ?? null},
@@ -228,11 +256,13 @@ export class PostgresRegistryStore implements RegistryStore {
     const uniqueHandle = await this.resolveHandle(handle, id);
     const [created] = await this.sql`
       INSERT INTO users (
-        id, gascity_account_id, email, handle, display_name, avatar_url, role, status, created_at, updated_at
+        id, gascity_user_id, gascity_account_id, oidc_subject, email, handle, display_name,
+        avatar_url, role, status, created_at, updated_at
       )
       VALUES (
-        ${id}, ${identity.subject}, ${identity.email ?? null}, ${uniqueHandle}, ${displayName},
-        ${identity.avatarUrl ?? null}, 'user', 'active', ${now}, ${now}
+        ${id}, ${identity.gasCityUserId}, ${identity.gasCityAccountId ?? null}, ${identity.subject},
+        ${identity.email ?? null}, ${uniqueHandle}, ${displayName}, ${identity.avatarUrl ?? null},
+        'user', 'active', ${now}, ${now}
       )
       RETURNING *
     `;
@@ -503,7 +533,7 @@ export class PostgresRegistryStore implements RegistryStore {
 }
 
 type FileState = {
-  users: Array<SessionUser & { gascityAccountId: string }>;
+  users: Array<SessionUser & { gascityUserId?: string; gascityAccountId?: string; oidcSubject?: string }>;
   sessions: Array<{ hash: string; record: Omit<SessionRecord, "expiresAt"> & { expiresAt: string } }>;
   reviews: ReviewRow[];
   reports: string[];
@@ -512,7 +542,10 @@ type FileState = {
 
 class FileRegistryStore implements RegistryStore {
   readonly kind = "file" as const;
-  private users = new Map<string, SessionUser & { gascityAccountId: string }>();
+  private users = new Map<
+    string,
+    SessionUser & { gascityUserId: string; gascityAccountId?: string; oidcSubject?: string }
+  >();
   private sessions = new Map<string, { record: SessionRecord; hash: string }>();
   private reviews = new Map<string, ReviewRow>();
   private reports = new Set<string>();
@@ -527,7 +560,19 @@ class FileRegistryStore implements RegistryStore {
     try {
       const raw = JSON.parse(await readFile(this.filePath, "utf8")) as Partial<FileState>;
       for (const user of raw.users ?? []) {
-        this.users.set(user.id, { ...user, status: user.status === "disabled" ? "disabled" : "active" });
+        const legacyUser = user as SessionUser & {
+          gascityUserId?: string;
+          gascityAccountId?: string;
+          oidcSubject?: string;
+        };
+        const gascityUserId = legacyUser.gascityUserId ?? legacyUser.gascityAccountId ?? legacyUser.id;
+        this.users.set(user.id, {
+          ...legacyUser,
+          gascityUserId,
+          gascityAccountId: legacyUser.gascityAccountId,
+          oidcSubject: legacyUser.oidcSubject ?? gascityUserId,
+          status: user.status === "disabled" ? "disabled" : "active",
+        });
       }
       for (const session of raw.sessions ?? []) {
         this.sessions.set(session.record.id, {
@@ -550,12 +595,20 @@ class FileRegistryStore implements RegistryStore {
 
   async ensureUser(identity: IdentityClaims): Promise<SessionUser> {
     for (const user of this.users.values()) {
-      if (user.gascityAccountId === identity.subject) return user;
+      if (user.gascityUserId === identity.gasCityUserId || user.oidcSubject === identity.subject) {
+        user.gascityUserId = identity.gasCityUserId;
+        user.gascityAccountId = identity.gasCityAccountId;
+        user.oidcSubject = identity.subject;
+        await this.save();
+        return user;
+      }
     }
     const handle = normalizeHandle(identity.handle ?? identity.email?.split("@")[0]) ?? "local";
-    const user: SessionUser & { gascityAccountId: string } = {
+    const user: SessionUser & { gascityUserId: string; gascityAccountId?: string; oidcSubject?: string } = {
       id: newId("user"),
-      gascityAccountId: identity.subject,
+      gascityUserId: identity.gasCityUserId,
+      gascityAccountId: identity.gasCityAccountId,
+      oidcSubject: identity.subject,
       email: identity.email,
       handle,
       displayName: identity.displayName?.trim() || handle,

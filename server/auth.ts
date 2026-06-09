@@ -130,7 +130,7 @@ export async function finishLogin(request: Request, config: ServerConfig, store:
   const userInfo = tokenPayload.access_token
     ? await fetchUserInfo(discovery, tokenPayload.access_token)
     : {};
-  const identity = identityFromClaims({ ...claims, ...userInfo });
+  const identity = identityFromClaims({ ...claims, ...userInfo }, config);
   const user = await store.ensureUser(identity);
   const session = await store.createSession(user.id);
 
@@ -160,6 +160,7 @@ export async function createDevSession(request: Request, config: ServerConfig, s
   const handle = url.searchParams.get("handle")?.trim() || "local";
   const user = await store.ensureUser({
     subject: `dev:${handle}`,
+    gasCityUserId: `dev:${handle}`,
     handle,
     displayName: handle === "local" ? "Local Developer" : handle,
     email: `${handle}@dev.registry.local`,
@@ -232,12 +233,21 @@ async function fetchUserInfo(discovery: Discovery, accessToken: string): Promise
   return (await response.json()) as JWTPayload;
 }
 
-function identityFromClaims(claims: JWTPayload): IdentityClaims {
+function identityFromClaims(claims: JWTPayload, config: ServerConfig): IdentityClaims {
+  if (!config.oidc) throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Auth is not configured.");
   if (!claims.sub) throw new AuthError(401, "BAD_ID_TOKEN", "Sign-in verification failed.");
+  const gasCityUserId = stringClaim(claims[config.oidc.gasCityUserIdClaim]);
+  if (!gasCityUserId) {
+    throw new AuthError(401, "BAD_ID_TOKEN", "Sign-in identity is missing a Gas City user ID.");
+  }
   const preferredUsername = stringClaim(claims.preferred_username);
   const email = stringClaim(claims.email);
   return {
     subject: claims.sub,
+    gasCityUserId,
+    gasCityAccountId: config.oidc.gasCityAccountIdClaim
+      ? stringClaim(claims[config.oidc.gasCityAccountIdClaim])
+      : undefined,
     email,
     handle: preferredUsername ?? email?.split("@")[0],
     displayName: stringClaim(claims.name) ?? preferredUsername,
