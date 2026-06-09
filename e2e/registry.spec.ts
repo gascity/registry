@@ -96,6 +96,7 @@ test("footer links expose source, verifier, and publishing pages", async ({ page
   await expect(page).toHaveURL(/\/verify$/);
   await expect(page.getByRole("heading", { name: "Pack Ownership Verification" })).toBeVisible();
   await expect(page.getByText("Iv23libht048ujfs7SL4")).toBeVisible();
+  await expect(page.getByText("Token exchange error")).toHaveCount(0);
 
   await page.getByRole("contentinfo").getByRole("link", { name: "Publish a pack" }).click();
   await expect(page).toHaveURL(/\/publish$/);

@@ -143,8 +143,8 @@ export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => voi
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Production configuration</p>
-          <h2>Expected App Values</h2>
+          <p className="eyebrow">Public metadata</p>
+          <h2>Verifier App Values</h2>
         </div>
         <dl className="docsDefinitionList">
           <div>
@@ -158,14 +158,6 @@ export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => voi
           <div>
             <dt>Callback URL</dt>
             <dd>https://registry.gascity.com/api/ownership/github/callback</dd>
-          </div>
-          <div>
-            <dt>Token exchange error</dt>
-            <dd>
-              If GitHub reports that the client id or client secret is incorrect, update Railway's
-              `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` from this GitHub App's General
-              settings.
-            </dd>
           </div>
         </dl>
       </section>
