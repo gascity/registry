@@ -1,0 +1,5 @@
+schema = 1
+
+[[source]]
+name = "gascity-packs"
+url = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"

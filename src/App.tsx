@@ -436,7 +436,7 @@ function HomePage({
             {catalogStatus.state === "ready" ? (
               <p className="sourceNote">
                 Catalog source: <code>{catalog.sourceUrl}</code>
-                {catalog.loadedFromFallback ? " (local fallback)" : ""}
+                {catalog.loadedFromFallback ? " (fallback)" : ""}
               </p>
             ) : null}
           </div>

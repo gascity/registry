@@ -2,10 +2,9 @@ import { Bot, Database, GitBranch, MessageCircle, MessagesSquare, PackageSearch 
 import { parse } from "smol-toml";
 
 const PRIMARY_REGISTRY_URL =
-  import.meta.env.VITE_REGISTRY_URL?.trim() || "/registry.toml";
+  import.meta.env.VITE_CATALOG_URL?.trim() || "/catalog.json";
 
-const FALLBACK_REGISTRY_URL =
-  "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml";
+const FALLBACK_REGISTRY_URL = import.meta.env.VITE_REGISTRY_URL?.trim() || "/registry.toml";
 
 export type CatalogRelease = {
   version: string;
@@ -54,6 +53,20 @@ type RawRelease = {
   withdrawn_reason?: unknown;
 };
 
+type RawJsonCatalog = {
+  schema?: unknown;
+  packs?: unknown;
+};
+
+type RawJsonPack = {
+  registry?: unknown;
+  name?: unknown;
+  description?: unknown;
+  source?: unknown;
+  source_kind?: unknown;
+  releases?: unknown;
+};
+
 export async function fetchRegistryCatalog(): Promise<RegistryCatalogState> {
   try {
     return await fetchCatalogFrom(PRIMARY_REGISTRY_URL, false);
@@ -69,11 +82,15 @@ export async function fetchRegistryCatalog(): Promise<RegistryCatalogState> {
 }
 
 async function fetchCatalogFrom(sourceUrl: string, loadedFromFallback: boolean) {
-  const response = await fetch(sourceUrl, { headers: { Accept: "text/plain" } });
+  const response = await fetch(sourceUrl, { headers: { Accept: "application/json, text/plain" } });
   if (!response.ok) {
     throw new Error(`Registry catalog request failed with HTTP ${response.status}.`);
   }
-  const catalog = normalizeCatalog(parse(await response.text()) as RawCatalog);
+  const text = await response.text();
+  const catalog =
+    sourceUrl.endsWith(".json") || response.headers.get("content-type")?.includes("json")
+      ? normalizeJsonCatalog(JSON.parse(text) as RawJsonCatalog)
+      : normalizeCatalog(parse(text) as RawCatalog);
   return { ...catalog, sourceUrl, loadedFromFallback };
 }
 
@@ -86,6 +103,33 @@ function normalizeCatalog(raw: RawCatalog): { packs: CatalogPack[] } {
   const rawPacks = Array.isArray(raw.pack) ? raw.pack : [];
   return {
     packs: rawPacks.map((pack) => normalizePack(pack as RawPack)).sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+function normalizeJsonCatalog(raw: RawJsonCatalog): { packs: CatalogPack[] } {
+  const schema = typeof raw.schema === "number" ? raw.schema : 1;
+  if (schema !== 1) {
+    throw new Error(`Unsupported registry catalog schema ${schema}.`);
+  }
+
+  const rawPacks = Array.isArray(raw.packs) ? raw.packs : [];
+  return {
+    packs: rawPacks
+      .map((pack) => normalizeJsonPack(pack as RawJsonPack))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+function normalizeJsonPack(raw: RawJsonPack): CatalogPack {
+  const name = requireString(raw.name, "pack.name");
+  return {
+    name,
+    description: requireString(raw.description, `${name}.description`),
+    source: requireString(raw.source, `${name}.source`),
+    sourceKind: requireString(raw.source_kind, `${name}.source_kind`),
+    releases: (Array.isArray(raw.releases) ? raw.releases : []).map((release) =>
+      normalizeRelease(name, release as RawRelease),
+    ),
   };
 }
 

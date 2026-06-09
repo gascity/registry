@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "generate": "bun scripts/generate-registry.ts",
+    "generate:check": "bun scripts/generate-registry.ts --check",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"

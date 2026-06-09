@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 COPY . .
+ARG VITE_CATALOG_URL
 ARG VITE_REGISTRY_URL
 RUN bun run build
 

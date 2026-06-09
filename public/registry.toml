@@ -1,70 +1,17 @@
 schema = 1
 
 [[pack]]
-  name = "gascity"
-  description = "Gas City planning and implementation workflow pack."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "d3617d1319a1206ac85f69ba024ec395c49c6f4b"
-    hash = "sha256:481e800b2955956b4fc4856257ec56ae1b668da2d84e8543816917ac9dc8e7c7"
-    description = "Initial Gas City planning pack release."
-    withdrawn = true
-    withdrawn_reason = "Superseded by 0.1.1; original release hash was not content-derived."
-
-  [[pack.release]]
-    version = "0.1.1"
-    ref = "main"
-    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
-    hash = "sha256:d97b8830f959a688f4cb3c61497f630adc4815bb76c11afefb2907f3163a7796"
-    description = "Canonical content-hash release for current Gas City planning pack content."
-
-[[pack]]
-  name = "gastown"
-  description = "Default Gas Town coding workflow pack."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "d3617d1319a1206ac85f69ba024ec395c49c6f4b"
-    hash = "sha256:e8d987c8bea7d89eb3c5751a360b92a6c847f95fc5e5447378927e90eb3b501b"
-    description = "Initial Gas Town workflow pack release."
-    withdrawn = true
-    withdrawn_reason = "Superseded by 0.1.1; original release hash was not content-derived."
-
-  [[pack.release]]
-    version = "0.1.1"
-    ref = "main"
-    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
-    hash = "sha256:275565384903ae22bf9187aa821df135724bd4a639be18e4b4e76f739a555cc4"
-    description = "Canonical content-hash release for current Gas Town workflow pack content."
-
-[[pack]]
   name = "cass"
   description = "Coding Agent Session Search prompt fragments and skill overlays for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/cass"
   source_kind = "git"
 
   [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "d3617d1319a1206ac85f69ba024ec395c49c6f4b"
-    hash = "sha256:9849675daa3ba8a792fc1c68c727542936400687d529e5d4d231afde29d4a341"
-    description = "Initial CASS session-search pack release."
-    withdrawn = true
-    withdrawn_reason = "Superseded by 0.1.1; original release hash was not content-derived."
-
-  [[pack.release]]
     version = "0.1.1"
     ref = "main"
     commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
     hash = "sha256:b2b0ca765403fcdfdf3b22bed4752c8983e549bde98cd5f5f4467c92189cebdd"
-    description = "Canonical content-hash release for current CASS session-search pack content."
+    description = "Refresh CASS session-search pack release pin."
 
 [[pack]]
   name = "discord"
@@ -73,20 +20,37 @@ schema = 1
   source_kind = "git"
 
   [[pack.release]]
-    version = "0.1.0"
+    version = "0.1.1"
     ref = "main"
-    commit = "d3617d1319a1206ac85f69ba024ec395c49c6f4b"
-    hash = "sha256:4e3acdaf3171e8a53327ebcee9f5b9c61d191c5791e413ff61a76b457ef96394"
-    description = "Initial Discord pack release."
-    withdrawn = true
-    withdrawn_reason = "Superseded by 0.1.1; original release hash was not content-derived."
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:17885fe177070d563299ced50b9e43f5ae2aab43f95483822f7bee0a8383191f"
+    description = "Refresh Discord pack release pin."
+
+[[pack]]
+  name = "gascity"
+  description = "Gas City planning and implementation workflow pack."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+  source_kind = "git"
 
   [[pack.release]]
     version = "0.1.1"
     ref = "main"
     commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
-    hash = "sha256:17885fe177070d563299ced50b9e43f5ae2aab43f95483822f7bee0a8383191f"
-    description = "Canonical content-hash release for current Discord pack content."
+    hash = "sha256:d97b8830f959a688f4cb3c61497f630adc4815bb76c11afefb2907f3163a7796"
+    description = "Refresh Gas City planning pack release pin."
+
+[[pack]]
+  name = "gastown"
+  description = "Default Gas Town coding workflow pack."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:275565384903ae22bf9187aa821df135724bd4a639be18e4b4e76f739a555cc4"
+    description = "Refresh Gas Town workflow pack release pin."
 
 [[pack]]
   name = "github"
@@ -95,20 +59,11 @@ schema = 1
   source_kind = "git"
 
   [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "d3617d1319a1206ac85f69ba024ec395c49c6f4b"
-    hash = "sha256:5ba4e2277e1e1b434b278067704d0d977dd8f18aee496a21feab4218ee99995e"
-    description = "Initial GitHub intake pack release."
-    withdrawn = true
-    withdrawn_reason = "Superseded by 0.1.1; original release hash was not content-derived."
-
-  [[pack.release]]
     version = "0.1.1"
     ref = "main"
     commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
     hash = "sha256:53652fd1261adbcff8995fa815750f953fd692ccc2032139d874e9e9a555df73"
-    description = "Canonical content-hash release for current GitHub intake pack content."
+    description = "Refresh GitHub intake pack release pin."
 
 [[pack]]
   name = "slack-full"
@@ -117,43 +72,8 @@ schema = 1
   source_kind = "git"
 
   [[pack.release]]
-    version = "0.0.1"
-    ref = "main"
-    commit = "d3617d1319a1206ac85f69ba024ec395c49c6f4b"
-    hash = "sha256:0d32d8da6ad57c632d4f54008bdd1bb8b822c493a709676b3d1761a5ef389387"
-    description = "Initial Slack pack release."
-    withdrawn = true
-    withdrawn_reason = "Superseded by 0.0.2; original release hash was not content-derived."
-
-  [[pack.release]]
     version = "0.0.2"
     ref = "main"
     commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
     hash = "sha256:8b9d25324fe9af487398a6237a6f8d1614a5b32e85fceec935450c7b4d523d00"
-    description = "Canonical content-hash release for current Slack full pack content."
-
-[[pack]]
-  name = "slack-channel"
-  description = "Shared Slack channel routing and session identity pack for Gas City."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-channel"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
-    hash = "sha256:dfcb2d64eede2c939b8f157e47348b8d103ff149b8945d91774770844abb752d"
-    description = "Initial Slack channel pack release with canonical content hash."
-
-[[pack]]
-  name = "slack-mini"
-  description = "Minimal Slack mention bridge and outbound message pack for Gas City."
-  source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-mini"
-  source_kind = "git"
-
-  [[pack.release]]
-    version = "0.1.0"
-    ref = "main"
-    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
-    hash = "sha256:fff2523a9ab32e0812815c8d2addb08e6349d3885052d095bd76600eec87921a"
-    description = "Initial Slack mini pack release with canonical content hash."
+    description = "Refresh Slack pack release pin."

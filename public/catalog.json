@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "source_count": 1,
+  "pack_count": 6,
+  "sources": [
+    {
+      "name": "gascity-packs",
+      "url": "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml",
+      "pack_count": 6
+    }
+  ],
+  "packs": [
+    {
+      "registry": "gascity-packs",
+      "name": "cass",
+      "description": "Coding Agent Session Search prompt fragments and skill overlays for Gas City.",
+      "source": "https://github.com/gastownhall/gascity-packs/tree/main/cass",
+      "source_kind": "git",
+      "latest": "0.1.1",
+      "releases": [
+        {
+          "version": "0.1.1",
+          "ref": "main",
+          "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
+          "hash": "sha256:b2b0ca765403fcdfdf3b22bed4752c8983e549bde98cd5f5f4467c92189cebdd",
+          "description": "Refresh CASS session-search pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    },
+    {
+      "registry": "gascity-packs",
+      "name": "discord",
+      "description": "Discord services, commands, and prompt fragments for Gas City.",
+      "source": "https://github.com/gastownhall/gascity-packs/tree/main/discord",
+      "source_kind": "git",
+      "latest": "0.1.1",
+      "releases": [
+        {
+          "version": "0.1.1",
+          "ref": "main",
+          "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
+          "hash": "sha256:17885fe177070d563299ced50b9e43f5ae2aab43f95483822f7bee0a8383191f",
+          "description": "Refresh Discord pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    },
+    {
+      "registry": "gascity-packs",
+      "name": "gascity",
+      "description": "Gas City planning and implementation workflow pack.",
+      "source": "https://github.com/gastownhall/gascity-packs/tree/main/gascity",
+      "source_kind": "git",
+      "latest": "0.1.1",
+      "releases": [
+        {
+          "version": "0.1.1",
+          "ref": "main",
+          "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
+          "hash": "sha256:d97b8830f959a688f4cb3c61497f630adc4815bb76c11afefb2907f3163a7796",
+          "description": "Refresh Gas City planning pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    },
+    {
+      "registry": "gascity-packs",
+      "name": "gastown",
+      "description": "Default Gas Town coding workflow pack.",
+      "source": "https://github.com/gastownhall/gascity-packs/tree/main/gastown",
+      "source_kind": "git",
+      "latest": "0.1.1",
+      "releases": [
+        {
+          "version": "0.1.1",
+          "ref": "main",
+          "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
+          "hash": "sha256:275565384903ae22bf9187aa821df135724bd4a639be18e4b4e76f739a555cc4",
+          "description": "Refresh Gas Town workflow pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    },
+    {
+      "registry": "gascity-packs",
+      "name": "github",
+      "description": "GitHub webhook intake services and commands for Gas City.",
+      "source": "https://github.com/gastownhall/gascity-packs/tree/main/github",
+      "source_kind": "git",
+      "latest": "0.1.1",
+      "releases": [
+        {
+          "version": "0.1.1",
+          "ref": "main",
+          "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
+          "hash": "sha256:53652fd1261adbcff8995fa815750f953fd692ccc2032139d874e9e9a555df73",
+          "description": "Refresh GitHub intake pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    },
+    {
+      "registry": "gascity-packs",
+      "name": "slack-full",
+      "description": "Slack services, commands, and adapter integration for Gas City.",
+      "source": "https://github.com/gastownhall/gascity-packs/tree/main/slack-full",
+      "source_kind": "git",
+      "latest": "0.0.2",
+      "releases": [
+        {
+          "version": "0.0.2",
+          "ref": "main",
+          "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
+          "hash": "sha256:8b9d25324fe9af487398a6237a6f8d1614a5b32e85fceec935450c7b4d523d00",
+          "description": "Refresh Slack pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    }
+  ]
+}
