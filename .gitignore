@@ -5,6 +5,7 @@ test-results/
 playwright-report/
 .env
 .env.*
+!.env.example
 *.local
 *.log
 .registry-data/

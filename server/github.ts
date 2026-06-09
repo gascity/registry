@@ -196,7 +196,15 @@ export async function validateGitHubWebhook(request: Request, config: ServerConf
   if (!config.githubApp?.webhookSecret) {
     throw new RequestError(404, "NOT_FOUND", "Not found.");
   }
+  const maxWebhookBytes = 256 * 1024;
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && Number.parseInt(contentLength, 10) > maxWebhookBytes) {
+    throw new RequestError(413, "PAYLOAD_TOO_LARGE", "Webhook body is too large.");
+  }
   const body = await request.text();
+  if (Buffer.byteLength(body, "utf8") > maxWebhookBytes) {
+    throw new RequestError(413, "PAYLOAD_TOO_LARGE", "Webhook body is too large.");
+  }
   const signature = request.headers.get("x-hub-signature-256");
   if (!verifyWebhookSignature(body, signature, config.githubApp.webhookSecret)) {
     throw new RequestError(401, "BAD_SIGNATURE", "Webhook signature verification failed.");

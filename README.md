@@ -35,6 +35,10 @@ Local development needs no external services:
 - Set `REGISTRY_DEV_AUTH=0` to hide the auth stub when testing signed-out
   behavior.
 
+Copy `.env.example` to a local untracked env file if you need to test a
+non-default configuration. Keep real production values in OpenBao, Railway, or
+GitHub secrets; do not commit them.
+
 ## Quality Gates
 
 ```bash
@@ -122,6 +126,15 @@ id are identifiers, but they still live in environment configuration so the same
 code can run in local, staging, and production. The registry discards GitHub user
 access tokens after each ownership verification and stores only immutable GitHub
 owner/repository ids plus the local publisher mapping.
+
+The official GitHub App install URL is:
+
+```text
+https://github.com/apps/gas-city-registry-verifier/installations/select_target
+```
+
+See [docs/verify-pack-ownership.md](docs/verify-pack-ownership.md) for the
+maintainer-facing verification flow.
 
 The app defaults to the generated aggregate JSON:
 

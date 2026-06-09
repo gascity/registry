@@ -352,7 +352,7 @@ export class PostgresRegistryStore implements RegistryStore {
             display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
             avatar_url = ${identity.avatarUrl ?? null},
             updated_at = ${now}
-        WHERE gascity_account_id = ${identity.subject}
+        WHERE id = ${existing[0].id}
         RETURNING *
       `;
       return sessionUser(updated as any);

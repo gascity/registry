@@ -29,11 +29,22 @@ export type ServerConfig = {
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): ServerConfig {
   const port = Number.parseInt(env.PORT ?? "8080", 10);
+  const isProduction = env.NODE_ENV === "production" || Boolean(env.RAILWAY_ENVIRONMENT);
   const appUrl = trimTrailingSlash(
     env.APP_URL ??
       (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : "http://127.0.0.1:8080"),
   );
   const sessionSecret = env.SESSION_SECRET?.trim() || "dev-insecure-registry-session-secret";
+  const databaseUrl = env.DATABASE_URL?.trim() || undefined;
+  if (isProduction && sessionSecret === "dev-insecure-registry-session-secret") {
+    throw new Error("SESSION_SECRET must be set in production.");
+  }
+  if (isProduction && sessionSecret.length < 32) {
+    throw new Error("SESSION_SECRET must be at least 32 characters in production.");
+  }
+  if (isProduction && !databaseUrl) {
+    throw new Error("DATABASE_URL must be set in production.");
+  }
   const issuer = env.OIDC_ISSUER?.trim();
   const clientId = env.OIDC_CLIENT_ID?.trim();
   const clientSecret = env.OIDC_CLIENT_SECRET?.trim();
@@ -90,14 +101,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: Number.isFinite(port) && port > 0 ? port : 8080,
     appUrl,
     sessionSecret,
-    databaseUrl: env.DATABASE_URL?.trim() || undefined,
+    databaseUrl,
     localDataPath: env.REGISTRY_DATA_PATH?.trim() || ".registry-data/registry.local.json",
     authProvider,
     oidc,
     workos,
     githubApp,
-    isProduction: env.NODE_ENV === "production" || Boolean(env.RAILWAY_ENVIRONMENT),
-    devAuthEnabled: env.REGISTRY_DEV_AUTH === "1" && env.NODE_ENV !== "production",
+    isProduction,
+    devAuthEnabled: env.REGISTRY_DEV_AUTH === "1" && !isProduction,
   };
 }
 

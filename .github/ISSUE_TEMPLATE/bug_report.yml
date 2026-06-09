@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible bug or regression.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for reproducible bugs and regressions. For security issues, do not open a public issue; follow `SECURITY.md` instead.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you continue
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I read the relevant README, support, and contributor guidance.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Registry version
+      description: Include the URL and commit SHA if known.
+      placeholder: registry.gascity.com or main@b5d5cfbf
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser, OS, Bun version, and whether this was local or production.
+      placeholder: Chrome 126, macOS, Bun 1.3.12, local dev
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest set of steps, files, or commands that reproduces the problem.
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, screenshots, or traces
+      description: Paste concise logs or attach screenshots if they materially help.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Link related issues, PRs, packs, source registries, or external context if relevant.

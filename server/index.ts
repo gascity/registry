@@ -12,6 +12,7 @@ import {
 import { requireCatalogPackSource } from "./catalog";
 import { createStore, StoreValidationError } from "./store";
 import { RequestError, assertOrigin, errorJson, json, readJsonBody } from "./http";
+import { enforceRateLimit, withSecurityHeaders } from "./security";
 import {
   githubAppConfigured,
   githubAppInstallUrl,
@@ -34,21 +35,27 @@ const distRoot = new URL("../dist/", import.meta.url);
 const server = Bun.serve({
   port: config.port,
   async fetch(request) {
+    let response: Response;
     try {
       const url = new URL(request.url);
-      if (url.pathname === "/health") return new Response("ok\n");
-      if (url.pathname.startsWith("/api/")) return await handleApi(request);
-      return await serveStatic(url);
+      if (url.pathname === "/health") {
+        response = new Response("ok\n");
+      } else if (url.pathname.startsWith("/api/")) {
+        response = await handleApi(request);
+      } else {
+        response = await serveStatic(url);
+      }
     } catch (error) {
       if (error instanceof AuthError || error instanceof RequestError) {
-        return errorJson(error.status, error.code, error.message);
+        response = errorJson(error.status, error.code, error.message);
+      } else if (error instanceof StoreValidationError) {
+        response = errorJson(error.status, error.code, error.message);
+      } else {
+        console.error("[registry] unhandled request error", error);
+        response = errorJson(500, "INTERNAL_ERROR", "Internal server error.");
       }
-      if (error instanceof StoreValidationError) {
-        return errorJson(error.status, error.code, error.message);
-      }
-      console.error("[registry] unhandled request error", error);
-      return errorJson(500, "INTERNAL_ERROR", "Internal server error.");
     }
+    return withSecurityHeaders(response, config);
   },
 });
 
@@ -77,12 +84,15 @@ async function handleApi(request: Request) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/auth/login") {
+    enforceRateLimit(request, "auth-login", { windowMs: 10 * 60 * 1000, max: 30 });
     return await startLogin(request, config);
   }
   if (request.method === "GET" && url.pathname === "/api/auth/callback") {
+    enforceRateLimit(request, "auth-callback", { windowMs: 10 * 60 * 1000, max: 60 });
     return await finishLogin(request, config, store);
   }
   if (request.method === "GET" && url.pathname === "/api/dev/sign-in") {
+    enforceRateLimit(request, "dev-sign-in", { windowMs: 10 * 60 * 1000, max: 20 });
     return await createDevSession(request, config, store);
   }
   if (request.method === "POST" && url.pathname === "/api/auth/logout") {
@@ -112,6 +122,7 @@ async function handleApi(request: Request) {
   }
   if (request.method === "POST" && url.pathname === "/api/ownership/github/start") {
     requireCsrf(request, session);
+    enforceRateLimit(request, "ownership-start", { windowMs: 15 * 60 * 1000, max: 10 }, session);
     const body = await readJsonBody<{ packKey?: string; sourceUrl?: string }>(request);
     const packKey = body.packKey?.trim();
     const sourceUrl = body.sourceUrl?.trim();
@@ -132,6 +143,7 @@ async function handleApi(request: Request) {
     return json({ authorizationUrl: githubAuthorizationUrl(config, state) });
   }
   if (request.method === "GET" && url.pathname === "/api/ownership/github/callback") {
+    enforceRateLimit(request, "ownership-callback", { windowMs: 15 * 60 * 1000, max: 30 }, session);
     if (!session) throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
@@ -176,17 +188,20 @@ async function handleApi(request: Request) {
   }
   if (request.method === "PUT" && url.pathname === "/api/reviews") {
     requireCsrf(request, session);
+    enforceRateLimit(request, "review-write", { windowMs: 60 * 60 * 1000, max: 30 }, session);
     const body = await readJsonBody<ReviewInput>(request);
     return json(await store.upsertReview(session!.user.id, body));
   }
   if (request.method === "DELETE" && url.pathname === "/api/reviews") {
     requireCsrf(request, session);
+    enforceRateLimit(request, "review-delete", { windowMs: 60 * 60 * 1000, max: 30 }, session);
     await store.deleteReview(session!.user.id, requirePackKey(url));
     return new Response(null, { status: 204 });
   }
   const reportMatch = url.pathname.match(/^\/api\/reviews\/([^/]+)\/report$/);
   if (request.method === "POST" && reportMatch?.[1]) {
     requireCsrf(request, session);
+    enforceRateLimit(request, "review-report", { windowMs: 60 * 60 * 1000, max: 10 }, session);
     const body = await readJsonBody<{ reason?: string }>(request);
     return json(await store.reportReview(session!.user.id, decodeURIComponent(reportMatch[1]), body.reason ?? ""));
   }
@@ -197,6 +212,7 @@ async function handleApi(request: Request) {
   }
   if (request.method === "PUT" && url.pathname === "/api/account/profile") {
     requireCsrf(request, session);
+    enforceRateLimit(request, "profile-write", { windowMs: 60 * 60 * 1000, max: 20 }, session);
     const body = await readJsonBody<{ displayName?: string; handle?: string }>(request);
     return json({
       user: await store.updateUserProfile(session!.user.id, {
@@ -207,6 +223,7 @@ async function handleApi(request: Request) {
   }
   if (request.method === "PUT" && url.pathname === "/api/stars") {
     requireCsrf(request, session);
+    enforceRateLimit(request, "star-write", { windowMs: 60 * 60 * 1000, max: 120 }, session);
     const body = await readJsonBody<{ packKey?: string; starred?: boolean }>(request);
     const packKey = body.packKey?.trim();
     if (!packKey) throw new RequestError(422, "VALIDATION_ERROR", "Pack key required.");
