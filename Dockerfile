@@ -1,5 +1,5 @@
-# Stage 1: build the static website.
-FROM oven/bun:1 AS frontend
+# Stage 1: build the website and typecheck the server.
+FROM oven/bun:1 AS build
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
@@ -8,10 +8,14 @@ ARG VITE_CATALOG_URL
 ARG VITE_REGISTRY_URL
 RUN bun run build
 
-# Stage 2: serve through Nginx, using Railway's PORT value.
-FROM nginx:1.27-alpine
+# Stage 2: serve static assets and /api through the Bun BFF.
+FROM oven/bun:1-alpine
+WORKDIR /app
+ENV NODE_ENV=production
 ENV PORT=8080
-COPY nginx.conf.template /etc/nginx/templates/default.conf.template
-COPY --from=frontend /app/dist /usr/share/nginx/html
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production
+COPY --from=build /app/dist ./dist
+COPY server ./server
 EXPOSE 8080
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["bun", "server/index.ts"]

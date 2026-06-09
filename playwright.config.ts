@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 
-const port = process.env.PORT ?? "4177";
+const port = process.env.PORT ?? "48177";
 const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
@@ -13,9 +13,9 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: `bun run dev -- --host 127.0.0.1 --port ${port}`,
+    command: `REGISTRY_DEV_AUTH=1 REGISTRY_DATA_PATH=.registry-data/playwright.json APP_URL=${baseURL} PORT=${port} bun run dev:static`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 });

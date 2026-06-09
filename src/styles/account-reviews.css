@@ -1,0 +1,208 @@
+.reviewsPanel {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 18px;
+}
+
+.reviewsHeader,
+.reviewComposerHeader,
+.reviewItemHeader,
+.formActions,
+.promptActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.reviewsHeader,
+.reviewComposerHeader,
+.reviewItemHeader,
+.formActions {
+  justify-content: space-between;
+}
+
+.reviewSummary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+}
+
+.reviewSummary span,
+.reviewRating,
+.recommendBadge {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(169, 206, 255, 0.05);
+}
+
+.reviewComposer,
+.signInPromptInline,
+.accountPanel {
+  padding: 16px;
+}
+
+.reviewComposer form,
+.accountPanel form,
+.reportForm {
+  display: grid;
+  gap: 12px;
+}
+
+.reviewComposer label,
+.accountPanel label {
+  display: grid;
+  gap: 6px;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.reviewComposer input,
+.reviewComposer textarea,
+.accountPanel input,
+.reportForm textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(4, 8, 14, 0.95);
+  color: var(--ink);
+  padding: 10px;
+  outline: none;
+  resize: vertical;
+}
+
+.reviewComposer input:focus,
+.reviewComposer textarea:focus,
+.accountPanel input:focus,
+.reportForm textarea:focus {
+  border-color: rgba(242, 217, 149, 0.58);
+}
+
+.ratingField {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.ratingField legend {
+  margin-right: 6px;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.ratingField button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.ratingField button.active {
+  color: var(--gc-gold-bright);
+}
+
+.savePackButton.active,
+.reviewRating,
+.recommendBadge {
+  color: var(--gc-gold-bright);
+}
+
+.formNotice {
+  margin: 0;
+  color: var(--gc-blue-bright);
+}
+
+.formError {
+  margin: 0;
+  color: var(--amber);
+}
+
+.reviewList,
+.accountReviewList {
+  display: grid;
+  gap: 12px;
+}
+
+.reviewItem,
+.accountReviewList article {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(169, 206, 255, 0.04);
+  padding: 14px;
+}
+
+.reviewItemHeader span,
+.accountReviewList span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+}
+
+.reviewItem p,
+.accountReviewList p {
+  margin-bottom: 0;
+  color: var(--ink);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.signInPromptInline {
+  display: grid;
+  gap: 8px;
+  color: var(--ink-muted);
+}
+
+.signInPromptInline strong {
+  color: var(--ink);
+}
+
+.signInPromptInline.large {
+  min-height: 260px;
+  align-content: center;
+  justify-items: start;
+}
+
+.accountPage {
+  padding-top: 34px;
+}
+
+.accountHeader p {
+  max-width: 68ch;
+  color: var(--ink-muted);
+  line-height: 1.6;
+}
+
+.accountGrid {
+  display: grid;
+  grid-template-columns: minmax(260px, 420px) minmax(0, 1fr);
+  gap: 18px;
+}
+
+.accountPanel {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}

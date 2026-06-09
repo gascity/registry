@@ -1,0 +1,407 @@
+.detailPage {
+  padding-top: 34px;
+}
+
+.backButton {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 9px 12px;
+  background: rgba(6, 12, 20, 0.82);
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.backButton:hover,
+.backButton:focus-visible {
+  border-color: rgba(242, 217, 149, 0.48);
+  color: var(--ink);
+  outline: none;
+}
+
+.detailHero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 420px);
+  gap: 24px;
+  padding: 30px 0;
+}
+
+.detailHero h1 {
+  font-size: clamp(2.8rem, 5.5vw, 5rem);
+  line-height: 0.96;
+}
+
+.detailHero p {
+  max-width: 70ch;
+  color: var(--ink-muted);
+  font-size: 1.06rem;
+  line-height: 1.62;
+}
+
+.detailKicker {
+  margin-bottom: 16px;
+  color: var(--ink-muted);
+}
+
+.detailSnapshot {
+  align-self: start;
+  padding: 18px;
+}
+
+.tabCard {
+  overflow: hidden;
+}
+
+.tabHeader {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  padding: 8px;
+  background: rgba(5, 9, 18, 0.3);
+}
+
+.tabButton {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 0 12px;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.tabButton:hover,
+.tabButton:focus-visible {
+  border-color: var(--line);
+  color: var(--ink);
+  outline: none;
+}
+
+.tabButton.active {
+  border-color: rgba(242, 217, 149, 0.42);
+  background: rgba(242, 217, 149, 0.1);
+  color: var(--gc-gold-bright);
+}
+
+.tabBody {
+  min-height: 300px;
+  padding: 18px;
+}
+
+.installCommands,
+.sourceTab {
+  display: grid;
+  gap: 14px;
+}
+
+.installCommands {
+  max-width: 820px;
+}
+
+.commandBlock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 10px;
+  border-top: 1px solid var(--line);
+  padding: 14px 0 0;
+}
+
+.commandBlock + .commandBlock {
+  margin-top: 14px;
+}
+
+.commandBlock span {
+  grid-column: 1 / -1;
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.commandBlock code {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: rgba(4, 8, 14, 0.95);
+  color: var(--gc-blue-bright);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.copyButton {
+  display: inline-flex;
+  min-width: 92px;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0 10px;
+  background: rgba(169, 206, 255, 0.08);
+  color: var(--gc-gold-bright);
+  cursor: pointer;
+}
+
+.copyButton:hover,
+.copyButton:focus-visible {
+  border-color: rgba(242, 217, 149, 0.48);
+  outline: none;
+}
+
+.copyButton[data-copy-state="copied"] {
+  border-color: rgba(169, 206, 255, 0.46);
+  color: var(--gc-blue-bright);
+}
+
+.copyButton[data-copy-state="failed"] {
+  border-color: rgba(255, 143, 90, 0.46);
+  color: var(--gc-spark);
+}
+
+.readmeToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 18px;
+  color: var(--ink-muted);
+  font-size: 0.86rem;
+}
+
+.readmeToolbar a,
+.sourceTab .sourceLink {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  background: rgba(169, 206, 255, 0.05);
+  color: var(--blue);
+}
+
+.markdown {
+  display: grid;
+  gap: 14px;
+  max-width: 860px;
+  color: var(--ink);
+  line-height: 1.62;
+}
+
+.markdown :is(h1, h2, h3) {
+  color: var(--gc-text-bright);
+  font-family: var(--font-body);
+  font-weight: 650;
+  line-height: 1.18;
+  text-shadow: none;
+  text-transform: none;
+}
+
+.markdown h1 {
+  font-size: 2rem;
+}
+
+.markdown h2 {
+  margin-top: 12px;
+  font-size: 1.35rem;
+}
+
+.markdown h3 {
+  margin-top: 8px;
+  font-size: 1.08rem;
+}
+
+.markdown :is(p, ul, ol, pre, blockquote, table) {
+  margin: 0;
+}
+
+.markdown :is(ul, ol) {
+  padding-left: 1.25rem;
+}
+
+.markdown li + li {
+  margin-top: 6px;
+}
+
+.markdown a {
+  color: var(--gc-plasma);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.markdown img {
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.markdown pre {
+  max-width: 100%;
+  overflow-x: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: rgba(4, 8, 14, 0.95);
+}
+
+.markdown code {
+  color: var(--gc-blue-bright);
+  overflow-wrap: anywhere;
+}
+
+.markdown pre code {
+  white-space: pre-wrap;
+}
+
+.markdown :not(pre) > code {
+  border: 1px solid rgba(169, 206, 255, 0.18);
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: rgba(169, 206, 255, 0.06);
+}
+
+.markdown blockquote {
+  border-left: 3px solid rgba(242, 217, 149, 0.42);
+  padding-left: 14px;
+  color: var(--ink-muted);
+}
+
+.markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.metadataListWide {
+  max-width: 720px;
+}
+
+.trustCopy {
+  display: grid;
+  max-width: 760px;
+  gap: 14px;
+}
+
+.releaseTable {
+  display: grid;
+  gap: 10px;
+}
+
+.releaseRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 1fr);
+  gap: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  background: rgba(169, 206, 255, 0.04);
+}
+
+.releaseRow.withdrawn {
+  border-color: rgba(255, 143, 90, 0.32);
+  background: rgba(255, 143, 90, 0.06);
+}
+
+.releaseRow div:first-child {
+  display: grid;
+  gap: 6px;
+}
+
+.releaseRow strong {
+  color: var(--ink);
+}
+
+.releaseRow span,
+.releaseRow em,
+.mutedText {
+  color: var(--ink-muted);
+  line-height: 1.5;
+}
+
+.releaseRow em {
+  color: var(--amber);
+  font-style: normal;
+}
+
+.releaseFacts {
+  flex-wrap: wrap;
+  align-content: start;
+  justify-content: end;
+  font-size: 0.82rem;
+}
+
+.releaseFacts span,
+.releaseFacts code {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+
+.releaseFacts code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border-radius: var(--radius);
+  color: var(--gc-blue-bright);
+}
+
+.metadataList {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+}
+
+.metadataList div {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+
+.metadataList dt {
+  color: var(--ink-muted);
+}
+
+.metadataList dd {
+  margin: 0;
+  text-align: right;
+}
+
+.sourceLink {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--blue);
+  overflow-wrap: anywhere;
+}
+
+.installCallout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 16px;
+}
+
+.installCallout code {
+  display: block;
+  color: var(--gc-blue-bright);
+  overflow-wrap: anywhere;
+}

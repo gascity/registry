@@ -50,6 +50,7 @@ type CatalogReadme = {
 };
 
 type CatalogPack = {
+  packKey?: string;
   registry: string;
   name: string;
   description: string;
@@ -378,11 +379,13 @@ function renderCatalogJson(
       })),
       og_image: "/og/registry.svg",
       packs: packs.map((pack) => ({
+        pack_key: packKeyFor(pack),
         registry: pack.registry,
         name: pack.name,
         description: pack.description,
         source: pack.source,
         source_kind: pack.sourceKind,
+        search_text: searchTextFor(pack),
         readme: pack.readme,
         og_image: pack.ogImage ?? ogImagePath(pack.name),
         latest: latestActiveVersion(pack),
@@ -578,8 +581,28 @@ function ogImagePath(packName: string) {
   return `/og/${packOgFilename(packName)}`;
 }
 
+function packKeyFor(pack: CatalogPack) {
+  return `${pack.registry}--${pack.name.replaceAll("/", "--")}`;
+}
+
 function packOgFilename(packName: string) {
   return `${packName.replaceAll("/", "--")}.svg`;
+}
+
+function searchTextFor(pack: CatalogPack) {
+  return [
+    pack.name,
+    pack.registry,
+    pack.description,
+    pack.source,
+    pack.sourceKind,
+    pack.readme?.content ?? "",
+    ...pack.releases.map((release) => `${release.version} ${release.description}`),
+  ]
+    .join(" ")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 async function removeStaleOgFiles(expectedPathnames: Set<string>) {

@@ -17,9 +17,23 @@ images is synthesized into `public/catalog.json` and `public/og/`.
 
 ```bash
 bun install
-bun run generate
 bun run dev
 ```
+
+`bun run dev` regenerates the aggregate catalog, starts the Bun API on
+`127.0.0.1:8081`, and starts Vite on `127.0.0.1:5173`. Vite proxies `/api/*`
+to the Bun server, so the browser runs the real account and review API while
+frontend edits stay fast.
+
+Local development needs no external services:
+
+- Reviews, sessions, stars, and profile edits are stored in
+  `.registry-data/registry.local.json`.
+- The `Dev sign in` button creates a stable fake Gas City identity.
+- Set `REGISTRY_DATA_PATH=/path/to/file.json` to use a different local state
+  file.
+- Set `REGISTRY_DEV_AUTH=0` to hide the auth stub when testing signed-out
+  behavior.
 
 ## Quality Gates
 
@@ -33,8 +47,23 @@ bun run test:e2e
 ## Railway
 
 Railway builds this repository from `Dockerfile` via `railway.toml`.
-The runtime image serves the Vite build with Nginx and listens on Railway's
-`PORT` environment variable.
+The runtime image starts the Bun server, serves the built Vite assets, exposes
+`/registry.toml` for the CLI, and listens on Railway's `PORT` environment
+variable.
+
+Production review/account state requires:
+
+```text
+APP_URL=https://registry.gascity.com
+DATABASE_URL=postgres://...
+SESSION_SECRET=<random secret>
+OIDC_ISSUER=https://auth.gascity.com/realms/<realm>
+OIDC_CLIENT_ID=<registry client id>
+OIDC_CLIENT_SECRET=<registry client secret>
+```
+
+When `DATABASE_URL` is absent the server intentionally falls back to the local
+JSON store, which is suitable for development but not for production.
 
 The app defaults to the generated aggregate JSON:
 

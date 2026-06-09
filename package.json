@@ -4,16 +4,22 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "bun run generate && bun scripts/dev.ts",
+    "dev:vite": "vite",
+    "dev:api": "REGISTRY_DEV_AUTH=1 bun server/index.ts",
+    "dev:static": "bun run generate && bun run build && REGISTRY_DEV_AUTH=1 bun server/index.ts",
     "generate": "bun scripts/generate-registry.ts",
     "generate:check": "bun scripts/generate-registry.ts --check",
     "build": "tsc -b && vite build",
+    "serve": "bun server/index.ts",
     "preview": "vite preview",
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "jose": "^6.2.3",
     "lucide-react": "^1.17.0",
+    "postgres": "^3.4.9",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
@@ -22,6 +28,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
+    "@types/bun": "^1.3.14",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

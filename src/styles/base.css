@@ -1,0 +1,256 @@
+:root {
+  color-scheme: dark;
+  font-family: var(--font-body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --gc-black: #050912;
+  --gc-dark: #09111b;
+  --gc-surface: #101a28;
+  --gc-surface-strong: #162233;
+  --gc-panel: rgba(10, 16, 25, 0.9);
+  --gc-blue: #7aa0cb;
+  --gc-blue-bright: #d9ebff;
+  --gc-cobalt: #3c5777;
+  --gc-plasma: #a9ceff;
+  --gc-spark: #ff8f5a;
+  --gc-gold: #cfa548;
+  --gc-gold-bright: #f2d995;
+  --gc-brass: #8d6830;
+  --gc-chrome: #ced7e2;
+  --gc-silver: #92a5b9;
+  --gc-grid: rgba(124, 170, 222, 0.08);
+  --gc-text: #e8eef7;
+  --gc-text-dim: #b1c0d1;
+  --gc-text-bright: #f8fbff;
+  --font-display: "Syncopate", "Avenir Next Condensed", sans-serif;
+  --font-body: "Saira", "Gill Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  --radius: 6px;
+  --shadow-soft: 0 28px 56px rgba(0, 0, 0, 0.34);
+  --shadow-blue: 0 0 36px rgba(130, 173, 228, 0.16);
+  --shadow-warm: 0 0 32px rgba(207, 165, 72, 0.18);
+  --bg: var(--gc-black);
+  --bg-soft: var(--gc-dark);
+  --surface: var(--gc-surface);
+  --surface-strong: var(--gc-surface-strong);
+  --line: rgba(206, 215, 226, 0.18);
+  --line-strong: rgba(206, 215, 226, 0.28);
+  --ink: var(--gc-text);
+  --ink-muted: var(--gc-text-dim);
+  --accent: var(--gc-gold-bright);
+  --accent-deep: var(--gc-gold);
+  --amber: var(--gc-spark);
+  --red: var(--gc-spark);
+  --blue: var(--gc-plasma);
+  --panel-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 18%),
+    linear-gradient(135deg, rgba(24, 36, 53, 0.88), rgba(10, 16, 25, 0.96));
+  background: var(--bg);
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    linear-gradient(
+      135deg,
+      rgba(255, 143, 90, 0.06),
+      transparent 25%,
+      rgba(169, 206, 255, 0.04) 58%,
+      transparent 82%
+    ),
+    repeating-linear-gradient(90deg, transparent 0, transparent 79px, var(--gc-grid) 80px),
+    repeating-linear-gradient(0deg, transparent 0, transparent 79px, rgba(124, 170, 222, 0.05) 80px),
+    linear-gradient(180deg, #07101b 0%, #050912 48%, #03060d 100%);
+  background-attachment: fixed;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+code {
+  font-family: var(--font-mono);
+}
+
+.app {
+  width: min(1280px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 20px 0 64px;
+}
+
+.siteHeader {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(5, 9, 18, 0.22);
+}
+
+.brandButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.brandButton strong,
+.brandButton small {
+  display: block;
+}
+
+.brandButton strong {
+  font-family: var(--font-display);
+  font-size: 0.96rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.brandButton small {
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+}
+
+.brandMark,
+.packIcon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.brandMark {
+  width: 36px;
+  height: 36px;
+  border-color: rgba(242, 217, 149, 0.78);
+  background: linear-gradient(135deg, var(--gc-gold-bright), #d7b35d 55%, #a97e37);
+  color: #08111a;
+  box-shadow: inset 0 1px 0 rgba(255, 248, 220, 0.32), var(--shadow-warm);
+}
+
+.packIcon {
+  width: 38px;
+  height: 38px;
+  border-color: rgba(169, 206, 255, 0.26);
+  background: rgba(169, 206, 255, 0.08);
+  color: var(--gc-gold-bright);
+}
+
+.siteNav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-muted);
+  font-size: 0.9rem;
+}
+
+.siteNav a {
+  border-radius: var(--radius);
+  padding: 8px 10px;
+}
+
+.siteNav a:hover,
+.siteNav a:focus-visible {
+  background: rgba(169, 206, 255, 0.08);
+  color: var(--ink);
+  outline: none;
+}
+
+.accountNav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.authStatus {
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+}
+
+.accountButton,
+.iconTextButton,
+.iconOnlyButton,
+.smallMutedButton,
+.textDangerButton,
+.savePackButton {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(169, 206, 255, 0.06);
+  color: var(--ink-muted);
+  cursor: pointer;
+  padding: 0 10px;
+}
+
+.accountButton:hover,
+.iconTextButton:hover,
+.iconOnlyButton:hover,
+.smallMutedButton:hover,
+.savePackButton:hover,
+.accountButton:focus-visible,
+.iconTextButton:focus-visible,
+.iconOnlyButton:focus-visible,
+.smallMutedButton:focus-visible,
+.savePackButton:focus-visible {
+  border-color: rgba(242, 217, 149, 0.48);
+  color: var(--ink);
+  outline: none;
+}
+
+.iconTextButton.primary {
+  border-color: rgba(242, 217, 149, 0.58);
+  background: linear-gradient(135deg, var(--gc-gold-bright), #d7b35d 55%, #a97e37);
+  color: #08111a;
+  font-weight: 700;
+}
+
+.iconOnlyButton {
+  width: 38px;
+  padding: 0;
+}
+
+.smallMutedButton {
+  min-height: 32px;
+  align-self: start;
+  font-size: 0.82rem;
+}
+
+.textDangerButton {
+  border-color: rgba(255, 143, 90, 0.38);
+  background: rgba(255, 143, 90, 0.08);
+  color: var(--amber);
+}

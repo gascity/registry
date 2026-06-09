@@ -22,6 +22,7 @@ export type CatalogReadme = {
 };
 
 export type CatalogPack = {
+  packKey: string;
   registry: string;
   name: string;
   description: string;
@@ -29,6 +30,7 @@ export type CatalogPack = {
   sourceKind: string;
   readme?: CatalogReadme;
   ogImage?: string;
+  searchText: string;
   releases: CatalogRelease[];
 };
 
@@ -69,6 +71,7 @@ type RawJsonCatalog = {
 };
 
 type RawJsonPack = {
+  pack_key?: unknown;
   registry?: unknown;
   name?: unknown;
   description?: unknown;
@@ -76,6 +79,7 @@ type RawJsonPack = {
   source_kind?: unknown;
   readme?: unknown;
   og_image?: unknown;
+  search_text?: unknown;
   releases?: unknown;
 };
 
@@ -141,6 +145,7 @@ function normalizeJsonCatalog(raw: RawJsonCatalog): { packs: CatalogPack[]; ogIm
 function normalizeJsonPack(raw: RawJsonPack): CatalogPack {
   const name = requireString(raw.name, "pack.name");
   return {
+    packKey: optionalString(raw.pack_key) ?? fallbackPackKey(optionalString(raw.registry) ?? "aggregate", name),
     registry: optionalString(raw.registry) ?? "aggregate",
     name,
     description: requireString(raw.description, `${name}.description`),
@@ -148,6 +153,7 @@ function normalizeJsonPack(raw: RawJsonPack): CatalogPack {
     sourceKind: requireString(raw.source_kind, `${name}.source_kind`),
     readme: normalizeJsonReadme(raw.readme),
     ogImage: optionalString(raw.og_image),
+    searchText: optionalString(raw.search_text) ?? "",
     releases: (Array.isArray(raw.releases) ? raw.releases : []).map((release) =>
       normalizeRelease(name, release as RawRelease),
     ),
@@ -157,11 +163,13 @@ function normalizeJsonPack(raw: RawJsonPack): CatalogPack {
 function normalizePack(raw: RawPack): CatalogPack {
   const name = requireString(raw.name, "pack.name");
   return {
+    packKey: fallbackPackKey("registry.toml", name),
     registry: "registry.toml",
     name,
     description: requireString(raw.description, `${name}.description`),
     source: requireString(raw.source, `${name}.source`),
     sourceKind: requireString(raw.source_kind, `${name}.source_kind`),
+    searchText: "",
     releases: (Array.isArray(raw.release) ? raw.release : []).map((release) =>
       normalizeRelease(name, release as RawRelease),
     ),
@@ -244,6 +252,10 @@ export function buildImportCommands(pack: CatalogPack, latest: string) {
     floating: `gc import add ${source} --name ${name} --version '>=${latest}'`,
     exact: `gc import add ${source} --name ${name} --version '${latest}'`,
   };
+}
+
+export function fallbackPackKey(registry: string, name: string) {
+  return `${registry}--${name.replaceAll("/", "--")}`;
 }
 
 function shellQuote(value: string) {

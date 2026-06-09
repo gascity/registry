@@ -3,4 +3,12 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  server: {
+    proxy: {
+      "/api": {
+        target: process.env.REGISTRY_API_URL ?? "http://127.0.0.1:8081",
+        changeOrigin: false,
+      },
+    },
+  },
 });

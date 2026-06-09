@@ -7,4 +7,5 @@ playwright-report/
 .env.*
 *.local
 *.log
+.registry-data/
 .DS_Store
