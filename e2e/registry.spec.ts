@@ -101,7 +101,9 @@ test("footer links expose source, verifier, and publishing pages", async ({ page
   await page.getByRole("contentinfo").getByRole("link", { name: "Publish a pack" }).click();
   await expect(page).toHaveURL(/\/publish$/);
   await expect(page.getByRole("heading", { name: "Publish A Pack" })).toBeVisible();
-  await expect(page.getByText("gc pack release validate registry.toml")).toBeVisible();
+  await expect(page.getByText("gc pack release stamp registry.toml my-pack")).toBeVisible();
+  await expect(page.getByText("gc pack release validate registry.toml --pack my-pack")).toBeVisible();
+  await expect(page.getByText("make registry-publish")).toHaveCount(0);
   await expectHealthyPage(page, errors);
 });
 

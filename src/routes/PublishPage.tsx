@@ -1,5 +1,27 @@
-import { ExternalLink, FileCode2, GitPullRequest, PackagePlus, ShieldCheck } from "lucide-react";
+import {
+  ExternalLink,
+  FileCode2,
+  GitPullRequest,
+  PackagePlus,
+  ShieldCheck,
+  TerminalSquare,
+} from "lucide-react";
 import { REGISTRY_SOURCE_URL } from "../lib/links";
+
+const installGcCommand = `brew install gastownhall/gascity/gascity
+gc version`;
+
+const stampReleaseCommand = `PACK_COMMIT="$(git rev-parse HEAD)"
+
+gc pack release stamp registry.toml my-pack \\
+  --version 0.1.0 \\
+  --ref main \\
+  --commit "$PACK_COMMIT" \\
+  --source "https://github.com/example/gascity-packs/tree/main/my-pack" \\
+  --pack-description "Short description shown in search results." \\
+  --description "Initial release."`;
+
+const validateRegistryCommand = `gc pack release validate registry.toml --pack my-pack`;
 
 const registryTomlExample = `schema = 1
 
@@ -73,13 +95,13 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
         <ol className="stepList">
           <li>
             <strong>Put the pack in a GitHub repository.</strong>
-            <span>Commit the pack content and README before stamping a release.</span>
+            <span>Commit and push the pack content before stamping a release.</span>
           </li>
           <li>
-            <strong>Stamp or update your canonical `registry.toml`.</strong>
+            <strong>Stamp your canonical `registry.toml` with `gc`.</strong>
             <span>
-              Prefer `gc pack release stamp` or your repo's `make registry-publish` wrapper so the
-              commit and content hash are generated from tracked content.
+              Run `gc pack release stamp` so the release commit, pack name, and content hash are
+              generated from the exact tracked GitHub source.
             </span>
           </li>
           <li>
@@ -103,19 +125,44 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Preferred release command</p>
-          <h2>Stamp The Release</h2>
+          <p className="eyebrow">Install gc</p>
+          <h2>Use The Canonical Tool</h2>
           <p className="mutedText">
-            Existing pack repos can wrap this with `make registry-publish`. `REGISTRY_COMMIT`
-            defaults to `HEAD`, and only tracked files at that commit are hashed.
+            `gc` owns the release hash format. Install it first, then use the `pack release`
+            commands below instead of hand-editing release metadata.
           </p>
         </div>
         <pre className="docsCode">
-          <code>{`GC=/path/to/gc make registry-publish \\
-  PACK=my-pack \\
-  VERSION=0.1.0 \\
-  DESCRIPTION="Initial release." \\
-  PACK_DESCRIPTION="Short description shown in search results."`}</code>
+          <code>{installGcCommand}</code>
+        </pre>
+      </section>
+
+      <section className="docsSection twoColumnDocs">
+        <div>
+          <p className="eyebrow">Release command</p>
+          <h2>Stamp The Release</h2>
+          <p className="mutedText">
+            Run this from the repository that owns `registry.toml`, after the pack commit has been
+            pushed to GitHub. `gc` clones the source, checks the pack name in `pack.toml`, resolves
+            the full commit SHA, and writes the canonical `sha256:` content hash.
+          </p>
+        </div>
+        <pre className="docsCode">
+          <code>{stampReleaseCommand}</code>
+        </pre>
+      </section>
+
+      <section className="docsSection twoColumnDocs">
+        <div>
+          <p className="eyebrow">Validation</p>
+          <h2>Check The Registry File</h2>
+          <p className="mutedText">
+            Validation re-fetches the recorded source and verifies every active release hash before
+            you open the pointer PR.
+          </p>
+        </div>
+        <pre className="docsCode">
+          <code>{validateRegistryCommand}</code>
         </pre>
       </section>
 
@@ -153,6 +200,10 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
           <h2>Where It Appears</h2>
         </div>
         <ul className="checkList">
+          <li>
+            <TerminalSquare size={16} aria-hidden="true" />
+            Local validation: `gc pack release validate registry.toml`
+          </li>
           <li>
             <FileCode2 size={16} aria-hidden="true" />
             CLI-compatible aggregate: `https://registry.gascity.com/registry.toml`
