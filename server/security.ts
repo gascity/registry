@@ -64,7 +64,7 @@ function contentSecurityPolicy(config: ServerConfig) {
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com data:",
     "img-src 'self' data: https:",
-    "connect-src 'self'",
+    "connect-src 'self' https://events.gascity.com",
     "form-action 'self'",
   ];
   if (config.isProduction) directives.push("upgrade-insecure-requests");
