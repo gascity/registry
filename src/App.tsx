@@ -15,6 +15,8 @@ import {
 } from "./lib/urlState";
 import { AccountPage } from "./routes/AccountPage";
 import { AdminPublishPage } from "./routes/AdminPublishPage";
+import { CliAuthPage } from "./routes/CliAuthPage";
+import { CliDevicePage } from "./routes/CliDevicePage";
 import { HomePage } from "./routes/HomePage";
 import { PackDetail } from "./routes/PackDetail";
 import { PublishPage } from "./routes/PublishPage";
@@ -138,6 +140,26 @@ function App() {
     );
   }
 
+  if (route.kind === "cliAuth") {
+    return frame(
+      <CliAuthPage
+        auth={auth}
+        signIn={() => signIn()}
+        devSignIn={() => devSignIn()}
+      />,
+    );
+  }
+
+  if (route.kind === "cliDevice") {
+    return frame(
+      <CliDevicePage
+        auth={auth}
+        signIn={() => signIn()}
+        devSignIn={() => devSignIn()}
+      />,
+    );
+  }
+
   if (route.kind === "pack") {
     return frame(
       <PackDetail
@@ -176,6 +198,10 @@ function updatePageMetadata(
       ? "Account | Gas City Registry"
       : route.kind === "adminPublish"
         ? "Publish Review | Gas City Registry"
+      : route.kind === "cliAuth"
+        ? "CLI Login | Gas City Registry"
+      : route.kind === "cliDevice"
+        ? "CLI Device Login | Gas City Registry"
       : route.kind === "verify"
         ? "Pack Ownership Verification | Gas City Registry"
         : route.kind === "publish"
@@ -187,6 +213,8 @@ function updatePageMetadata(
       ? "How Gas City Registry verifies pack ownership through the GitHub App verifier."
       : route.kind === "adminPublish"
         ? "Review and approve Gas City Registry direct publish requests."
+      : route.kind === "cliAuth" || route.kind === "cliDevice"
+        ? "Authorize Gas City CLI access to the Gas City Registry."
       : route.kind === "publish"
         ? "How to publish a new pack pointer to the Gas City Registry aggregate."
     : "Browse versioned Gas City packs, registry releases, and import commands.";

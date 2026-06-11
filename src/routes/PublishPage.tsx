@@ -20,8 +20,16 @@ const directPublishCommand = `cd path/to/your-pack
 git status --short
 git push
 
-export GC_REGISTRY_TOKEN="gcr_..."
+gc registry login
 gc registry publish .`;
+
+const githubActionsCommand = `permissions:
+  contents: read
+  id-token: write
+
+steps:
+  - uses: actions/checkout@v4
+  - run: gc registry publish path/to/your-pack`;
 
 const validateRegistryCommand = `gc pack release validate registry.toml --pack my-pack`;
 
@@ -261,15 +269,18 @@ export function PublishPage({
             <span>Commit and push the pack content before publishing.</span>
           </li>
           <li>
-            <strong>Create a registry API token.</strong>
-            <span>Your account page can create a personal token for the CLI.</span>
+            <strong>Log in with the CLI.</strong>
+            <span>
+              <code>gc registry login</code> uses the registry sign-in provider and stores a local
+              revocable token.
+            </span>
           </li>
           <li>
             <strong>Run the publish command from the pack root.</strong>
             <span>
-              The CLI reads <code>GC_REGISTRY_TOKEN</code>, verifies the checkout is clean,
-              confirms <code>HEAD</code> is pushed, and submits the repo, commit, pack path, name,
-              and version to the registry.
+              The CLI reads the stored login token, verifies the checkout is clean, confirms{" "}
+              <code>HEAD</code> is pushed, and submits the repo, commit, pack path, name, and
+              version to the registry.
             </span>
           </li>
           <li>
@@ -310,12 +321,25 @@ export function PublishPage({
           <p className="eyebrow">Direct publish target</p>
           <h2>Submit The Request</h2>
           <p className="mutedText">
-            Run this from the pack root after creating an account API token and pushing the commit
-            to GitHub.
+            Run this from the pack root after signing in and pushing the commit to GitHub.
           </p>
         </div>
         <pre className="docsCode">
           <code>{directPublishCommand}</code>
+        </pre>
+      </section>
+
+      <section className="docsSection twoColumnDocs">
+        <div>
+          <p className="eyebrow">Automated releases</p>
+          <h2>Use GitHub Actions OIDC</h2>
+          <p className="mutedText">
+            CI can publish without a stored secret. The workflow grants `id-token: write`; the CLI
+            exchanges GitHub's repository identity for a short-lived registry publish token.
+          </p>
+        </div>
+        <pre className="docsCode">
+          <code>{githubActionsCommand}</code>
         </pre>
       </section>
 

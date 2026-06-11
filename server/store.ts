@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import postgres, { type Sql } from "postgres";
+import { hashCliDeviceCode, hashCliUserCode, normalizeCliUserCode } from "./cli-auth";
 import { randomToken, sha256 } from "./crypto";
 import { normalizePublishRequestInput } from "./publish";
 import { generateApiToken, hashApiToken } from "./tokens";
@@ -8,7 +9,10 @@ import type {
   AccountReview,
   ApiTokenAuthResult,
   ApiTokenCreateResult,
+  ApiTokenPublishConstraints,
   ApiTokenRow,
+  CliDeviceCodeCreateResult,
+  CliDevicePollResult,
   IdentityClaims,
   PackOwnership,
   PublisherSummary,
@@ -31,6 +35,7 @@ const idPrefix = {
   user: "usr",
   session: "ses",
   apiToken: "apt",
+  cliDeviceCode: "cdc",
   review: "rev",
   report: "rpt",
   audit: "aud",
@@ -118,7 +123,9 @@ function apiTokenFromRow(row: {
   id: string;
   label: string;
   prefix: string;
+  kind?: string | null;
   created_at: Date | string | number;
+  expires_at?: Date | string | number | null;
   last_used_at?: Date | string | number | null;
   revoked_at?: Date | string | number | null;
 }): ApiTokenRow {
@@ -126,15 +133,79 @@ function apiTokenFromRow(row: {
     id: row.id,
     label: row.label,
     prefix: row.prefix,
+    kind: row.kind === "github_actions_publish" ? "github_actions_publish" : "personal",
     createdAt: toIso(row.created_at),
+    expiresAt: row.expires_at ? toIso(row.expires_at) : undefined,
     lastUsedAt: row.last_used_at ? toIso(row.last_used_at) : undefined,
     revokedAt: row.revoked_at ? toIso(row.revoked_at) : undefined,
+  };
+}
+
+function normalizeApiTokenKind(value: ApiTokenRow["kind"] | undefined): ApiTokenRow["kind"] {
+  return value === "github_actions_publish" ? "github_actions_publish" : "personal";
+}
+
+function normalizeApiTokenConstraints(value: unknown): ApiTokenPublishConstraints | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Partial<ApiTokenPublishConstraints>;
+  if (
+    typeof raw.repoUrl !== "string" ||
+    typeof raw.commit !== "string" ||
+    typeof raw.packPath !== "string" ||
+    typeof raw.requestedName !== "string" ||
+    typeof raw.requestedVersion !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    repoUrl: raw.repoUrl,
+    commit: raw.commit,
+    packPath: raw.packPath,
+    requestedName: raw.requestedName,
+    requestedVersion: raw.requestedVersion,
   };
 }
 
 function normalizeApiTokenLabel(value: string | undefined) {
   const label = value?.trim().replace(/\s+/g, " ").slice(0, 120);
   return label || "CLI token";
+}
+
+function cliDeviceCodeFromInput(input: {
+  deviceCode: string;
+  userCode: string;
+  label?: string;
+  expiresAt: Date;
+  intervalSeconds: number;
+}): StoredCliDeviceCode & { userCode: string } {
+  const userCode = normalizeCliUserCode(input.userCode);
+  return {
+    id: newId("cliDeviceCode"),
+    deviceCodeHash: hashCliDeviceCode(input.deviceCode),
+    userCodeHash: hashCliUserCode(userCode),
+    label: normalizeApiTokenLabel(input.label),
+    status: "pending",
+    intervalSeconds: Math.max(1, Math.min(30, Math.trunc(input.intervalSeconds))),
+    createdAt: new Date().toISOString(),
+    expiresAt: input.expiresAt.toISOString(),
+    userCode,
+  };
+}
+
+function cliDeviceCodeCreateResult(
+  record: StoredCliDeviceCode & { userCode: string },
+  deviceCode: string,
+): CliDeviceCodeCreateResult {
+  return {
+    deviceCode,
+    userCode: record.userCode,
+    expiresAt: record.expiresAt,
+    intervalSeconds: record.intervalSeconds,
+  };
+}
+
+function isExpiredIso(value: string) {
+  return Date.parse(value) <= Date.now();
 }
 
 function validateReviewInput(input: ReviewInput) {
@@ -365,13 +436,52 @@ export class PostgresRegistryStore implements RegistryStore {
         label text NOT NULL,
         prefix text NOT NULL,
         token_hash text UNIQUE NOT NULL,
+        kind text NOT NULL DEFAULT 'personal',
+        expires_at timestamptz,
+        constraints jsonb,
         created_at timestamptz NOT NULL DEFAULT now(),
         last_used_at timestamptz,
         revoked_at timestamptz
       )
     `;
+    await this.sql`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'personal'`;
+    await this.sql`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS expires_at timestamptz`;
+    await this.sql`ALTER TABLE api_tokens ADD COLUMN IF NOT EXISTS constraints jsonb`;
+    await this.sql`ALTER TABLE api_tokens DROP CONSTRAINT IF EXISTS api_tokens_kind_check`;
+    await this.sql`
+      ALTER TABLE api_tokens
+      ADD CONSTRAINT api_tokens_kind_check
+      CHECK (kind IN ('personal', 'github_actions_publish'))
+    `;
     await this.sql`CREATE INDEX IF NOT EXISTS api_tokens_user_id_idx ON api_tokens (user_id, created_at DESC)`;
     await this.sql`CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_token_hash_unique ON api_tokens (token_hash)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS api_tokens_expires_idx ON api_tokens (expires_at)`;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS cli_device_codes (
+        id text PRIMARY KEY,
+        device_code_hash text UNIQUE NOT NULL,
+        user_code_hash text UNIQUE NOT NULL,
+        user_id text REFERENCES users(id) ON DELETE SET NULL,
+        label text NOT NULL,
+        status text NOT NULL DEFAULT 'pending',
+        interval_seconds integer NOT NULL DEFAULT 5,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        expires_at timestamptz NOT NULL,
+        approved_at timestamptz,
+        denied_at timestamptz,
+        consumed_at timestamptz,
+        last_polled_at timestamptz
+      )
+    `;
+    await this.sql`ALTER TABLE cli_device_codes DROP CONSTRAINT IF EXISTS cli_device_codes_status_check`;
+    await this.sql`
+      ALTER TABLE cli_device_codes
+      ADD CONSTRAINT cli_device_codes_status_check
+      CHECK (status IN ('pending', 'approved', 'denied', 'consumed'))
+    `;
+    await this.sql`CREATE UNIQUE INDEX IF NOT EXISTS cli_device_codes_device_hash_unique ON cli_device_codes (device_code_hash)`;
+    await this.sql`CREATE UNIQUE INDEX IF NOT EXISTS cli_device_codes_user_hash_unique ON cli_device_codes (user_code_hash)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS cli_device_codes_expires_idx ON cli_device_codes (expires_at)`;
     await this.sql`
       CREATE TABLE IF NOT EXISTS pack_reviews (
         id text PRIMARY KEY,
@@ -615,6 +725,8 @@ export class PostgresRegistryStore implements RegistryStore {
     const rows = await this.sql`
       SELECT
         api_tokens.id AS token_id,
+        api_tokens.kind,
+        api_tokens.constraints,
         api_tokens.last_used_at,
         users.id AS user_id,
         users.handle,
@@ -627,6 +739,7 @@ export class PostgresRegistryStore implements RegistryStore {
       JOIN users ON users.id = api_tokens.user_id
       WHERE api_tokens.token_hash = ${hashApiToken(token)}
         AND api_tokens.revoked_at IS NULL
+        AND (api_tokens.expires_at IS NULL OR api_tokens.expires_at > now())
         AND users.status = 'active'
       LIMIT 1
     `;
@@ -644,6 +757,8 @@ export class PostgresRegistryStore implements RegistryStore {
     }
     return {
       tokenId: row.token_id,
+      kind: normalizeApiTokenKind(row.kind),
+      constraints: normalizeApiTokenConstraints(row.constraints),
       user: sessionUser({
         id: row.user_id,
         handle: row.handle,
@@ -658,7 +773,7 @@ export class PostgresRegistryStore implements RegistryStore {
 
   async listApiTokens(userId: string): Promise<ApiTokenRow[]> {
     const rows = await this.sql`
-      SELECT id, label, prefix, created_at, last_used_at, revoked_at
+      SELECT id, label, prefix, kind, created_at, expires_at, last_used_at, revoked_at
       FROM api_tokens
       WHERE user_id = ${userId}
       ORDER BY created_at DESC
@@ -669,14 +784,23 @@ export class PostgresRegistryStore implements RegistryStore {
 
   async createApiToken(
     userId: string,
-    input: { label?: string },
+    input: {
+      label?: string;
+      kind?: ApiTokenRow["kind"];
+      expiresAt?: Date;
+      constraints?: ApiTokenPublishConstraints;
+    },
   ): Promise<ApiTokenCreateResult> {
     const label = normalizeApiTokenLabel(input.label);
+    const kind = normalizeApiTokenKind(input.kind);
     const { token, prefix, tokenHash } = generateApiToken();
     const [row] = await this.sql`
-      INSERT INTO api_tokens (id, user_id, label, prefix, token_hash)
-      VALUES (${newId("apiToken")}, ${userId}, ${label}, ${prefix}, ${tokenHash})
-      RETURNING id, label, prefix, created_at, last_used_at, revoked_at
+      INSERT INTO api_tokens (id, user_id, label, prefix, token_hash, kind, expires_at, constraints)
+      VALUES (
+        ${newId("apiToken")}, ${userId}, ${label}, ${prefix}, ${tokenHash}, ${kind},
+        ${input.expiresAt ?? null}, ${input.constraints ? this.sql.json(input.constraints as any) : null}
+      )
+      RETURNING id, label, prefix, kind, created_at, expires_at, last_used_at, revoked_at
     `;
     return { ...apiTokenFromRow(row as any), token };
   }
@@ -690,6 +814,101 @@ export class PostgresRegistryStore implements RegistryStore {
       RETURNING id
     `;
     if (!rows[0]) throw new StoreValidationError("API token not found.");
+  }
+
+  async createCliDeviceCode(input: {
+    deviceCode: string;
+    userCode: string;
+    label?: string;
+    expiresAt: Date;
+    intervalSeconds: number;
+  }): Promise<CliDeviceCodeCreateResult> {
+    const record = cliDeviceCodeFromInput(input);
+    await this.sql`
+      INSERT INTO cli_device_codes (
+        id, device_code_hash, user_code_hash, label, status, interval_seconds, created_at, expires_at
+      )
+      VALUES (
+        ${record.id}, ${record.deviceCodeHash}, ${record.userCodeHash}, ${record.label},
+        'pending', ${record.intervalSeconds}, ${new Date(record.createdAt)}, ${new Date(record.expiresAt)}
+      )
+    `;
+    return cliDeviceCodeCreateResult(record, input.deviceCode);
+  }
+
+  async pollCliDeviceCode(deviceCode: string): Promise<CliDevicePollResult> {
+    const deviceCodeHash = hashCliDeviceCode(deviceCode);
+    const rows = await this.sql`
+      SELECT * FROM cli_device_codes
+      WHERE device_code_hash = ${deviceCodeHash}
+      LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return { status: "expired" };
+    if (new Date(row.expires_at).getTime() <= Date.now()) return { status: "expired" };
+    if (row.status === "pending") {
+      void this.sql`
+        UPDATE cli_device_codes SET last_polled_at = now()
+        WHERE id = ${row.id} AND status = 'pending'
+      `.catch(() => {});
+      return { status: "pending", intervalSeconds: Number(row.interval_seconds) || 5 };
+    }
+    if (row.status === "denied") return { status: "denied" };
+    if (row.status !== "approved" || !row.user_id) return { status: "expired" };
+
+    const token = await this.sql.begin(async (sql) => {
+      const claimed = await sql`
+        UPDATE cli_device_codes
+        SET status = 'consumed', consumed_at = now(), last_polled_at = now()
+        WHERE device_code_hash = ${deviceCodeHash}
+          AND status = 'approved'
+          AND expires_at > now()
+          AND consumed_at IS NULL
+        RETURNING id, user_id, label
+      `;
+      const claim = claimed[0];
+      if (!claim?.user_id) return null;
+      const generated = generateApiToken();
+      const inserted = await sql`
+        INSERT INTO api_tokens (id, user_id, label, prefix, token_hash)
+        VALUES (${newId("apiToken")}, ${claim.user_id}, ${claim.label}, ${generated.prefix}, ${generated.tokenHash})
+        RETURNING id, label, prefix, created_at, last_used_at, revoked_at
+      `;
+      await sql`
+        INSERT INTO audit_logs (id, actor_user_id, action, target_type, target_id, metadata)
+        VALUES (${newId("audit")}, ${claim.user_id}, 'cli_device_code.consume', 'cli_device_code', ${claim.id}, ${sql.json(
+          { apiTokenId: inserted[0].id } as any,
+        )})
+      `;
+      return { ...apiTokenFromRow(inserted[0] as any), token: generated.token };
+    });
+    return token ? { status: "approved", token } : { status: "expired" };
+  }
+
+  async approveCliDeviceCode(userId: string, userCode: string): Promise<void> {
+    const rows = await this.sql`
+      UPDATE cli_device_codes
+      SET status = 'approved', user_id = ${userId}, approved_at = now()
+      WHERE user_code_hash = ${hashCliUserCode(userCode)}
+        AND status = 'pending'
+        AND expires_at > now()
+      RETURNING id
+    `;
+    if (!rows[0]) throw new StoreValidationError("Device code is invalid or expired.");
+    await this.audit(userId, "cli_device_code.approve", "cli_device_code", rows[0].id, {});
+  }
+
+  async denyCliDeviceCode(userId: string, userCode: string): Promise<void> {
+    const rows = await this.sql`
+      UPDATE cli_device_codes
+      SET status = 'denied', user_id = ${userId}, denied_at = now()
+      WHERE user_code_hash = ${hashCliUserCode(userCode)}
+        AND status = 'pending'
+        AND expires_at > now()
+      RETURNING id
+    `;
+    if (!rows[0]) throw new StoreValidationError("Device code is invalid or expired.");
+    await this.audit(userId, "cli_device_code.deny", "cli_device_code", rows[0].id, {});
   }
 
   async updateUserProfile(
@@ -1335,6 +1554,7 @@ type FileState = {
   users: Array<SessionUser & { gascityUserId?: string; gascityAccountId?: string; oidcSubject?: string }>;
   sessions: Array<{ hash: string; record: Omit<SessionRecord, "expiresAt"> & { expiresAt: string } }>;
   apiTokens?: StoredApiToken[];
+  cliDeviceCodes?: StoredCliDeviceCode[];
   reviews: ReviewRow[];
   reports: string[];
   stars: string[];
@@ -1349,10 +1569,29 @@ type StoredApiToken = {
   userId: string;
   label: string;
   prefix: string;
+  kind?: ApiTokenRow["kind"];
   tokenHash: string;
+  expiresAt?: string;
+  constraints?: ApiTokenPublishConstraints;
   createdAt: string;
   lastUsedAt?: string;
   revokedAt?: string;
+};
+
+type StoredCliDeviceCode = {
+  id: string;
+  deviceCodeHash: string;
+  userCodeHash: string;
+  userId?: string;
+  label: string;
+  status: "pending" | "approved" | "denied" | "consumed";
+  intervalSeconds: number;
+  createdAt: string;
+  expiresAt: string;
+  approvedAt?: string;
+  deniedAt?: string;
+  consumedAt?: string;
+  lastPolledAt?: string;
 };
 
 class FileRegistryStore implements RegistryStore {
@@ -1363,6 +1602,7 @@ class FileRegistryStore implements RegistryStore {
   >();
   private sessions = new Map<string, { record: SessionRecord; hash: string }>();
   private apiTokens = new Map<string, StoredApiToken>();
+  private cliDeviceCodes = new Map<string, StoredCliDeviceCode>();
   private reviews = new Map<string, ReviewRow>();
   private reports = new Set<string>();
   private stars = new Set<string>();
@@ -1404,6 +1644,7 @@ class FileRegistryStore implements RegistryStore {
         });
       }
       for (const token of raw.apiTokens ?? []) this.apiTokens.set(token.id, token);
+      for (const code of raw.cliDeviceCodes ?? []) this.cliDeviceCodes.set(code.id, code);
       for (const review of raw.reviews ?? []) this.reviews.set(review.id, review);
       this.reports = new Set(raw.reports ?? []);
       this.stars = new Set(raw.stars ?? []);
@@ -1489,6 +1730,7 @@ class FileRegistryStore implements RegistryStore {
     const now = Date.now();
     for (const stored of this.apiTokens.values()) {
       if (stored.tokenHash !== hash || stored.revokedAt) continue;
+      if (stored.expiresAt && isExpiredIso(stored.expiresAt)) return null;
       const user = this.users.get(stored.userId);
       if (!user || user.status !== "active") return null;
       const lastUsedAt = stored.lastUsedAt ? Date.parse(stored.lastUsedAt) : 0;
@@ -1496,7 +1738,12 @@ class FileRegistryStore implements RegistryStore {
         stored.lastUsedAt = new Date(now).toISOString();
         await this.save();
       }
-      return { tokenId: stored.id, user };
+      return {
+        tokenId: stored.id,
+        kind: normalizeApiTokenKind(stored.kind),
+        constraints: normalizeApiTokenConstraints(stored.constraints),
+        user,
+      };
     }
     return null;
   }
@@ -1510,7 +1757,9 @@ class FileRegistryStore implements RegistryStore {
         id: token.id,
         label: token.label,
         prefix: token.prefix,
+        kind: normalizeApiTokenKind(token.kind),
         createdAt: token.createdAt,
+        expiresAt: token.expiresAt,
         lastUsedAt: token.lastUsedAt,
         revokedAt: token.revokedAt,
       }));
@@ -1518,18 +1767,27 @@ class FileRegistryStore implements RegistryStore {
 
   async createApiToken(
     userId: string,
-    input: { label?: string },
+    input: {
+      label?: string;
+      kind?: ApiTokenRow["kind"];
+      expiresAt?: Date;
+      constraints?: ApiTokenPublishConstraints;
+    },
   ): Promise<ApiTokenCreateResult> {
     if (!this.users.has(userId)) throw new Error("User not found.");
     const { token, prefix, tokenHash } = generateApiToken();
     const now = new Date().toISOString();
     const id = newId("apiToken");
+    const kind = normalizeApiTokenKind(input.kind);
     this.apiTokens.set(id, {
       id,
       userId,
       label: normalizeApiTokenLabel(input.label),
       prefix,
+      kind,
       tokenHash,
+      expiresAt: input.expiresAt?.toISOString(),
+      constraints: input.constraints,
       createdAt: now,
     });
     await this.save();
@@ -1537,7 +1795,9 @@ class FileRegistryStore implements RegistryStore {
       id,
       label: this.apiTokens.get(id)!.label,
       prefix,
+      kind,
       token,
+      expiresAt: input.expiresAt?.toISOString(),
       createdAt: now,
     };
   }
@@ -1549,6 +1809,94 @@ class FileRegistryStore implements RegistryStore {
       stored.revokedAt = new Date().toISOString();
       await this.save();
     }
+  }
+
+  async createCliDeviceCode(input: {
+    deviceCode: string;
+    userCode: string;
+    label?: string;
+    expiresAt: Date;
+    intervalSeconds: number;
+  }): Promise<CliDeviceCodeCreateResult> {
+    const record = cliDeviceCodeFromInput(input);
+    const { userCode: _userCode, ...stored } = record;
+    this.cliDeviceCodes.set(stored.id, stored);
+    await this.save();
+    return cliDeviceCodeCreateResult(record, input.deviceCode);
+  }
+
+  async pollCliDeviceCode(deviceCode: string): Promise<CliDevicePollResult> {
+    const deviceCodeHash = hashCliDeviceCode(deviceCode);
+    const record = [...this.cliDeviceCodes.values()].find(
+      (candidate) => candidate.deviceCodeHash === deviceCodeHash,
+    );
+    if (!record || isExpiredIso(record.expiresAt)) return { status: "expired" };
+    if (record.status === "pending") {
+      record.lastPolledAt = new Date().toISOString();
+      await this.save();
+      return { status: "pending", intervalSeconds: record.intervalSeconds };
+    }
+    if (record.status === "denied") return { status: "denied" };
+    if (record.status !== "approved" || !record.userId || record.consumedAt) {
+      return { status: "expired" };
+    }
+
+    const generated = generateApiToken();
+    const now = new Date().toISOString();
+    const tokenId = newId("apiToken");
+    this.apiTokens.set(tokenId, {
+      id: tokenId,
+      userId: record.userId,
+      label: record.label,
+      prefix: generated.prefix,
+      tokenHash: generated.tokenHash,
+      createdAt: now,
+    });
+    record.status = "consumed";
+    record.consumedAt = now;
+    record.lastPolledAt = now;
+    await this.save();
+    return {
+      status: "approved",
+      token: {
+        id: tokenId,
+        label: record.label,
+        prefix: generated.prefix,
+        kind: "personal",
+        token: generated.token,
+        createdAt: now,
+      },
+    };
+  }
+
+  async approveCliDeviceCode(userId: string, userCode: string): Promise<void> {
+    const userCodeHash = hashCliUserCode(userCode);
+    const record = [...this.cliDeviceCodes.values()].find(
+      (candidate) => candidate.userCodeHash === userCodeHash,
+    );
+    if (!record || record.status !== "pending" || isExpiredIso(record.expiresAt)) {
+      throw new StoreValidationError("Device code is invalid or expired.");
+    }
+    if (!this.users.has(userId)) throw new Error("User not found.");
+    record.status = "approved";
+    record.userId = userId;
+    record.approvedAt = new Date().toISOString();
+    await this.save();
+  }
+
+  async denyCliDeviceCode(userId: string, userCode: string): Promise<void> {
+    const userCodeHash = hashCliUserCode(userCode);
+    const record = [...this.cliDeviceCodes.values()].find(
+      (candidate) => candidate.userCodeHash === userCodeHash,
+    );
+    if (!record || record.status !== "pending" || isExpiredIso(record.expiresAt)) {
+      throw new StoreValidationError("Device code is invalid or expired.");
+    }
+    if (!this.users.has(userId)) throw new Error("User not found.");
+    record.status = "denied";
+    record.userId = userId;
+    record.deniedAt = new Date().toISOString();
+    await this.save();
   }
 
   async updateUserProfile(userId: string, input: { displayName: string; handle?: string }) {
@@ -1845,6 +2193,7 @@ class FileRegistryStore implements RegistryStore {
         },
       })),
       apiTokens: [...this.apiTokens.values()],
+      cliDeviceCodes: [...this.cliDeviceCodes.values()],
       reviews: [...this.reviews.values()],
       reports: [...this.reports],
       stars: [...this.stars],

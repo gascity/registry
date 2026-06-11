@@ -14,8 +14,15 @@ import {
   startLogin,
   AuthError,
 } from "./auth";
+import {
+  CLI_DEVICE_CODE_INTERVAL_SECONDS,
+  CLI_DEVICE_CODE_TTL_MS,
+  buildCliVerificationUris,
+  generateCliDeviceCodePair,
+  validateCliLoopbackRedirectUri,
+} from "./cli-auth";
 import { requireCatalogPackSource } from "./catalog";
-import { PublishRequestValidationError } from "./publish";
+import { PublishRequestValidationError, normalizePublishRequestInput } from "./publish";
 import { validatePublishRequestForRegistry } from "./publish-validation";
 import { createStore, StoreConflictError, StoreValidationError } from "./store";
 import { RequestError, assertOrigin, errorJson, json, readJsonBody } from "./http";
@@ -32,7 +39,18 @@ import {
   verifyGitHubClaimState,
   verifyGitHubPackOwnership,
 } from "./github";
-import type { ApiTokenAuthResult, PublishRequestInput, ReviewInput, SessionRecord } from "./types";
+import {
+  GITHUB_ACTIONS_OIDC_AUDIENCE,
+  assertGitHubActionsCanMintPublishToken,
+  verifyGitHubActionsOidcToken,
+} from "./github-actions";
+import type {
+  ApiTokenAuthResult,
+  ApiTokenPublishConstraints,
+  PublishRequestInput,
+  ReviewInput,
+  SessionRecord,
+} from "./types";
 
 const config = loadConfig();
 const store = createStore(config.databaseUrl, config.localDataPath);
@@ -115,6 +133,137 @@ async function handleApi(request: Request) {
   if (request.method === "POST" && url.pathname === "/api/auth/logout") {
     if (session) requireCsrf(request, session);
     return await clearSession(request, config, store);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/cli/auth/token") {
+    requireCsrf(request, session);
+    enforceRateLimit(request, "cli-auth-token", { windowMs: 60 * 60 * 1000, max: 10 }, session);
+    const body = await readJsonBody<{ label?: string; redirectUri?: string; redirect_uri?: string; state?: string }>(
+      request,
+      4 * 1024,
+    );
+    const redirectUri = validateCliLoopbackRedirectUri(body.redirectUri ?? body.redirect_uri);
+    const state = typeof body.state === "string" ? body.state.trim() : "";
+    if (!state || state.length > 256) {
+      throw new RequestError(422, "VALIDATION_ERROR", "CLI auth state is required.");
+    }
+    const token = await store.createApiToken(session!.user.id, {
+      label: body.label || "GC CLI browser login",
+    });
+    return json({
+      token,
+      registryUrl: config.appUrl,
+      redirectUri,
+      state,
+    });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/cli/device/code") {
+    enforceRateLimit(request, "cli-device-code", { windowMs: 10 * 60 * 1000, max: 30 });
+    const body = await readJsonBody<{ label?: string }>(request, 4 * 1024);
+    const pair = generateCliDeviceCodePair();
+    const expiresAt = new Date(Date.now() + CLI_DEVICE_CODE_TTL_MS);
+    const created = await store.createCliDeviceCode({
+      ...pair,
+      label: body.label || "GC CLI device login",
+      expiresAt,
+      intervalSeconds: CLI_DEVICE_CODE_INTERVAL_SECONDS,
+    });
+    const uris = buildCliVerificationUris(config, created.userCode);
+    return json(
+      {
+        device_code: created.deviceCode,
+        user_code: created.userCode,
+        verification_uri: uris.verificationUri,
+        verification_uri_complete: uris.verificationUriComplete,
+        expires_in: Math.floor((expiresAt.getTime() - Date.now()) / 1000),
+        interval: created.intervalSeconds,
+      },
+      { status: 201 },
+    );
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/cli/device/token") {
+    enforceRateLimit(request, "cli-device-token", { windowMs: 10 * 60 * 1000, max: 240 });
+    const body = await readJsonBody<{ device_code?: string; deviceCode?: string }>(request, 4 * 1024);
+    const deviceCode = body.device_code ?? body.deviceCode;
+    if (!deviceCode) throw new RequestError(400, "INVALID_REQUEST", "Device code is required.");
+    const result = await store.pollCliDeviceCode(deviceCode);
+    if (result.status === "approved") {
+      return json({
+        access_token: result.token.token,
+        token_type: "bearer",
+        scope: "registry:publish",
+        registry_url: config.appUrl,
+      });
+    }
+    if (result.status === "pending") {
+      return json(
+        { error: "authorization_pending", interval: result.intervalSeconds },
+        { status: 400 },
+      );
+    }
+    if (result.status === "denied") {
+      return json({ error: "access_denied" }, { status: 400 });
+    }
+    return json({ error: "expired_token" }, { status: 400 });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/cli/device/approve") {
+    requireCsrf(request, session);
+    enforceRateLimit(request, "cli-device-approve", { windowMs: 10 * 60 * 1000, max: 30 }, session);
+    const body = await readJsonBody<{ userCode?: string; user_code?: string }>(request, 4 * 1024);
+    const userCode = body.userCode ?? body.user_code ?? "";
+    await store.approveCliDeviceCode(session!.user.id, userCode);
+    return json({ status: "approved" });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/cli/device/deny") {
+    requireCsrf(request, session);
+    enforceRateLimit(request, "cli-device-deny", { windowMs: 10 * 60 * 1000, max: 30 }, session);
+    const body = await readJsonBody<{ userCode?: string; user_code?: string }>(request, 4 * 1024);
+    const userCode = body.userCode ?? body.user_code ?? "";
+    await store.denyCliDeviceCode(session!.user.id, userCode);
+    return json({ status: "denied" });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/publish-tokens/github-actions/mint") {
+    enforceRateLimit(request, "github-actions-publish-token", { windowMs: 10 * 60 * 1000, max: 60 });
+    const body = await readJsonBody<
+      PublishRequestInput & { githubOidcToken?: string; oidcToken?: string }
+    >(request, 32 * 1024);
+    const identity = await verifyGitHubActionsOidcToken(body.githubOidcToken ?? body.oidcToken ?? "");
+    const normalized = assertGitHubActionsCanMintPublishToken(identity, body);
+    const user = await store.ensureUser({
+      subject: `github-actions:${identity.repositoryId ?? identity.repository.toLowerCase()}`,
+      gasCityUserId: `github-actions:${identity.repositoryId ?? identity.repository.toLowerCase()}`,
+      handle: `gha-${identity.repository.replace("/", "-")}`,
+      displayName: `${identity.repository} GitHub Actions`,
+    });
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const constraints: ApiTokenPublishConstraints = {
+      repoUrl: normalized.repoUrl,
+      commit: normalized.commit,
+      packPath: normalized.packPath,
+      requestedName: normalized.requestedName,
+      requestedVersion: normalized.requestedVersion,
+    };
+    const token = await store.createApiToken(user.id, {
+      label: `GitHub Actions ${normalized.requestedName} ${normalized.requestedVersion}`,
+      kind: "github_actions_publish",
+      expiresAt,
+      constraints,
+    });
+    return json(
+      {
+        access_token: token.token,
+        token_type: "bearer",
+        scope: "registry:publish",
+        audience: GITHUB_ACTIONS_OIDC_AUDIENCE,
+        expires_at: token.expiresAt,
+      },
+      { status: 201 },
+    );
   }
 
   if (request.method === "GET" && url.pathname === "/api/account/api-tokens") {
@@ -224,6 +373,9 @@ async function handleApi(request: Request) {
     const actor = requirePublishRequestActor(request, session, apiTokenAuth);
     enforceRateLimit(request, "publish-request-create", { windowMs: 60 * 60 * 1000, max: 20 }, session);
     const body = await readJsonBody<PublishRequestInput>(request, 16 * 1024);
+    if (actor.kind === "api_token" && actor.token.constraints) {
+      assertPublishTokenAllows(actor.token.constraints, body);
+    }
     const publishRequest = await store.createPublishRequest(actor.user.id, body);
     if (url.searchParams.get("validate") === "1" || url.searchParams.get("validate") === "true") {
       return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
@@ -337,12 +489,34 @@ function requirePublishRequestActor(
   session: SessionRecord | null,
   apiTokenAuth: ApiTokenAuthResult | null,
 ) {
-  if (apiTokenAuth) return { kind: "api_token" as const, user: apiTokenAuth.user };
+  if (apiTokenAuth) {
+    return { kind: "api_token" as const, user: apiTokenAuth.user, token: apiTokenAuth };
+  }
   if (session) {
     requireCsrf(request, session);
     return { kind: "session" as const, user: session.user };
   }
   throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
+}
+
+function assertPublishTokenAllows(
+  constraints: ApiTokenPublishConstraints,
+  input: PublishRequestInput,
+) {
+  const normalized = normalizePublishRequestInput(input);
+  if (
+    normalized.repoUrl !== constraints.repoUrl ||
+    normalized.commit !== constraints.commit ||
+    normalized.packPath !== constraints.packPath ||
+    normalized.requestedName !== constraints.requestedName ||
+    normalized.requestedVersion !== constraints.requestedVersion
+  ) {
+    throw new RequestError(
+      403,
+      "PUBLISH_TOKEN_SCOPE_DENIED",
+      "Registry publish token is scoped to a different package, version, repository, or commit.",
+    );
+  }
 }
 
 async function requirePublishRequestAccess(id: string, session: SessionRecord | null) {

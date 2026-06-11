@@ -6,7 +6,9 @@ export type RouteState =
   | { kind: "account" }
   | { kind: "adminPublish" }
   | { kind: "verify" }
-  | { kind: "publish" };
+  | { kind: "publish" }
+  | { kind: "cliAuth" }
+  | { kind: "cliDevice" };
 
 export const sortOptions: Array<{ value: SortKey; label: string }> = [
   { value: "featured", label: "Featured" },
@@ -29,6 +31,8 @@ export function parseRoute(pathname: string): RouteState {
   }
   if (pathname === "/verify" || pathname === "/verify/") return { kind: "verify" };
   if (pathname === "/publish" || pathname === "/publish/") return { kind: "publish" };
+  if (pathname === "/cli/auth" || pathname === "/cli/auth/") return { kind: "cliAuth" };
+  if (pathname === "/cli/device" || pathname === "/cli/device/") return { kind: "cliDevice" };
   const match = pathname.match(/^\/packs\/([^/]+)\/?$/);
   if (!match) return { kind: "home" };
   return { kind: "pack", name: decodeURIComponent(match[1]) };

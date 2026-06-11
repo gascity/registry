@@ -145,19 +145,35 @@ https://github.com/apps/gas-city-registry-verifier/installations/select_target
 See [docs/verify-pack-ownership.md](docs/verify-pack-ownership.md) for the
 maintainer-facing verification flow.
 
-Direct publishing uses personal registry API tokens. Authors create a token on
-the Account page, then run:
+Direct publishing uses registry API tokens. Authors can let the CLI create and
+store a revocable token with the normal registry sign-in flow:
 
 ```bash
-export GC_REGISTRY_TOKEN="gcr_..."
+gc registry login
 gc registry publish path/to/pack
 ```
 
-The registry stores only token hashes, short prefixes, labels, and usage
-timestamps. Revoked tokens can no longer authenticate publish requests. Browser
-sessions remain cookie + CSRF authenticated; bearer tokens are accepted only by
-routes that explicitly opt in, currently `/api/me` introspection and direct
-publish request creation.
+Headless environments can use `gc registry login --device`, or pass an existing
+token with `GC_REGISTRY_TOKEN`. GitHub Actions can publish without a stored
+secret by granting OIDC:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+
+steps:
+  - uses: actions/checkout@v4
+  - run: gc registry publish path/to/pack
+```
+
+The CLI exchanges GitHub's OIDC token for a 10-minute registry publish token
+scoped to the exact repo, commit, pack path, name, and version. The registry
+stores only token hashes, short prefixes, labels, optional expiry and scope
+metadata, and usage timestamps. Revoked or expired tokens can no longer
+authenticate publish requests. Browser sessions remain cookie + CSRF
+authenticated; bearer tokens are accepted only by routes that explicitly opt in,
+currently `/api/me` introspection and direct publish request creation.
 
 The app defaults to the generated aggregate JSON:
 

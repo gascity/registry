@@ -267,6 +267,10 @@
   max-width: 860px;
 }
 
+.cliAuthPanel {
+  max-width: 680px;
+}
+
 .reviewMeta {
   display: flex;
   flex-wrap: wrap;

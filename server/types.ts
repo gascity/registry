@@ -22,7 +22,9 @@ export type ApiTokenRow = {
   id: string;
   label: string;
   prefix: string;
+  kind: "personal" | "github_actions_publish";
   createdAt: string;
+  expiresAt?: string;
   lastUsedAt?: string;
   revokedAt?: string;
 };
@@ -33,8 +35,38 @@ export type ApiTokenCreateResult = ApiTokenRow & {
 
 export type ApiTokenAuthResult = {
   tokenId: string;
+  kind: ApiTokenRow["kind"];
+  constraints?: ApiTokenPublishConstraints;
   user: SessionUser;
 };
+
+export type ApiTokenPublishConstraints = {
+  repoUrl: string;
+  commit: string;
+  packPath: string;
+  requestedName: string;
+  requestedVersion: string;
+};
+
+export type CliDeviceCodeCreateResult = {
+  deviceCode: string;
+  userCode: string;
+  expiresAt: string;
+  intervalSeconds: number;
+};
+
+export type CliDevicePollResult =
+  | {
+      status: "pending";
+      intervalSeconds: number;
+    }
+  | {
+      status: "approved";
+      token: ApiTokenCreateResult;
+    }
+  | {
+      status: "denied" | "expired";
+    };
 
 export type IdentityClaims = {
   subject: string;
@@ -204,8 +236,23 @@ export interface RegistryStore {
   destroySession(token: string): Promise<void>;
   getUserForApiToken(token: string): Promise<ApiTokenAuthResult | null>;
   listApiTokens(userId: string): Promise<ApiTokenRow[]>;
-  createApiToken(userId: string, input: { label?: string }): Promise<ApiTokenCreateResult>;
+  createApiToken(userId: string, input: {
+    label?: string;
+    kind?: ApiTokenRow["kind"];
+    expiresAt?: Date;
+    constraints?: ApiTokenPublishConstraints;
+  }): Promise<ApiTokenCreateResult>;
   revokeApiToken(userId: string, tokenId: string): Promise<void>;
+  createCliDeviceCode(input: {
+    deviceCode: string;
+    userCode: string;
+    label?: string;
+    expiresAt: Date;
+    intervalSeconds: number;
+  }): Promise<CliDeviceCodeCreateResult>;
+  pollCliDeviceCode(deviceCode: string): Promise<CliDevicePollResult>;
+  approveCliDeviceCode(userId: string, userCode: string): Promise<void>;
+  denyCliDeviceCode(userId: string, userCode: string): Promise<void>;
   updateUserProfile(
     userId: string,
     input: { displayName: string; handle?: string },

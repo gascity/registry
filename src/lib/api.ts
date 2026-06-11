@@ -22,7 +22,9 @@ export type ApiTokenRow = {
   id: string;
   label: string;
   prefix: string;
+  kind: "personal" | "github_actions_publish";
   createdAt: string;
+  expiresAt?: string;
   lastUsedAt?: string;
   revokedAt?: string;
 };
