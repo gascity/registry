@@ -32,13 +32,20 @@ import {
   githubAppClientId,
   githubAppInstallUrl,
   githubAuthorizationUrl,
+  exchangeGitHubCode,
   parseGitHubSource,
   revokedRepositoryIdsFromWebhook,
   signGitHubClaimState,
+  signGitHubPublishImportState,
+  tryVerifyGitHubPublishImportState,
   validateGitHubWebhook,
   verifyGitHubClaimState,
   verifyGitHubPackOwnership,
 } from "./github";
+import {
+  discoverGitHubPublishCandidates,
+  publishInputFromGitHubCandidate,
+} from "./github-publish";
 import {
   GITHUB_ACTIONS_OIDC_AUDIENCE,
   assertGitHubActionsCanMintPublishToken,
@@ -329,6 +336,15 @@ async function handleApi(request: Request) {
     });
     return json({ authorizationUrl: githubAuthorizationUrl(config, state) });
   }
+  if (request.method === "POST" && url.pathname === "/api/publish/github/start") {
+    requireCsrf(request, session);
+    enforceRateLimit(request, "publish-github-start", { windowMs: 15 * 60 * 1000, max: 10 }, session);
+    const state = signGitHubPublishImportState(config, {
+      userId: session!.user.id,
+      redirectTo: "/publish",
+    });
+    return json({ authorizationUrl: githubAuthorizationUrl(config, state) });
+  }
   if (request.method === "GET" && url.pathname === "/api/ownership/github/callback") {
     enforceRateLimit(request, "ownership-callback", { windowMs: 15 * 60 * 1000, max: 30 }, session);
     if (!session) throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
@@ -336,6 +352,19 @@ async function handleApi(request: Request) {
     const state = url.searchParams.get("state");
     if (!code || !state) {
       throw new RequestError(400, "BAD_GITHUB_CALLBACK", "GitHub verification callback is incomplete.");
+    }
+    const publishImportState = tryVerifyGitHubPublishImportState(config, state);
+    if (publishImportState) {
+      if (publishImportState.userId !== session.user.id) {
+        throw new RequestError(403, "BAD_GITHUB_STATE", "GitHub publish state is invalid.");
+      }
+      const accessToken = await exchangeGitHubCode(config, code);
+      const importInput = await discoverGitHubPublishCandidates(accessToken);
+      const imported = await store.createGitHubPublishImport(session.user.id, importInput);
+      return new Response(null, {
+        status: 302,
+        headers: { Location: `${publishImportState.redirectTo}?githubImport=${encodeURIComponent(imported.id)}` },
+      });
     }
     const claim = verifyGitHubClaimState(config, state);
     if (claim.userId !== session.user.id) {
@@ -367,6 +396,40 @@ async function handleApi(request: Request) {
       );
     }
     return new Response(null, { status: 204 });
+  }
+
+  const githubPublishImportMatch = url.pathname.match(/^\/api\/publish\/github\/imports\/([^/]+)$/);
+  if (request.method === "GET" && githubPublishImportMatch?.[1]) {
+    requireCsrf(request, session);
+    const imported = await requireGitHubPublishImport(
+      session!.user.id,
+      decodeURIComponent(githubPublishImportMatch[1]),
+    );
+    return json({ import: imported });
+  }
+
+  const githubPublishSubmitMatch = url.pathname.match(/^\/api\/publish\/github\/imports\/([^/]+)\/submit$/);
+  if (request.method === "POST" && githubPublishSubmitMatch?.[1]) {
+    requireCsrf(request, session);
+    enforceRateLimit(request, "publish-github-submit", { windowMs: 60 * 60 * 1000, max: 20 }, session);
+    const imported = await requireGitHubPublishImport(
+      session!.user.id,
+      decodeURIComponent(githubPublishSubmitMatch[1]),
+    );
+    const body = await readJsonBody<{
+      candidateId?: string;
+      requestedName?: string;
+      requestedVersion?: string;
+      requestedRef?: string;
+      requestedDescription?: string;
+    }>(request, 8 * 1024);
+    const candidate = imported.candidates.find((item) => item.id === body.candidateId);
+    if (!candidate) throw new RequestError(422, "VALIDATION_ERROR", "GitHub publish candidate not found.");
+    const publishRequest = await store.createPublishRequest(
+      session!.user.id,
+      publishInputFromGitHubCandidate(candidate, body),
+    );
+    return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
   }
 
   if (request.method === "POST" && url.pathname === "/api/publish-requests") {
@@ -531,6 +594,12 @@ async function requirePublishRequestAccess(id: string, session: SessionRecord | 
     throw new RequestError(403, "FORBIDDEN", "Publish request access denied.");
   }
   return publishRequest;
+}
+
+async function requireGitHubPublishImport(userId: string, id: string) {
+  const imported = await store.getGitHubPublishImport(userId, id);
+  if (!imported) throw new RequestError(404, "NOT_FOUND", "GitHub publish import not found or expired.");
+  return imported;
 }
 
 async function validateAndStorePublishRequest(id: string) {

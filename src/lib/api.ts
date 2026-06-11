@@ -142,6 +142,41 @@ export type PublishRequestRow = {
   submittedBy: PublicUser;
 };
 
+export type GitHubPublishCandidate = {
+  id: string;
+  repository: {
+    id: string;
+    fullName: string;
+    owner: string;
+    name: string;
+    htmlUrl: string;
+    defaultBranch: string;
+    permission: "admin" | "maintain" | "push";
+  };
+  branch: string;
+  commit: string;
+  packPath: string;
+  packTomlPath: string;
+  pack: {
+    name: string;
+    version?: string;
+    description?: string;
+  };
+  warnings: string[];
+};
+
+export type GitHubPublishImportRow = {
+  id: string;
+  userId: string;
+  repositoriesScanned: number;
+  privateRepositoriesSkipped: number;
+  candidates: GitHubPublishCandidate[];
+  scanErrors: string[];
+  truncated: boolean;
+  expiresAt: string;
+  createdAt: string;
+};
+
 const signedOutState: AuthState = {
   user: null,
   csrfToken: null,

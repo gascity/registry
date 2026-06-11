@@ -201,6 +201,20 @@ test("dev auth can submit and inspect a publish request", async ({ page }, testI
   await expectHealthyPage(page, errors);
 });
 
+test("dev auth publish page exposes GitHub import and manual fallback", async ({ page }, testInfo) => {
+  const errors = trackRuntimeErrors(page);
+  const handle = `web-publish-${Date.now()}-${testInfo.workerIndex}`;
+
+  await page.goto(`/api/dev/sign-in?handle=${handle}&redirect=/publish`);
+  await expect(page.getByRole("heading", { name: "Publish From GitHub" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Find Packs From GitHub" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Find packs" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Install app/ })).toHaveAttribute("href", /github\.com\/apps/);
+  await expect(page.locator(".manualPublishDivider", { hasText: "Manual fallback" })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await expectHealthyPage(page, errors);
+});
+
 test("dev auth can create a token for bearer publish requests", async ({ page }, testInfo) => {
   const errors = trackRuntimeErrors(page);
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;

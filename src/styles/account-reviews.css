@@ -267,6 +267,152 @@
   max-width: 860px;
 }
 
+.githubImportPanel {
+  display: grid;
+  gap: 14px;
+  border: 1px solid rgba(169, 206, 255, 0.16);
+  border-radius: var(--radius);
+  background: rgba(169, 206, 255, 0.04);
+  padding: 14px;
+}
+
+.githubImportIntro,
+.githubCandidateHeader,
+.githubCandidateMeta,
+.githubImportSummary,
+.githubImportActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.githubImportIntro {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.githubImportIntro h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.githubImportIntro p:not(.eyebrow) {
+  max-width: 62ch;
+  margin: 6px 0 0;
+  color: var(--ink-muted);
+  line-height: 1.48;
+}
+
+.githubImportActions,
+.githubCandidateMeta,
+.githubImportSummary {
+  flex-wrap: wrap;
+}
+
+.githubImportState,
+.githubImportSummary span,
+.githubCandidateMeta span,
+.githubCandidateMeta a {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+}
+
+.githubImportState {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(4, 8, 14, 0.62);
+  padding: 10px;
+}
+
+.githubImportResults,
+.githubCandidateList {
+  display: grid;
+  gap: 12px;
+}
+
+.githubImportSummary span,
+.githubCandidateMeta span,
+.githubCandidateMeta a {
+  border: 1px solid rgba(169, 206, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(4, 8, 14, 0.48);
+  padding: 3px 8px;
+}
+
+.githubCandidate {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(4, 8, 14, 0.48);
+  padding: 12px;
+}
+
+.githubCandidateHeader {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.githubCandidateHeader > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.githubCandidateHeader strong {
+  color: var(--ink);
+}
+
+.githubCandidateHeader span:not(.requestStatus) {
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.candidateWarning {
+  margin: 0;
+  color: var(--amber);
+  font-size: 0.84rem;
+}
+
+.githubImportErrors {
+  color: var(--ink-muted);
+  font-size: 0.86rem;
+}
+
+.githubImportErrors summary {
+  cursor: pointer;
+}
+
+.githubImportErrors ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.manualPublishDivider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.manualPublishDivider::before,
+.manualPublishDivider::after {
+  height: 1px;
+  flex: 1;
+  background: var(--line);
+  content: "";
+}
+
 .cliAuthPanel {
   max-width: 680px;
 }

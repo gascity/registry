@@ -186,6 +186,8 @@
   .reviewsHeader,
   .reviewComposerHeader,
   .reviewItemHeader,
+  .githubImportIntro,
+  .githubCandidateHeader,
   .formActions {
     flex-direction: column;
     align-items: stretch;

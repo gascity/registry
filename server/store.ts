@@ -13,6 +13,9 @@ import type {
   ApiTokenRow,
   CliDeviceCodeCreateResult,
   CliDevicePollResult,
+  GitHubPublishCandidate,
+  GitHubPublishImportCreateInput,
+  GitHubPublishImportRow,
   IdentityClaims,
   PackOwnership,
   PublisherSummary,
@@ -41,6 +44,7 @@ const idPrefix = {
   audit: "aud",
   publisher: "pub",
   publishRequest: "prq",
+  githubPublishImport: "gpi",
 } as const;
 
 export function createStore(databaseUrl: string | undefined, localDataPath?: string): RegistryStore {
@@ -368,6 +372,87 @@ function normalizeStatusReason(value: string, fallback: string) {
   return clean;
 }
 
+function githubPublishImportFromRow(row: {
+  id: string;
+  user_id: string;
+  repositories_scanned: number;
+  private_repositories_skipped: number;
+  candidates: unknown;
+  scan_errors: unknown;
+  truncated: boolean;
+  expires_at: Date | string | number;
+  created_at: Date | string | number;
+}): GitHubPublishImportRow {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    repositoriesScanned: Number(row.repositories_scanned) || 0,
+    privateRepositoriesSkipped: Number(row.private_repositories_skipped) || 0,
+    candidates: normalizeGitHubPublishCandidates(row.candidates),
+    scanErrors: normalizeStringArray(row.scan_errors).slice(0, 25),
+    truncated: Boolean(row.truncated),
+    expiresAt: toIso(row.expires_at),
+    createdAt: toIso(row.created_at),
+  };
+}
+
+function normalizeGitHubPublishCandidates(value: unknown): GitHubPublishCandidate[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(normalizeGitHubPublishCandidate)
+    .filter((candidate): candidate is GitHubPublishCandidate => Boolean(candidate))
+    .slice(0, 100);
+}
+
+function normalizeGitHubPublishCandidate(value: unknown): GitHubPublishCandidate | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as GitHubPublishCandidate;
+  const valid =
+    typeof candidate.id === "string" &&
+    typeof candidate.repository?.id === "string" &&
+    typeof candidate.repository?.fullName === "string" &&
+    typeof candidate.repository?.owner === "string" &&
+    typeof candidate.repository?.name === "string" &&
+    typeof candidate.repository?.htmlUrl === "string" &&
+    typeof candidate.repository?.defaultBranch === "string" &&
+    (candidate.repository?.permission === "admin" ||
+      candidate.repository?.permission === "maintain" ||
+      candidate.repository?.permission === "push") &&
+    typeof candidate.branch === "string" &&
+    typeof candidate.commit === "string" &&
+    typeof candidate.packPath === "string" &&
+    typeof candidate.packTomlPath === "string" &&
+    typeof candidate.pack?.name === "string";
+  if (!valid) return null;
+  return {
+    id: candidate.id,
+    repository: {
+      id: candidate.repository.id,
+      fullName: candidate.repository.fullName,
+      owner: candidate.repository.owner,
+      name: candidate.repository.name,
+      htmlUrl: candidate.repository.htmlUrl,
+      defaultBranch: candidate.repository.defaultBranch,
+      permission: candidate.repository.permission,
+    },
+    branch: candidate.branch,
+    commit: candidate.commit,
+    packPath: candidate.packPath,
+    packTomlPath: candidate.packTomlPath,
+    pack: {
+      name: candidate.pack.name,
+      version: typeof candidate.pack.version === "string" ? candidate.pack.version : undefined,
+      description: typeof candidate.pack.description === "string" ? candidate.pack.description : undefined,
+    },
+    warnings: normalizeStringArray(candidate.warnings),
+  };
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string").map((item) => item.slice(0, 500));
+}
+
 export class PostgresRegistryStore implements RegistryStore {
   readonly kind = "postgres" as const;
   private readonly sql: Sql;
@@ -565,6 +650,21 @@ export class PostgresRegistryStore implements RegistryStore {
     `;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_publisher_idx ON pack_ownerships (publisher_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_github_repository_idx ON pack_ownerships (github_repository_id)`;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS github_publish_imports (
+        id text PRIMARY KEY,
+        user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        repositories_scanned integer NOT NULL DEFAULT 0,
+        private_repositories_skipped integer NOT NULL DEFAULT 0,
+        candidates jsonb NOT NULL DEFAULT '[]'::jsonb,
+        scan_errors jsonb NOT NULL DEFAULT '[]'::jsonb,
+        truncated boolean NOT NULL DEFAULT false,
+        expires_at timestamptz NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      )
+    `;
+    await this.sql`CREATE INDEX IF NOT EXISTS github_publish_imports_user_idx ON github_publish_imports (user_id, created_at DESC)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS github_publish_imports_expires_idx ON github_publish_imports (expires_at)`;
     await this.sql`
       CREATE TABLE IF NOT EXISTS pack_publish_requests (
         id text PRIMARY KEY,
@@ -1199,6 +1299,43 @@ export class PostgresRegistryStore implements RegistryStore {
     return rows.length;
   }
 
+  async createGitHubPublishImport(
+    userId: string,
+    input: GitHubPublishImportCreateInput,
+  ): Promise<GitHubPublishImportRow> {
+    const [row] = await this.sql`
+      INSERT INTO github_publish_imports (
+        id, user_id, repositories_scanned, private_repositories_skipped, candidates,
+        scan_errors, truncated, expires_at
+      )
+      VALUES (
+        ${newId("githubPublishImport")}, ${userId}, ${input.repositoriesScanned},
+        ${input.privateRepositoriesSkipped}, ${this.sql.json(input.candidates as any)},
+        ${this.sql.json(input.scanErrors as any)}, ${input.truncated}, ${input.expiresAt}
+      )
+      RETURNING *
+    `;
+    await this.audit(userId, "github_publish_import.create", "github_publish_import", row.id, {
+      repositoriesScanned: input.repositoriesScanned,
+      candidates: input.candidates.length,
+      truncated: input.truncated,
+    });
+    return githubPublishImportFromRow(row as any);
+  }
+
+  async getGitHubPublishImport(userId: string, id: string): Promise<GitHubPublishImportRow | null> {
+    void this.sql`DELETE FROM github_publish_imports WHERE expires_at <= now()`.catch(() => {});
+    const rows = await this.sql`
+      SELECT *
+      FROM github_publish_imports
+      WHERE id = ${id}
+        AND user_id = ${userId}
+        AND expires_at > now()
+      LIMIT 1
+    `;
+    return rows[0] ? githubPublishImportFromRow(rows[0] as any) : null;
+  }
+
   async createPublishRequest(
     userId: string,
     input: PublishRequestInput,
@@ -1562,6 +1699,7 @@ type FileState = {
   publisherMembers?: Array<{ publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>;
   ownerships?: PackOwnership[];
   publishRequests?: PublishRequestRow[];
+  githubPublishImports?: GitHubPublishImportRow[];
 };
 
 type StoredApiToken = {
@@ -1610,6 +1748,7 @@ class FileRegistryStore implements RegistryStore {
   private publisherMembers = new Map<string, { publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>();
   private ownerships = new Map<string, PackOwnership>();
   private publishRequests = new Map<string, PublishRequestRow>();
+  private githubPublishImports = new Map<string, GitHubPublishImportRow>();
   private readonly filePath: string;
 
   constructor(filePath: string) {
@@ -1658,6 +1797,15 @@ class FileRegistryStore implements RegistryStore {
           ...request,
           status: publishRequestStatus(request.status),
         });
+      }
+      for (const imported of raw.githubPublishImports ?? []) {
+        if (Date.parse(imported.expiresAt) > Date.now()) {
+          this.githubPublishImports.set(imported.id, {
+            ...imported,
+            candidates: normalizeGitHubPublishCandidates(imported.candidates),
+            scanErrors: normalizeStringArray(imported.scanErrors),
+          });
+        }
       }
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error;
@@ -2044,6 +2192,37 @@ class FileRegistryStore implements RegistryStore {
     return deleted;
   }
 
+  async createGitHubPublishImport(userId: string, input: GitHubPublishImportCreateInput) {
+    if (!this.users.has(userId)) throw new Error("User not found.");
+    const now = new Date().toISOString();
+    const imported: GitHubPublishImportRow = {
+      id: newId("githubPublishImport"),
+      userId,
+      repositoriesScanned: input.repositoriesScanned,
+      privateRepositoriesSkipped: input.privateRepositoriesSkipped,
+      candidates: input.candidates,
+      scanErrors: input.scanErrors.slice(0, 25),
+      truncated: input.truncated,
+      expiresAt: input.expiresAt.toISOString(),
+      createdAt: now,
+    };
+    this.githubPublishImports.set(imported.id, imported);
+    await this.save();
+    return imported;
+  }
+
+  async getGitHubPublishImport(userId: string, id: string) {
+    this.deleteExpiredGithubPublishImports();
+    const imported = this.githubPublishImports.get(id);
+    if (!imported || imported.userId !== userId) return null;
+    if (Date.parse(imported.expiresAt) <= Date.now()) {
+      this.githubPublishImports.delete(id);
+      await this.save();
+      return null;
+    }
+    return imported;
+  }
+
   async createPublishRequest(userId: string, input: PublishRequestInput): Promise<PublishRequestRow> {
     const normalized = normalizePublishRequestInput(input);
     const user = this.users.get(userId);
@@ -2201,6 +2380,9 @@ class FileRegistryStore implements RegistryStore {
       publisherMembers: [...this.publisherMembers.values()],
       ownerships: [...this.ownerships.values()],
       publishRequests: [...this.publishRequests.values()],
+      githubPublishImports: [...this.githubPublishImports.values()].filter(
+        (imported) => Date.parse(imported.expiresAt) > Date.now(),
+      ),
     };
     await writeFile(this.filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   }
@@ -2209,6 +2391,13 @@ class FileRegistryStore implements RegistryStore {
     const request = this.publishRequests.get(id);
     if (!request) throw new StoreValidationError("Publish request not found.");
     return request;
+  }
+
+  private deleteExpiredGithubPublishImports() {
+    const now = Date.now();
+    for (const [id, imported] of this.githubPublishImports) {
+      if (Date.parse(imported.expiresAt) <= now) this.githubPublishImports.delete(id);
+    }
   }
 
   private ensureGithubPublisher(input: VerifiedPackOwnershipInput): PublisherSummary {

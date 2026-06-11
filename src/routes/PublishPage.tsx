@@ -1,17 +1,27 @@
 import {
+  CheckCircle2,
   ExternalLink,
   FileCode2,
+  GitBranch,
   GitPullRequest,
+  Loader2,
   PackagePlus,
+  SearchCode,
   Send,
   ShieldCheck,
   TerminalSquare,
   UserRound,
 } from "lucide-react";
 import type React from "react";
-import { useState } from "react";
-import { apiRequest, type AuthState, type PublishRequestRow } from "../lib/api";
-import { REGISTRY_SOURCE_URL } from "../lib/links";
+import { useEffect, useState } from "react";
+import {
+  apiRequest,
+  type AuthState,
+  type GitHubPublishCandidate,
+  type GitHubPublishImportRow,
+  type PublishRequestRow,
+} from "../lib/api";
+import { GITHUB_APP_INSTALL_URL, REGISTRY_SOURCE_URL } from "../lib/links";
 
 const installGcCommand = `brew install gastownhall/gascity/gascity
 gc version`;
@@ -52,6 +62,13 @@ const sourcesTomlExample = `[[source]]
 name = "example-packs"
 url = "https://raw.githubusercontent.com/example/gascity-packs/main/registry.toml"`;
 
+type CandidateDraft = {
+  requestedName: string;
+  requestedVersion: string;
+  requestedRef: string;
+  requestedDescription: string;
+};
+
 export function PublishPage({
   navigateTo,
   auth,
@@ -73,6 +90,43 @@ export function PublishPage({
   const [publishRequest, setPublishRequest] = useState<PublishRequestRow | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [githubImport, setGitHubImport] = useState<GitHubPublishImportRow | null>(null);
+  const [candidateDrafts, setCandidateDrafts] = useState<Record<string, CandidateDraft>>({});
+  const [isStartingGitHubImport, setIsStartingGitHubImport] = useState(false);
+  const [isLoadingGitHubImport, setIsLoadingGitHubImport] = useState(false);
+  const [activeCandidateId, setActiveCandidateId] = useState<string | null>(null);
+  const [githubError, setGitHubError] = useState<string | null>(null);
+  const githubImportId = new URLSearchParams(window.location.search).get("githubImport");
+
+  useEffect(() => {
+    if (!auth.csrfToken || !githubImportId) return;
+    let active = true;
+    setIsLoadingGitHubImport(true);
+    setGitHubError(null);
+    void apiRequest<{ import: GitHubPublishImportRow }>(
+      `/api/publish/github/imports/${encodeURIComponent(githubImportId)}`,
+      {},
+      auth.csrfToken,
+    )
+      .then((result) => {
+        if (!active) return;
+        setGitHubImport(result.import);
+        setCandidateDrafts(
+          Object.fromEntries(
+            result.import.candidates.map((candidate) => [candidate.id, initialCandidateDraft(candidate)]),
+          ),
+        );
+      })
+      .catch((err) => {
+        if (active) setGitHubError(err instanceof Error ? err.message : "Unable to load GitHub import.");
+      })
+      .finally(() => {
+        if (active) setIsLoadingGitHubImport(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.csrfToken, githubImportId]);
 
   const submitPublishRequest = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -103,6 +157,66 @@ export function PublishPage({
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const startGitHubImport = async () => {
+    if (!auth.csrfToken) return;
+    setIsStartingGitHubImport(true);
+    setGitHubError(null);
+    try {
+      const result = await apiRequest<{ authorizationUrl: string }>(
+        "/api/publish/github/start",
+        { method: "POST" },
+        auth.csrfToken,
+      );
+      window.location.href = result.authorizationUrl;
+    } catch (err) {
+      setGitHubError(err instanceof Error ? err.message : "Unable to start GitHub import.");
+      setIsStartingGitHubImport(false);
+    }
+  };
+
+  const submitGitHubCandidate = async (candidate: GitHubPublishCandidate) => {
+    if (!auth.csrfToken || !githubImport) return;
+    const draft = candidateDrafts[candidate.id] ?? initialCandidateDraft(candidate);
+    setActiveCandidateId(candidate.id);
+    setGitHubError(null);
+    setPublishRequest(null);
+    try {
+      const result = await apiRequest<{ publishRequest: PublishRequestRow }>(
+        `/api/publish/github/imports/${encodeURIComponent(githubImport.id)}/submit`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            candidateId: candidate.id,
+            requestedName: draft.requestedName,
+            requestedVersion: draft.requestedVersion,
+            requestedRef: draft.requestedRef,
+            requestedDescription: draft.requestedDescription || undefined,
+          }),
+        },
+        auth.csrfToken,
+      );
+      setPublishRequest(result.publishRequest);
+    } catch (err) {
+      setGitHubError(err instanceof Error ? err.message : "Unable to submit GitHub candidate.");
+    } finally {
+      setActiveCandidateId(null);
+    }
+  };
+
+  const updateCandidateDraft = (
+    candidate: GitHubPublishCandidate,
+    field: keyof CandidateDraft,
+    value: string,
+  ) => {
+    setCandidateDrafts((current) => ({
+      ...current,
+      [candidate.id]: {
+        ...(current[candidate.id] ?? initialCandidateDraft(candidate)),
+        [field]: value,
+      },
+    }));
   };
 
   return (
@@ -157,6 +271,168 @@ export function PublishPage({
           </div>
         ) : (
           <div className="accountPanel publishFormPanel">
+            <div className="githubImportPanel">
+              <div className="githubImportIntro">
+                <div>
+                  <p className="eyebrow">Fast path</p>
+                  <h3>Find Packs From GitHub</h3>
+                  <p>
+                    Scan public repositories where the Registry GitHub App is installed and your
+                    GitHub account can publish changes.
+                  </p>
+                </div>
+                <div className="githubImportActions">
+                  <button
+                    className="iconTextButton primary"
+                    type="button"
+                    onClick={() => void startGitHubImport()}
+                    disabled={isStartingGitHubImport}
+                  >
+                    {isStartingGitHubImport ? <Loader2 size={15} /> : <GitBranch size={15} />}
+                    {isStartingGitHubImport ? "Opening GitHub" : "Find packs"}
+                  </button>
+                  <a className="smallMutedButton" href={GITHUB_APP_INSTALL_URL} rel="noreferrer">
+                    Install app
+                    <ExternalLink size={14} aria-hidden="true" />
+                  </a>
+                </div>
+              </div>
+
+              {isLoadingGitHubImport ? (
+                <div className="githubImportState">
+                  <Loader2 size={18} aria-hidden="true" />
+                  <span>Loading GitHub results.</span>
+                </div>
+              ) : null}
+
+              {githubImport ? (
+                <div className="githubImportResults">
+                  <div className="githubImportSummary">
+                    <span>
+                      <SearchCode size={14} aria-hidden="true" />
+                      {githubImport.repositoriesScanned} repos scanned
+                    </span>
+                    <span>{githubImport.candidates.length} candidates</span>
+                    {githubImport.privateRepositoriesSkipped > 0 ? (
+                      <span>{githubImport.privateRepositoriesSkipped} private skipped</span>
+                    ) : null}
+                    {githubImport.truncated ? <span>Result limit reached</span> : null}
+                  </div>
+
+                  {githubImport.candidates.length > 0 ? (
+                    <div className="githubCandidateList">
+                      {githubImport.candidates.map((candidate) => {
+                        const draft = candidateDrafts[candidate.id] ?? initialCandidateDraft(candidate);
+                        const isSubmittingCandidate = activeCandidateId === candidate.id;
+                        return (
+                          <form
+                            className="githubCandidate"
+                            key={candidate.id}
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              void submitGitHubCandidate(candidate);
+                            }}
+                          >
+                            <div className="githubCandidateHeader">
+                              <div>
+                                <strong>{candidate.pack.name}</strong>
+                                <span>
+                                  {candidate.repository.fullName} / {candidate.packPath}
+                                </span>
+                              </div>
+                              <span className="requestStatus pending_review">{candidate.repository.permission}</span>
+                            </div>
+                            <div className="githubCandidateMeta">
+                              <span>{candidate.branch}</span>
+                              <span>{candidate.commit.slice(0, 12)}</span>
+                              <a href={candidateSourceUrl(candidate)} rel="noreferrer" target="_blank">
+                                Source
+                                <ExternalLink size={13} aria-hidden="true" />
+                              </a>
+                            </div>
+                            <div className="formGridTwo">
+                              <label>
+                                <span>Pack name</span>
+                                <input
+                                  value={draft.requestedName}
+                                  readOnly
+                                  required
+                                />
+                              </label>
+                              <label>
+                                <span>Version</span>
+                                <input
+                                  placeholder="0.1.0"
+                                  value={draft.requestedVersion}
+                                  onChange={(event) =>
+                                    updateCandidateDraft(candidate, "requestedVersion", event.target.value)
+                                  }
+                                  required
+                                />
+                              </label>
+                            </div>
+                            <label>
+                              <span>Ref label</span>
+                              <input
+                                value={draft.requestedRef}
+                                onChange={(event) =>
+                                  updateCandidateDraft(candidate, "requestedRef", event.target.value)
+                                }
+                                required
+                              />
+                            </label>
+                            <label>
+                              <span>Description</span>
+                              <input
+                                placeholder="Short description shown in search results."
+                                value={draft.requestedDescription}
+                                onChange={(event) =>
+                                  updateCandidateDraft(candidate, "requestedDescription", event.target.value)
+                                }
+                              />
+                            </label>
+                            {candidate.warnings.length > 0 ? (
+                              <p className="candidateWarning">{candidate.warnings.join(" ")}</p>
+                            ) : null}
+                            <button
+                              className="iconTextButton primary"
+                              type="submit"
+                              disabled={isSubmittingCandidate}
+                            >
+                              {isSubmittingCandidate ? <Loader2 size={15} /> : <CheckCircle2 size={15} />}
+                              {isSubmittingCandidate ? "Submitting" : "Submit this pack"}
+                            </button>
+                          </form>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="emptyState">
+                      <strong>No pack.toml files found.</strong>
+                      <p>Install the GitHub App on the repo or use the manual form below.</p>
+                    </div>
+                  )}
+
+                  {githubImport.scanErrors.length > 0 ? (
+                    <details className="githubImportErrors">
+                      <summary>Some repositories could not be scanned</summary>
+                      <ul>
+                        {githubImport.scanErrors.map((error) => (
+                          <li key={error}>{error}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {githubError ? <p className="formError" role="alert">{githubError}</p> : null}
+            </div>
+
+            <div className="manualPublishDivider">
+              <span>Manual fallback</span>
+            </div>
+
             <form onSubmit={(event) => void submitPublishRequest(event)}>
               <div className="formGridTwo">
                 <label>
@@ -411,6 +687,21 @@ export function PublishPage({
       </section>
     </main>
   );
+}
+
+function initialCandidateDraft(candidate: GitHubPublishCandidate): CandidateDraft {
+  return {
+    requestedName: candidate.pack.name,
+    requestedVersion: candidate.pack.version ?? "",
+    requestedRef: candidate.branch,
+    requestedDescription: candidate.pack.description ?? "",
+  };
+}
+
+function candidateSourceUrl(candidate: GitHubPublishCandidate) {
+  const base = `${candidate.repository.htmlUrl}/tree/${candidate.commit}`;
+  if (candidate.packPath === ".") return base;
+  return `${base}/${candidate.packPath.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 function statusLabel(status: PublishRequestRow["status"]) {

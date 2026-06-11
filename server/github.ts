@@ -17,6 +17,14 @@ type GitHubClaimState = {
   createdAt: number;
 };
 
+type GitHubPublishImportState = {
+  flow: "publish_import";
+  nonce: string;
+  userId: string;
+  redirectTo: string;
+  createdAt: number;
+};
+
 type GitHubTokenResponse = {
   access_token?: string;
   error?: string;
@@ -152,6 +160,44 @@ export function verifyGitHubClaimState(config: ServerConfig, signedState: string
   return state;
 }
 
+export function signGitHubPublishImportState(
+  config: ServerConfig,
+  state: Omit<GitHubPublishImportState, "flow" | "nonce" | "createdAt">,
+) {
+  return signValue(
+    base64Url(
+      JSON.stringify({
+        ...state,
+        flow: "publish_import",
+        nonce: randomToken(18),
+        createdAt: Date.now(),
+      } satisfies GitHubPublishImportState),
+    ),
+    config.sessionSecret,
+  );
+}
+
+export function tryVerifyGitHubPublishImportState(config: ServerConfig, signedState: string) {
+  const encoded = verifySignedValue(signedState, config.sessionSecret);
+  if (!encoded) return null;
+  let state: Partial<GitHubPublishImportState>;
+  try {
+    state = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Partial<GitHubPublishImportState>;
+  } catch {
+    return null;
+  }
+  if (state.flow !== "publish_import") return null;
+  if (
+    !state.userId ||
+    !state.redirectTo ||
+    typeof state.createdAt !== "number" ||
+    Date.now() - state.createdAt > githubClaimStateMaxAgeMs
+  ) {
+    throw new RequestError(400, "BAD_GITHUB_STATE", "GitHub publish state is invalid.");
+  }
+  return state as GitHubPublishImportState;
+}
+
 export async function verifyGitHubPackOwnership(
   config: ServerConfig,
   code: string,
@@ -239,7 +285,7 @@ function githubCallbackUrl(config: ServerConfig) {
   return `${config.appUrl}/api/ownership/github/callback`;
 }
 
-async function exchangeGitHubCode(config: ServerConfig, code: string) {
+export async function exchangeGitHubCode(config: ServerConfig, code: string) {
   if (!config.githubApp) {
     throw new RequestError(503, "GITHUB_APP_NOT_CONFIGURED", "GitHub ownership is not configured.");
   }
@@ -326,7 +372,7 @@ async function findRepositoryInInstallation(
   return null;
 }
 
-function githubFetch(path: string, accessToken: string) {
+export function githubFetch(path: string, accessToken: string) {
   return fetch(`${githubApiUrl}${path}`, {
     headers: {
       Accept: "application/vnd.github+json",

@@ -180,6 +180,45 @@ export type PublishRequestInput = {
   requestedDescription?: string;
 };
 
+export type GitHubPublishCandidate = {
+  id: string;
+  repository: {
+    id: string;
+    fullName: string;
+    owner: string;
+    name: string;
+    htmlUrl: string;
+    defaultBranch: string;
+    permission: "admin" | "maintain" | "push";
+  };
+  branch: string;
+  commit: string;
+  packPath: string;
+  packTomlPath: string;
+  pack: {
+    name: string;
+    version?: string;
+    description?: string;
+  };
+  warnings: string[];
+};
+
+export type GitHubPublishImportCreateInput = {
+  repositoriesScanned: number;
+  privateRepositoriesSkipped: number;
+  candidates: GitHubPublishCandidate[];
+  scanErrors: string[];
+  truncated: boolean;
+  expiresAt: Date;
+};
+
+export type GitHubPublishImportRow = Omit<GitHubPublishImportCreateInput, "expiresAt"> & {
+  id: string;
+  userId: string;
+  expiresAt: string;
+  createdAt: string;
+};
+
 export type PublishRegistryRelease = {
   version: string;
   ref: string;
@@ -276,6 +315,11 @@ export interface RegistryStore {
     repositoryIds: string[],
     reason: string,
   ): Promise<number>;
+  createGitHubPublishImport(
+    userId: string,
+    input: GitHubPublishImportCreateInput,
+  ): Promise<GitHubPublishImportRow>;
+  getGitHubPublishImport(userId: string, id: string): Promise<GitHubPublishImportRow | null>;
   createPublishRequest(userId: string, input: PublishRequestInput): Promise<PublishRequestRow>;
   getPublishRequest(id: string): Promise<PublishRequestRow | null>;
   listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]>;
