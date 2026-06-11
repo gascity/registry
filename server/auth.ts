@@ -2,7 +2,8 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import type { ServerConfig } from "./config";
 import { pkceChallenge, randomToken, signValue, verifySignedValue } from "./crypto";
 import { appendCookie, parseCookies, redirect, safeRedirectPath } from "./http";
-import type { IdentityClaims, RegistryStore, SessionRecord } from "./types";
+import { parseBearerToken } from "./tokens";
+import type { ApiTokenAuthResult, IdentityClaims, RegistryStore, SessionRecord } from "./types";
 
 const sessionCookie = "registry_session";
 const oauthCookie = "registry_oauth";
@@ -39,6 +40,16 @@ export async function getRequestSession(
   const token = getSessionCookie(request);
   if (!token) return null;
   return await store.getSession(token);
+}
+
+export async function getRequestApiTokenAuth(
+  request: Request,
+  store: RegistryStore,
+): Promise<ApiTokenAuthResult | null> {
+  const header = request.headers.get("authorization") ?? request.headers.get("Authorization");
+  const token = parseBearerToken(header);
+  if (!token) return null;
+  return await store.getUserForApiToken(token);
 }
 
 export function requireCsrf(request: Request, session: SessionRecord | null) {

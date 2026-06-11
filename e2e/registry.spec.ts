@@ -201,6 +201,56 @@ test("dev auth can submit and inspect a publish request", async ({ page }, testI
   await expectHealthyPage(page, errors);
 });
 
+test("dev auth can create a token for bearer publish requests", async ({ page }, testInfo) => {
+  const errors = trackRuntimeErrors(page);
+  const stamp = `${Date.now()}-${testInfo.workerIndex}`;
+  const handle = `token-${stamp}`;
+  const tokenLabel = `E2E token ${stamp}`;
+  const requestedName = `bearer-pack-${stamp}`;
+
+  await page.goto(`/api/dev/sign-in?handle=${handle}&redirect=/account`);
+  await expect(page.getByRole("heading", { name: "API tokens" })).toBeVisible();
+  await page.getByLabel("Label").fill(tokenLabel);
+  await page.getByRole("button", { name: "Create token" }).click();
+  await expect(page.getByText("API token created.")).toBeVisible();
+  const rawToken = (await page.locator(".tokenReveal > code").textContent())?.trim() ?? "";
+  expect(rawToken.startsWith("gcr_")).toBe(true);
+
+  const result = await page.evaluate(
+    async ({ name, token }) => {
+      const response = await fetch("/api/publish-requests", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          repoUrl: "https://github.com/gastownhall/gascity-packs",
+          commit: "0123456789abcdef0123456789abcdef01234567",
+          packPath: "packs/example",
+          requestedName: name,
+          requestedVersion: "0.1.0",
+        }),
+      });
+      return {
+        status: response.status,
+        body: await response.json(),
+      };
+    },
+    { name: requestedName, token: rawToken },
+  );
+
+  expect(result.status).toBe(201);
+  expect(result.body.requestedName).toBe(requestedName);
+
+  const tokenRow = page.locator(".accountTokenList article").filter({ hasText: tokenLabel });
+  await expect(tokenRow.getByText("Active")).toBeVisible();
+  await tokenRow.getByRole("button", { name: "Revoke" }).click();
+  await expect(tokenRow.getByText("Revoked")).toBeVisible();
+  await expectHealthyPage(page, errors);
+});
+
 test("dev admin can open the publish review queue", async ({ page }, testInfo) => {
   const errors = trackRuntimeErrors(page);
   const handle = `admin-${Date.now()}-${testInfo.workerIndex}`;

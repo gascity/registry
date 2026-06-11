@@ -18,6 +18,24 @@ export type SessionRecord = {
   expiresAt: Date;
 };
 
+export type ApiTokenRow = {
+  id: string;
+  label: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+};
+
+export type ApiTokenCreateResult = ApiTokenRow & {
+  token: string;
+};
+
+export type ApiTokenAuthResult = {
+  tokenId: string;
+  user: SessionUser;
+};
+
 export type IdentityClaims = {
   subject: string;
   gasCityUserId: string;
@@ -184,6 +202,10 @@ export interface RegistryStore {
   getSession(token: string): Promise<SessionRecord | null>;
   createSession(userId: string): Promise<{ token: string; csrfToken: string; expiresAt: Date }>;
   destroySession(token: string): Promise<void>;
+  getUserForApiToken(token: string): Promise<ApiTokenAuthResult | null>;
+  listApiTokens(userId: string): Promise<ApiTokenRow[]>;
+  createApiToken(userId: string, input: { label?: string }): Promise<ApiTokenCreateResult>;
+  revokeApiToken(userId: string, tokenId: string): Promise<void>;
   updateUserProfile(
     userId: string,
     input: { displayName: string; handle?: string },

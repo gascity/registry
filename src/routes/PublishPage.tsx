@@ -20,6 +20,7 @@ const directPublishCommand = `cd path/to/your-pack
 git status --short
 git push
 
+export GC_REGISTRY_TOKEN="gcr_..."
 gc registry publish .`;
 
 const validateRegistryCommand = `gc pack release validate registry.toml --pack my-pack`;
@@ -102,9 +103,9 @@ export function PublishPage({
         <p className="eyebrow">Publishing</p>
         <h1>Publish A Pack</h1>
         <p>
-          Direct publishing is moving to clean Git checkouts. `gc registry publish` will send an
-          immutable GitHub repo, commit, and pack path to Gas City Registry; the registry then
-          derives the catalog entry and synthetic aggregate from upstream contents.
+          Direct publishing uses clean Git checkouts. The CLI sends an immutable GitHub repo,
+          commit, and pack path to Gas City Registry; the registry then derives the catalog entry
+          and synthetic aggregate from upstream contents.
         </p>
         <div className="docsActions">
           <a className="iconTextButton primary" href={REGISTRY_SOURCE_URL} rel="noreferrer">
@@ -260,10 +261,15 @@ export function PublishPage({
             <span>Commit and push the pack content before publishing.</span>
           </li>
           <li>
-            <strong>Run `gc registry publish` from the pack root when available.</strong>
+            <strong>Create a registry API token.</strong>
+            <span>Your account page can create a personal token for the CLI.</span>
+          </li>
+          <li>
+            <strong>Run the publish command from the pack root.</strong>
             <span>
-              The CLI verifies the checkout is clean, confirms `HEAD` is pushed, and submits the
-              repo, commit, pack path, name, and version to the registry.
+              The CLI reads <code>GC_REGISTRY_TOKEN</code>, verifies the checkout is clean,
+              confirms <code>HEAD</code> is pushed, and submits the repo, commit, pack path, name,
+              and version to the registry.
             </span>
           </li>
           <li>
@@ -304,8 +310,8 @@ export function PublishPage({
           <p className="eyebrow">Direct publish target</p>
           <h2>Submit The Request</h2>
           <p className="mutedText">
-            This is the target CLI shape for the low-friction path. Run it from the pack root after
-            the commit is pushed to GitHub.
+            Run this from the pack root after creating an account API token and pushing the commit
+            to GitHub.
           </p>
         </div>
         <pre className="docsCode">

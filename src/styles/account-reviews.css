@@ -160,6 +160,7 @@
 
 .reviewList,
 .accountReviewList,
+.accountTokenList,
 .accountRequestList {
   display: grid;
   gap: 12px;
@@ -167,6 +168,7 @@
 
 .reviewItem,
 .accountReviewList article,
+.accountTokenList article,
 .accountRequestList article {
   display: grid;
   gap: 10px;
@@ -177,6 +179,7 @@
 }
 
 .accountReviewList span,
+.accountTokenList span,
 .accountRequestList span {
   display: inline-flex;
   align-items: center;
@@ -228,6 +231,25 @@
   border-radius: var(--radius);
   background: rgba(169, 206, 255, 0.04);
   padding: 10px;
+}
+
+.tokenReveal {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(242, 217, 149, 0.34);
+  border-radius: var(--radius);
+  background: rgba(242, 217, 149, 0.08);
+  padding: 12px;
+}
+
+.tokenReveal > code {
+  overflow-x: auto;
+  border: 1px solid rgba(169, 206, 255, 0.18);
+  border-radius: var(--radius);
+  background: rgba(4, 8, 14, 0.78);
+  color: var(--gc-gold-bright);
+  padding: 9px;
+  font-size: 0.82rem;
 }
 
 .requestActions {

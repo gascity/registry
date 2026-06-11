@@ -31,6 +31,8 @@ Local development needs no external services:
 
 - Reviews, sessions, stars, and profile edits are stored in
   `.registry-data/registry.local.json`.
+- API tokens are generated from the Account page and stored hashed in the same
+  local JSON file.
 - Publish requests and staff approvals use the same local JSON store.
 - The `Dev sign in` button creates a stable fake Gas City identity.
 - Direct publish validation uses `gc pack release hash`; install `gc` locally
@@ -142,6 +144,20 @@ https://github.com/apps/gas-city-registry-verifier/installations/select_target
 
 See [docs/verify-pack-ownership.md](docs/verify-pack-ownership.md) for the
 maintainer-facing verification flow.
+
+Direct publishing uses personal registry API tokens. Authors create a token on
+the Account page, then run:
+
+```bash
+export GC_REGISTRY_TOKEN="gcr_..."
+gc registry publish path/to/pack
+```
+
+The registry stores only token hashes, short prefixes, labels, and usage
+timestamps. Revoked tokens can no longer authenticate publish requests. Browser
+sessions remain cookie + CSRF authenticated; bearer tokens are accepted only by
+routes that explicitly opt in, currently `/api/me` introspection and direct
+publish request creation.
 
 The app defaults to the generated aggregate JSON:
 

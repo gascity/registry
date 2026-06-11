@@ -3,8 +3,12 @@ import { dirname } from "node:path";
 import postgres, { type Sql } from "postgres";
 import { randomToken, sha256 } from "./crypto";
 import { normalizePublishRequestInput } from "./publish";
+import { generateApiToken, hashApiToken } from "./tokens";
 import type {
   AccountReview,
+  ApiTokenAuthResult,
+  ApiTokenCreateResult,
+  ApiTokenRow,
   IdentityClaims,
   PackOwnership,
   PublisherSummary,
@@ -22,9 +26,11 @@ import type {
 } from "./types";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const API_TOKEN_TOUCH_MIN_INTERVAL_MS = 15 * 60 * 1000;
 const idPrefix = {
   user: "usr",
   session: "ses",
+  apiToken: "apt",
   review: "rev",
   report: "rpt",
   audit: "aud",
@@ -106,6 +112,29 @@ function sessionUser(row: {
     ...publicUser(row),
     status: row.status === "disabled" ? "disabled" : "active",
   };
+}
+
+function apiTokenFromRow(row: {
+  id: string;
+  label: string;
+  prefix: string;
+  created_at: Date | string | number;
+  last_used_at?: Date | string | number | null;
+  revoked_at?: Date | string | number | null;
+}): ApiTokenRow {
+  return {
+    id: row.id,
+    label: row.label,
+    prefix: row.prefix,
+    createdAt: toIso(row.created_at),
+    lastUsedAt: row.last_used_at ? toIso(row.last_used_at) : undefined,
+    revokedAt: row.revoked_at ? toIso(row.revoked_at) : undefined,
+  };
+}
+
+function normalizeApiTokenLabel(value: string | undefined) {
+  const label = value?.trim().replace(/\s+/g, " ").slice(0, 120);
+  return label || "CLI token";
 }
 
 function validateReviewInput(input: ReviewInput) {
@@ -329,6 +358,20 @@ export class PostgresRegistryStore implements RegistryStore {
       )
     `;
     await this.sql`CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id)`;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS api_tokens (
+        id text PRIMARY KEY,
+        user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        label text NOT NULL,
+        prefix text NOT NULL,
+        token_hash text UNIQUE NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        last_used_at timestamptz,
+        revoked_at timestamptz
+      )
+    `;
+    await this.sql`CREATE INDEX IF NOT EXISTS api_tokens_user_id_idx ON api_tokens (user_id, created_at DESC)`;
+    await this.sql`CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_token_hash_unique ON api_tokens (token_hash)`;
     await this.sql`
       CREATE TABLE IF NOT EXISTS pack_reviews (
         id text PRIMARY KEY,
@@ -566,6 +609,87 @@ export class PostgresRegistryStore implements RegistryStore {
 
   async destroySession(token: string) {
     await this.sql`DELETE FROM sessions WHERE session_hash = ${sha256(token)}`;
+  }
+
+  async getUserForApiToken(token: string): Promise<ApiTokenAuthResult | null> {
+    const rows = await this.sql`
+      SELECT
+        api_tokens.id AS token_id,
+        api_tokens.last_used_at,
+        users.id AS user_id,
+        users.handle,
+        users.display_name,
+        users.avatar_url,
+        users.email,
+        users.role,
+        users.status
+      FROM api_tokens
+      JOIN users ON users.id = api_tokens.user_id
+      WHERE api_tokens.token_hash = ${hashApiToken(token)}
+        AND api_tokens.revoked_at IS NULL
+        AND users.status = 'active'
+      LIMIT 1
+    `;
+    const row = rows[0];
+    if (!row) return null;
+    const lastUsedAt = row.last_used_at ? new Date(row.last_used_at).getTime() : 0;
+    if (Date.now() - lastUsedAt >= API_TOKEN_TOUCH_MIN_INTERVAL_MS) {
+      void this.sql`
+        UPDATE api_tokens
+        SET last_used_at = now()
+        WHERE id = ${row.token_id}
+          AND revoked_at IS NULL
+          AND (last_used_at IS NULL OR last_used_at < now() - interval '15 minutes')
+      `.catch(() => {});
+    }
+    return {
+      tokenId: row.token_id,
+      user: sessionUser({
+        id: row.user_id,
+        handle: row.handle,
+        display_name: row.display_name,
+        avatar_url: row.avatar_url,
+        email: row.email,
+        role: row.role,
+        status: row.status,
+      }),
+    };
+  }
+
+  async listApiTokens(userId: string): Promise<ApiTokenRow[]> {
+    const rows = await this.sql`
+      SELECT id, label, prefix, created_at, last_used_at, revoked_at
+      FROM api_tokens
+      WHERE user_id = ${userId}
+      ORDER BY created_at DESC
+      LIMIT 100
+    `;
+    return rows.map((row) => apiTokenFromRow(row as any));
+  }
+
+  async createApiToken(
+    userId: string,
+    input: { label?: string },
+  ): Promise<ApiTokenCreateResult> {
+    const label = normalizeApiTokenLabel(input.label);
+    const { token, prefix, tokenHash } = generateApiToken();
+    const [row] = await this.sql`
+      INSERT INTO api_tokens (id, user_id, label, prefix, token_hash)
+      VALUES (${newId("apiToken")}, ${userId}, ${label}, ${prefix}, ${tokenHash})
+      RETURNING id, label, prefix, created_at, last_used_at, revoked_at
+    `;
+    return { ...apiTokenFromRow(row as any), token };
+  }
+
+  async revokeApiToken(userId: string, tokenId: string): Promise<void> {
+    const rows = await this.sql`
+      UPDATE api_tokens
+      SET revoked_at = COALESCE(revoked_at, now())
+      WHERE id = ${tokenId}
+        AND user_id = ${userId}
+      RETURNING id
+    `;
+    if (!rows[0]) throw new StoreValidationError("API token not found.");
   }
 
   async updateUserProfile(
@@ -1210,6 +1334,7 @@ export class PostgresRegistryStore implements RegistryStore {
 type FileState = {
   users: Array<SessionUser & { gascityUserId?: string; gascityAccountId?: string; oidcSubject?: string }>;
   sessions: Array<{ hash: string; record: Omit<SessionRecord, "expiresAt"> & { expiresAt: string } }>;
+  apiTokens?: StoredApiToken[];
   reviews: ReviewRow[];
   reports: string[];
   stars: string[];
@@ -1219,6 +1344,17 @@ type FileState = {
   publishRequests?: PublishRequestRow[];
 };
 
+type StoredApiToken = {
+  id: string;
+  userId: string;
+  label: string;
+  prefix: string;
+  tokenHash: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+};
+
 class FileRegistryStore implements RegistryStore {
   readonly kind = "file" as const;
   private users = new Map<
@@ -1226,6 +1362,7 @@ class FileRegistryStore implements RegistryStore {
     SessionUser & { gascityUserId: string; gascityAccountId?: string; oidcSubject?: string }
   >();
   private sessions = new Map<string, { record: SessionRecord; hash: string }>();
+  private apiTokens = new Map<string, StoredApiToken>();
   private reviews = new Map<string, ReviewRow>();
   private reports = new Set<string>();
   private stars = new Set<string>();
@@ -1266,6 +1403,7 @@ class FileRegistryStore implements RegistryStore {
           },
         });
       }
+      for (const token of raw.apiTokens ?? []) this.apiTokens.set(token.id, token);
       for (const review of raw.reviews ?? []) this.reviews.set(review.id, review);
       this.reports = new Set(raw.reports ?? []);
       this.stars = new Set(raw.stars ?? []);
@@ -1344,6 +1482,73 @@ class FileRegistryStore implements RegistryStore {
       if (session.hash === hash) this.sessions.delete(id);
     }
     await this.save();
+  }
+
+  async getUserForApiToken(token: string): Promise<ApiTokenAuthResult | null> {
+    const hash = hashApiToken(token);
+    const now = Date.now();
+    for (const stored of this.apiTokens.values()) {
+      if (stored.tokenHash !== hash || stored.revokedAt) continue;
+      const user = this.users.get(stored.userId);
+      if (!user || user.status !== "active") return null;
+      const lastUsedAt = stored.lastUsedAt ? Date.parse(stored.lastUsedAt) : 0;
+      if (now - lastUsedAt >= API_TOKEN_TOUCH_MIN_INTERVAL_MS) {
+        stored.lastUsedAt = new Date(now).toISOString();
+        await this.save();
+      }
+      return { tokenId: stored.id, user };
+    }
+    return null;
+  }
+
+  async listApiTokens(userId: string): Promise<ApiTokenRow[]> {
+    return [...this.apiTokens.values()]
+      .filter((token) => token.userId === userId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, 100)
+      .map((token) => ({
+        id: token.id,
+        label: token.label,
+        prefix: token.prefix,
+        createdAt: token.createdAt,
+        lastUsedAt: token.lastUsedAt,
+        revokedAt: token.revokedAt,
+      }));
+  }
+
+  async createApiToken(
+    userId: string,
+    input: { label?: string },
+  ): Promise<ApiTokenCreateResult> {
+    if (!this.users.has(userId)) throw new Error("User not found.");
+    const { token, prefix, tokenHash } = generateApiToken();
+    const now = new Date().toISOString();
+    const id = newId("apiToken");
+    this.apiTokens.set(id, {
+      id,
+      userId,
+      label: normalizeApiTokenLabel(input.label),
+      prefix,
+      tokenHash,
+      createdAt: now,
+    });
+    await this.save();
+    return {
+      id,
+      label: this.apiTokens.get(id)!.label,
+      prefix,
+      token,
+      createdAt: now,
+    };
+  }
+
+  async revokeApiToken(userId: string, tokenId: string): Promise<void> {
+    const stored = this.apiTokens.get(tokenId);
+    if (!stored || stored.userId !== userId) throw new StoreValidationError("API token not found.");
+    if (!stored.revokedAt) {
+      stored.revokedAt = new Date().toISOString();
+      await this.save();
+    }
   }
 
   async updateUserProfile(userId: string, input: { displayName: string; handle?: string }) {
@@ -1639,6 +1844,7 @@ class FileRegistryStore implements RegistryStore {
           expiresAt: session.record.expiresAt.toISOString(),
         },
       })),
+      apiTokens: [...this.apiTokens.values()],
       reviews: [...this.reviews.values()],
       reports: [...this.reports],
       stars: [...this.stars],

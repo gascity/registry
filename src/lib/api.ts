@@ -18,6 +18,19 @@ export type AuthState = {
   store?: "file" | "postgres";
 };
 
+export type ApiTokenRow = {
+  id: string;
+  label: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+};
+
+export type ApiTokenCreateResult = ApiTokenRow & {
+  token: string;
+};
+
 export type ReviewRow = {
   id: string;
   packKey: string;

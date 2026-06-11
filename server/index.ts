@@ -8,6 +8,7 @@ import {
   clearSession,
   createDevSession,
   finishLogin,
+  getRequestApiTokenAuth,
   getRequestSession,
   requireCsrf,
   startLogin,
@@ -31,7 +32,7 @@ import {
   verifyGitHubClaimState,
   verifyGitHubPackOwnership,
 } from "./github";
-import type { PublishRequestInput, ReviewInput, SessionRecord } from "./types";
+import type { ApiTokenAuthResult, PublishRequestInput, ReviewInput, SessionRecord } from "./types";
 
 const config = loadConfig();
 const store = createStore(config.databaseUrl, config.localDataPath);
@@ -85,11 +86,12 @@ process.on("SIGTERM", () => {
 async function handleApi(request: Request) {
   assertOrigin(request, config);
   const url = new URL(request.url);
-  const session = await getRequestSession(request, store);
+  const apiTokenAuth = await getRequestApiTokenAuth(request, store);
+  const session = apiTokenAuth ? null : await getRequestSession(request, store);
 
   if (request.method === "GET" && url.pathname === "/api/me") {
     return json({
-      user: session?.user ?? null,
+      user: session?.user ?? apiTokenAuth?.user ?? null,
       csrfToken: session?.csrfToken ?? null,
       authConfigured: Boolean(config.authProvider),
       authProvider: config.authProvider ?? null,
@@ -113,6 +115,26 @@ async function handleApi(request: Request) {
   if (request.method === "POST" && url.pathname === "/api/auth/logout") {
     if (session) requireCsrf(request, session);
     return await clearSession(request, config, store);
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/account/api-tokens") {
+    requireCsrf(request, session);
+    return json({ tokens: await store.listApiTokens(session!.user.id) });
+  }
+  if (request.method === "POST" && url.pathname === "/api/account/api-tokens") {
+    requireCsrf(request, session);
+    enforceRateLimit(request, "api-token-create", { windowMs: 60 * 60 * 1000, max: 10 }, session);
+    const body = await readJsonBody<{ label?: string }>(request, 4 * 1024);
+    return json(
+      { token: await store.createApiToken(session!.user.id, { label: body.label }) },
+      { status: 201 },
+    );
+  }
+  const apiTokenMatch = url.pathname.match(/^\/api\/account\/api-tokens\/([^/]+)$/);
+  if (request.method === "DELETE" && apiTokenMatch?.[1]) {
+    requireCsrf(request, session);
+    await store.revokeApiToken(session!.user.id, decodeURIComponent(apiTokenMatch[1]));
+    return new Response(null, { status: 204 });
   }
 
   if (request.method === "GET" && url.pathname === "/api/ownership") {
@@ -199,10 +221,10 @@ async function handleApi(request: Request) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/publish-requests") {
-    requireCsrf(request, session);
+    const actor = requirePublishRequestActor(request, session, apiTokenAuth);
     enforceRateLimit(request, "publish-request-create", { windowMs: 60 * 60 * 1000, max: 20 }, session);
     const body = await readJsonBody<PublishRequestInput>(request, 16 * 1024);
-    const publishRequest = await store.createPublishRequest(session!.user.id, body);
+    const publishRequest = await store.createPublishRequest(actor.user.id, body);
     if (url.searchParams.get("validate") === "1" || url.searchParams.get("validate") === "true") {
       return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
     }
@@ -308,6 +330,19 @@ function requireRegistryStaff(session: SessionRecord | null) {
   if (session.user.role !== "admin" && session.user.role !== "moderator") {
     throw new RequestError(403, "FORBIDDEN", "Registry staff access required.");
   }
+}
+
+function requirePublishRequestActor(
+  request: Request,
+  session: SessionRecord | null,
+  apiTokenAuth: ApiTokenAuthResult | null,
+) {
+  if (apiTokenAuth) return { kind: "api_token" as const, user: apiTokenAuth.user };
+  if (session) {
+    requireCsrf(request, session);
+    return { kind: "session" as const, user: session.user };
+  }
+  throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
 }
 
 async function requirePublishRequestAccess(id: string, session: SessionRecord | null) {
