@@ -264,16 +264,22 @@
 }
 
 .publishFormPanel {
+  display: grid;
+  align-content: start;
+  gap: 14px;
   max-width: 860px;
 }
 
 .githubImportPanel {
   display: grid;
-  gap: 14px;
-  border: 1px solid rgba(169, 206, 255, 0.16);
+  gap: 16px;
+  border: 1px solid rgba(242, 217, 149, 0.28);
   border-radius: var(--radius);
-  background: rgba(169, 206, 255, 0.04);
-  padding: 14px;
+  background:
+    linear-gradient(180deg, rgba(242, 217, 149, 0.08), rgba(242, 217, 149, 0) 30%),
+    rgba(169, 206, 255, 0.035);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  padding: 16px;
 }
 
 .githubImportIntro,
@@ -289,6 +295,10 @@
 .githubImportIntro {
   justify-content: space-between;
   align-items: flex-start;
+}
+
+.githubImportIntro > div:first-child {
+  min-width: 0;
 }
 
 .githubImportIntro h3 {
@@ -379,6 +389,13 @@
   font-size: 0.84rem;
 }
 
+.githubCandidate input[readonly] {
+  border-color: rgba(169, 206, 255, 0.12);
+  background: rgba(169, 206, 255, 0.045);
+  color: var(--ink-muted);
+  cursor: default;
+}
+
 .githubImportErrors {
   color: var(--ink-muted);
   font-size: 0.86rem;
@@ -395,22 +412,81 @@
   padding-left: 18px;
 }
 
-.manualPublishDivider {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  color: var(--ink-muted);
-  font-size: 0.78rem;
-  font-weight: 700;
-  text-transform: uppercase;
+.manualPublishDetails {
+  border: 1px solid rgba(169, 206, 255, 0.18);
+  border-radius: var(--radius);
+  background: rgba(169, 206, 255, 0.03);
 }
 
-.manualPublishDivider::before,
-.manualPublishDivider::after {
-  height: 1px;
-  flex: 1;
-  background: var(--line);
-  content: "";
+.manualPublishDetails summary {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink);
+  cursor: pointer;
+  list-style: none;
+  padding: 0 14px;
+}
+
+.manualPublishDetails summary::-webkit-details-marker {
+  display: none;
+}
+
+.manualPublishDetails summary:focus-visible {
+  outline: 2px solid rgba(242, 217, 149, 0.58);
+  outline-offset: 2px;
+}
+
+.manualPublishDetails summary > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.manualPublishDetails summary small {
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.manualPublishDetails summary svg {
+  flex: none;
+  color: var(--ink-muted);
+  transition: transform 160ms ease;
+}
+
+.manualPublishDetails[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.manualPublishDetails[open] summary svg {
+  transform: rotate(180deg);
+}
+
+.manualPublishDetails form {
+  padding: 14px;
+}
+
+.spinIcon {
+  animation: iconSpin 900ms linear infinite;
+}
+
+@keyframes iconSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinIcon {
+    animation: none;
+  }
+
+  .manualPublishDetails summary svg {
+    transition: none;
+  }
 }
 
 .cliAuthPanel {

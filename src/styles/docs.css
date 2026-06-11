@@ -1,11 +1,13 @@
 .docsPage {
   display: grid;
   gap: 34px;
+  min-width: 0;
   padding-top: 42px;
 }
 
 .docsHero {
   max-width: 900px;
+  min-width: 0;
   padding-bottom: 10px;
 }
 
@@ -59,8 +61,14 @@
 .docsSection {
   display: grid;
   gap: 16px;
+  min-width: 0;
   border-top: 1px solid var(--line);
   padding-top: 24px;
+}
+
+.docsSection > *,
+.twoColumnDocs > * {
+  min-width: 0;
 }
 
 .docsCallout {
@@ -142,12 +150,18 @@
   display: flex;
   align-items: flex-start;
   gap: 9px;
+  min-width: 0;
+}
+
+.checkList li > * {
+  min-width: 0;
 }
 
 .checkList code,
 .docsHero code,
 .docsSection code {
   color: var(--gc-blue-bright);
+  overflow-wrap: anywhere;
 }
 
 .docsDefinitionList {
@@ -175,6 +189,7 @@
 }
 
 .docsCode {
+  min-width: 0;
   max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--line);
@@ -188,5 +203,8 @@
 }
 
 .docsCode code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
   white-space: pre;
 }

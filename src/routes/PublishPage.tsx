@@ -1,5 +1,6 @@
 import {
   CheckCircle2,
+  ChevronDown,
   ExternalLink,
   FileCode2,
   GitBranch,
@@ -270,7 +271,7 @@ export function PublishPage({
             </div>
           </div>
         ) : (
-          <div className="accountPanel publishFormPanel">
+          <div className="publishFormPanel">
             <div className="githubImportPanel">
               <div className="githubImportIntro">
                 <div>
@@ -288,7 +289,11 @@ export function PublishPage({
                     onClick={() => void startGitHubImport()}
                     disabled={isStartingGitHubImport}
                   >
-                    {isStartingGitHubImport ? <Loader2 size={15} /> : <GitBranch size={15} />}
+                    {isStartingGitHubImport ? (
+                      <Loader2 className="spinIcon" size={15} />
+                    ) : (
+                      <GitBranch size={15} />
+                    )}
                     {isStartingGitHubImport ? "Opening GitHub" : "Find packs"}
                   </button>
                   <a className="smallMutedButton" href={GITHUB_APP_INSTALL_URL} rel="noreferrer">
@@ -299,8 +304,8 @@ export function PublishPage({
               </div>
 
               {isLoadingGitHubImport ? (
-                <div className="githubImportState">
-                  <Loader2 size={18} aria-hidden="true" />
+                <div className="githubImportState" role="status" aria-busy="true">
+                  <Loader2 className="spinIcon" size={18} aria-hidden="true" />
                   <span>Loading GitHub results.</span>
                 </div>
               ) : null}
@@ -399,7 +404,11 @@ export function PublishPage({
                               type="submit"
                               disabled={isSubmittingCandidate}
                             >
-                              {isSubmittingCandidate ? <Loader2 size={15} /> : <CheckCircle2 size={15} />}
+                              {isSubmittingCandidate ? (
+                                <Loader2 className="spinIcon" size={15} />
+                              ) : (
+                                <CheckCircle2 size={15} />
+                              )}
                               {isSubmittingCandidate ? "Submitting" : "Submit this pack"}
                             </button>
                           </form>
@@ -429,83 +438,89 @@ export function PublishPage({
               {githubError ? <p className="formError" role="alert">{githubError}</p> : null}
             </div>
 
-            <div className="manualPublishDivider">
-              <span>Manual fallback</span>
-            </div>
+            <details className="manualPublishDetails">
+              <summary>
+                <span>
+                  <strong>Manual publish request</strong>
+                  <small>Use an exact GitHub repo, commit, and pack path.</small>
+                </span>
+                <ChevronDown size={16} aria-hidden="true" />
+              </summary>
 
-            <form onSubmit={(event) => void submitPublishRequest(event)}>
-              <div className="formGridTwo">
+              <form onSubmit={(event) => void submitPublishRequest(event)}>
+                <div className="formGridTwo">
+                  <label>
+                    <span>GitHub repository</span>
+                    <input
+                      placeholder="https://github.com/org/repo"
+                      value={repoUrl}
+                      onChange={(event) => setRepoUrl(event.target.value)}
+                      required
+                    />
+                  </label>
+                  <label>
+                    <span>Pack path</span>
+                    <input
+                      placeholder="."
+                      value={packPath}
+                      onChange={(event) => setPackPath(event.target.value)}
+                      required
+                    />
+                  </label>
+                </div>
                 <label>
-                  <span>GitHub repository</span>
+                  <span>Commit SHA</span>
                   <input
-                    placeholder="https://github.com/org/repo"
-                    value={repoUrl}
-                    onChange={(event) => setRepoUrl(event.target.value)}
+                    placeholder="0123456789abcdef0123456789abcdef01234567"
+                    value={commit}
+                    onChange={(event) => setCommit(event.target.value)}
                     required
                   />
                 </label>
+                <div className="formGridTwo">
+                  <label>
+                    <span>Pack name</span>
+                    <input
+                      placeholder="my-pack"
+                      value={requestedName}
+                      onChange={(event) => setRequestedName(event.target.value)}
+                      required
+                    />
+                  </label>
+                  <label>
+                    <span>Version</span>
+                    <input
+                      placeholder="0.1.0"
+                      value={requestedVersion}
+                      onChange={(event) => setRequestedVersion(event.target.value)}
+                      required
+                    />
+                  </label>
+                </div>
                 <label>
-                  <span>Pack path</span>
+                  <span>Ref label</span>
                   <input
-                    placeholder="."
-                    value={packPath}
-                    onChange={(event) => setPackPath(event.target.value)}
-                    required
+                    placeholder="refs/tags/v0.1.0 or main"
+                    value={requestedRef}
+                    onChange={(event) => setRequestedRef(event.target.value)}
                   />
                 </label>
-              </div>
-              <label>
-                <span>Commit SHA</span>
-                <input
-                  placeholder="0123456789abcdef0123456789abcdef01234567"
-                  value={commit}
-                  onChange={(event) => setCommit(event.target.value)}
-                  required
-                />
-              </label>
-              <div className="formGridTwo">
                 <label>
-                  <span>Pack name</span>
+                  <span>Description</span>
                   <input
-                    placeholder="my-pack"
-                    value={requestedName}
-                    onChange={(event) => setRequestedName(event.target.value)}
-                    required
+                    placeholder="Short description shown in search results."
+                    value={requestedDescription}
+                    onChange={(event) => setRequestedDescription(event.target.value)}
                   />
                 </label>
-                <label>
-                  <span>Version</span>
-                  <input
-                    placeholder="0.1.0"
-                    value={requestedVersion}
-                    onChange={(event) => setRequestedVersion(event.target.value)}
-                    required
-                  />
-                </label>
-              </div>
-              <label>
-                <span>Ref label</span>
-                <input
-                  placeholder="refs/tags/v0.1.0 or main"
-                  value={requestedRef}
-                  onChange={(event) => setRequestedRef(event.target.value)}
-                />
-              </label>
-              <label>
-                <span>Description</span>
-                <input
-                  placeholder="Short description shown in search results."
-                  value={requestedDescription}
-                  onChange={(event) => setRequestedDescription(event.target.value)}
-                />
-              </label>
-              <button className="iconTextButton primary" type="submit" disabled={isSubmitting}>
-                <Send size={15} />
-                {isSubmitting ? "Submitting" : "Submit publish request"}
-              </button>
-            </form>
+                <button className="iconTextButton primary" type="submit" disabled={isSubmitting}>
+                  {isSubmitting ? <Loader2 className="spinIcon" size={15} /> : <Send size={15} />}
+                  {isSubmitting ? "Submitting" : "Submit publish request"}
+                </button>
+              </form>
+            </details>
             {publishRequest ? (
-              <div className="requestPreview">
+              <div className="requestPreview" role="status">
                 <strong>{statusLabel(publishRequest.status)}</strong>
                 <p>
                   {publishRequest.requestedName} {publishRequest.requestedVersion} from{" "}

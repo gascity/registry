@@ -211,6 +211,12 @@
     grid-template-columns: 1fr;
   }
 
+  .docsCode code {
+    width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
   .stepList li::before {
     grid-row: auto;
   }

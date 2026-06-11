@@ -210,7 +210,7 @@ test("dev auth publish page exposes GitHub import and manual fallback", async ({
   await expect(page.getByRole("heading", { name: "Find Packs From GitHub" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Find packs" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Install app/ })).toHaveAttribute("href", /github\.com\/apps/);
-  await expect(page.locator(".manualPublishDivider", { hasText: "Manual fallback" })).toBeVisible();
+  await expect(page.getByText("Manual publish request")).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await expectHealthyPage(page, errors);
 });
