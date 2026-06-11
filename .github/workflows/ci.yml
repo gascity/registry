@@ -33,6 +33,9 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Server and integration tests
+        run: bun run test:unit
+
       - name: Install Playwright browsers
         run: bunx playwright install --with-deps chromium
 
