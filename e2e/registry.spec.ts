@@ -220,6 +220,17 @@ test("dev auth publish page exposes GitHub import and manual fallback", async ({
   await expectHealthyPage(page, errors);
 });
 
+test("publish sign-in keeps the author on the publish page", async ({ page }) => {
+  const errors = trackRuntimeErrors(page);
+
+  await page.goto("/publish");
+  await expect(page.getByRole("heading", { name: "Publish From GitHub" })).toBeVisible();
+  await page.getByRole("main").getByRole("button", { name: "Dev sign in" }).click();
+  await expect(page).toHaveURL(/\/publish$/);
+  await expect(page.getByRole("heading", { name: "Find Packs From GitHub" })).toBeVisible();
+  await expectHealthyPage(page, errors);
+});
+
 test("dev auth can create a token for bearer publish requests", async ({ page }, testInfo) => {
   const errors = trackRuntimeErrors(page);
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;

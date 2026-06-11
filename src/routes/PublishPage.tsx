@@ -131,7 +131,10 @@ export function PublishPage({
 
   const submitPublishRequest = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!auth.csrfToken) return;
+    if (!auth.csrfToken) {
+      setSubmitError("Sign in again to submit a publish request.");
+      return;
+    }
     setIsSubmitting(true);
     setSubmitError(null);
     setPublishRequest(null);
@@ -161,7 +164,10 @@ export function PublishPage({
   };
 
   const startGitHubImport = async () => {
-    if (!auth.csrfToken) return;
+    if (!auth.csrfToken) {
+      setGitHubError("Sign in again to find packs from GitHub.");
+      return;
+    }
     setIsStartingGitHubImport(true);
     setGitHubError(null);
     try {
@@ -178,7 +184,14 @@ export function PublishPage({
   };
 
   const submitGitHubCandidate = async (candidate: GitHubPublishCandidate) => {
-    if (!auth.csrfToken || !githubImport) return;
+    if (!auth.csrfToken) {
+      setGitHubError("Sign in again to submit this GitHub pack.");
+      return;
+    }
+    if (!githubImport) {
+      setGitHubError("GitHub import results expired. Start the GitHub scan again.");
+      return;
+    }
     const draft = candidateDrafts[candidate.id] ?? initialCandidateDraft(candidate);
     setActiveCandidateId(candidate.id);
     setGitHubError(null);

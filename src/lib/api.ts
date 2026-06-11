@@ -210,11 +210,11 @@ export function useAuthState() {
 
   const actions = useMemo(
     () => ({
-      signIn(redirectTo = currentPath()) {
-        window.location.href = `/api/auth/login?redirect=${encodeURIComponent(redirectTo)}`;
+      signIn(redirectTo?: unknown) {
+        window.location.href = `/api/auth/login?redirect=${encodeURIComponent(authRedirectTarget(redirectTo))}`;
       },
-      devSignIn(redirectTo = currentPath()) {
-        window.location.href = `/api/dev/sign-in?redirect=${encodeURIComponent(redirectTo)}`;
+      devSignIn(redirectTo?: unknown) {
+        window.location.href = `/api/dev/sign-in?redirect=${encodeURIComponent(authRedirectTarget(redirectTo))}`;
       },
       async signOut() {
         await apiRequest("/api/auth/logout", { method: "POST" }, auth.csrfToken);
@@ -250,4 +250,8 @@ export async function apiRequest<T>(
 
 export function currentPath() {
   return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+}
+
+function authRedirectTarget(value: unknown) {
+  return typeof value === "string" ? value : currentPath();
 }
