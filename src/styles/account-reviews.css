@@ -57,6 +57,12 @@
   gap: 12px;
 }
 
+.formGridTwo {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .reviewComposer label,
 .accountPanel label {
   display: grid;
@@ -90,6 +96,11 @@
   padding: 10px;
   outline: none;
   resize: vertical;
+}
+
+.accountPanel button:disabled {
+  cursor: wait;
+  opacity: 0.62;
 }
 
 .reviewComposer input:focus,
@@ -202,6 +213,36 @@
   border-color: rgba(255, 143, 90, 0.42);
   background: rgba(255, 143, 90, 0.08);
   color: var(--amber);
+}
+
+.requestStatus.validation_failed {
+  border-color: rgba(255, 143, 90, 0.42);
+  background: rgba(255, 143, 90, 0.08);
+  color: var(--amber);
+}
+
+.requestPreview {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(169, 206, 255, 0.16);
+  border-radius: var(--radius);
+  background: rgba(169, 206, 255, 0.04);
+  padding: 10px;
+}
+
+.requestActions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, auto));
+  gap: 8px;
+  align-items: center;
+}
+
+.requestActions input {
+  min-width: 180px;
+}
+
+.publishFormPanel {
+  max-width: 860px;
 }
 
 .reviewMeta {

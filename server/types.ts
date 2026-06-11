@@ -108,6 +108,7 @@ export type VerifiedPackOwnershipInput = {
 
 export type PublishRequestStatus =
   | "pending_validation"
+  | "validation_failed"
   | "pending_review"
   | "approved"
   | "rejected";
@@ -129,6 +130,22 @@ export type PublishRequestInput = {
   requestedDescription?: string;
 };
 
+export type PublishRegistryRelease = {
+  version: string;
+  ref: string;
+  commit: string;
+  hash: string;
+  description: string;
+};
+
+export type PublishRegistryEntry = {
+  name: string;
+  description: string;
+  source: string;
+  sourceKind: "git";
+  release: PublishRegistryRelease;
+};
+
 export type NormalizedPublishRequestInput = PublishRequestInput & {
   repository: GitHubRepositoryRef;
   repoUrl: string;
@@ -148,7 +165,12 @@ export type PublishRequestRow = {
   requestedVersion: string;
   requestedRef?: string;
   requestedDescription?: string;
+  registryEntry?: PublishRegistryEntry;
+  validationError?: string;
+  validatedAt?: string;
   statusReason?: string;
+  reviewedAt?: string;
+  reviewedBy?: PublicUser;
   createdAt: string;
   updatedAt: string;
   submittedBy: PublicUser;
@@ -166,6 +188,7 @@ export interface RegistryStore {
     userId: string,
     input: { displayName: string; handle?: string },
   ): Promise<SessionUser>;
+  setUserRoleForDev(userId: string, role: "admin" | "moderator" | "user"): Promise<SessionUser>;
   listReviews(packKey: string, viewerUserId?: string): Promise<ReviewListResult>;
   upsertReview(userId: string, input: ReviewInput): Promise<ReviewRow>;
   deleteReview(userId: string, packKey: string): Promise<void>;
@@ -185,6 +208,19 @@ export interface RegistryStore {
     reason: string,
   ): Promise<number>;
   createPublishRequest(userId: string, input: PublishRequestInput): Promise<PublishRequestRow>;
+  getPublishRequest(id: string): Promise<PublishRequestRow | null>;
   listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]>;
   listPublishRequests(): Promise<PublishRequestRow[]>;
+  listApprovedPublishRequests(): Promise<PublishRequestRow[]>;
+  markPublishRequestValidated(
+    id: string,
+    entry: PublishRegistryEntry,
+  ): Promise<PublishRequestRow>;
+  markPublishRequestValidationFailed(id: string, error: string): Promise<PublishRequestRow>;
+  approvePublishRequest(actorUserId: string, id: string): Promise<PublishRequestRow>;
+  rejectPublishRequest(
+    actorUserId: string,
+    id: string,
+    reason: string,
+  ): Promise<PublishRequestRow>;
 }

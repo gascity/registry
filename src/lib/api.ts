@@ -80,9 +80,24 @@ export type PackOwnership = {
 
 export type PublishRequestStatus =
   | "pending_validation"
+  | "validation_failed"
   | "pending_review"
   | "approved"
   | "rejected";
+
+export type PublishRegistryEntry = {
+  name: string;
+  description: string;
+  source: string;
+  sourceKind: "git";
+  release: {
+    version: string;
+    ref: string;
+    commit: string;
+    hash: string;
+    description: string;
+  };
+};
 
 export type PublishRequestRow = {
   id: string;
@@ -101,7 +116,12 @@ export type PublishRequestRow = {
   requestedVersion: string;
   requestedRef?: string;
   requestedDescription?: string;
+  registryEntry?: PublishRegistryEntry;
+  validationError?: string;
+  validatedAt?: string;
   statusReason?: string;
+  reviewedAt?: string;
+  reviewedBy?: PublicUser;
   createdAt: string;
   updatedAt: string;
   submittedBy: PublicUser;

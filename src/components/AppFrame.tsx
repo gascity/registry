@@ -46,6 +46,17 @@ export function AppFrame({
           >
             Browse
           </a>
+          {auth.user?.role === "admin" || auth.user?.role === "moderator" ? (
+            <a
+              href="/admin/publish-requests"
+              onClick={(event) => {
+                event.preventDefault();
+                navigateTo("/admin/publish-requests");
+              }}
+            >
+              Review
+            </a>
+          ) : null}
           <a href={GASCITY_HOME_URL} rel="noreferrer">
             Gas City
           </a>

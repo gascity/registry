@@ -3,9 +3,14 @@ import {
   FileCode2,
   GitPullRequest,
   PackagePlus,
+  Send,
   ShieldCheck,
   TerminalSquare,
+  UserRound,
 } from "lucide-react";
+import type React from "react";
+import { useState } from "react";
+import { apiRequest, type AuthState, type PublishRequestRow } from "../lib/api";
 import { REGISTRY_SOURCE_URL } from "../lib/links";
 
 const installGcCommand = `brew install gastownhall/gascity/gascity
@@ -38,7 +43,59 @@ const sourcesTomlExample = `[[source]]
 name = "example-packs"
 url = "https://raw.githubusercontent.com/example/gascity-packs/main/registry.toml"`;
 
-export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void }) {
+export function PublishPage({
+  navigateTo,
+  auth,
+  signIn,
+  devSignIn,
+}: {
+  navigateTo: (path: string) => void;
+  auth: AuthState;
+  signIn: () => void;
+  devSignIn: () => void;
+}) {
+  const [repoUrl, setRepoUrl] = useState("");
+  const [packPath, setPackPath] = useState(".");
+  const [commit, setCommit] = useState("");
+  const [requestedName, setRequestedName] = useState("");
+  const [requestedVersion, setRequestedVersion] = useState("");
+  const [requestedRef, setRequestedRef] = useState("");
+  const [requestedDescription, setRequestedDescription] = useState("");
+  const [publishRequest, setPublishRequest] = useState<PublishRequestRow | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const submitPublishRequest = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!auth.csrfToken) return;
+    setIsSubmitting(true);
+    setSubmitError(null);
+    setPublishRequest(null);
+    try {
+      const result = await apiRequest<{ publishRequest: PublishRequestRow } | PublishRequestRow>(
+        "/api/publish-requests?validate=1",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            repoUrl,
+            commit,
+            packPath,
+            requestedName,
+            requestedVersion,
+            requestedRef: requestedRef || undefined,
+            requestedDescription: requestedDescription || undefined,
+          }),
+        },
+        auth.csrfToken,
+      );
+      setPublishRequest("publishRequest" in result ? result.publishRequest : result);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Unable to submit publish request.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   return (
     <main className="docsPage">
       <section className="docsHero">
@@ -66,6 +123,115 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
             Verification flow
           </a>
         </div>
+      </section>
+
+      <section className="docsSection">
+        <div className="sectionTitle">
+          <p className="eyebrow">Submit</p>
+          <h2>Publish From GitHub</h2>
+        </div>
+        {!auth.user ? (
+          <div className="signInPromptInline">
+            <UserRound size={20} />
+            <strong>Sign in to submit a pack.</strong>
+            <p>Publish requests are tied to your Gas City account.</p>
+            <div className="promptActions">
+              {auth.devAuthEnabled ? (
+                <button className="iconTextButton" type="button" onClick={devSignIn}>
+                  Dev sign in
+                </button>
+              ) : null}
+              <button className="iconTextButton primary" type="button" onClick={signIn}>
+                Sign in
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="accountPanel publishFormPanel">
+            <form onSubmit={(event) => void submitPublishRequest(event)}>
+              <div className="formGridTwo">
+                <label>
+                  <span>GitHub repository</span>
+                  <input
+                    placeholder="https://github.com/org/repo"
+                    value={repoUrl}
+                    onChange={(event) => setRepoUrl(event.target.value)}
+                    required
+                  />
+                </label>
+                <label>
+                  <span>Pack path</span>
+                  <input
+                    placeholder="."
+                    value={packPath}
+                    onChange={(event) => setPackPath(event.target.value)}
+                    required
+                  />
+                </label>
+              </div>
+              <label>
+                <span>Commit SHA</span>
+                <input
+                  placeholder="0123456789abcdef0123456789abcdef01234567"
+                  value={commit}
+                  onChange={(event) => setCommit(event.target.value)}
+                  required
+                />
+              </label>
+              <div className="formGridTwo">
+                <label>
+                  <span>Pack name</span>
+                  <input
+                    placeholder="my-pack"
+                    value={requestedName}
+                    onChange={(event) => setRequestedName(event.target.value)}
+                    required
+                  />
+                </label>
+                <label>
+                  <span>Version</span>
+                  <input
+                    placeholder="0.1.0"
+                    value={requestedVersion}
+                    onChange={(event) => setRequestedVersion(event.target.value)}
+                    required
+                  />
+                </label>
+              </div>
+              <label>
+                <span>Ref label</span>
+                <input
+                  placeholder="refs/tags/v0.1.0 or main"
+                  value={requestedRef}
+                  onChange={(event) => setRequestedRef(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Description</span>
+                <input
+                  placeholder="Short description shown in search results."
+                  value={requestedDescription}
+                  onChange={(event) => setRequestedDescription(event.target.value)}
+                />
+              </label>
+              <button className="iconTextButton primary" type="submit" disabled={isSubmitting}>
+                <Send size={15} />
+                {isSubmitting ? "Submitting" : "Submit publish request"}
+              </button>
+            </form>
+            {publishRequest ? (
+              <div className="requestPreview">
+                <strong>{statusLabel(publishRequest.status)}</strong>
+                <p>
+                  {publishRequest.requestedName} {publishRequest.requestedVersion} from{" "}
+                  {publishRequest.repository.fullName}
+                </p>
+                {publishRequest.statusReason ? <p>{publishRequest.statusReason}</p> : null}
+              </div>
+            ) : null}
+            {submitError ? <p className="formError" role="alert">{submitError}</p> : null}
+          </div>
+        )}
       </section>
 
       <section className="docsSection">
@@ -215,4 +381,19 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
       </section>
     </main>
   );
+}
+
+function statusLabel(status: PublishRequestRow["status"]) {
+  switch (status) {
+    case "pending_validation":
+      return "Pending validation";
+    case "validation_failed":
+      return "Validation failed";
+    case "pending_review":
+      return "Pending review";
+    case "approved":
+      return "Approved";
+    case "rejected":
+      return "Rejected";
+  }
 }

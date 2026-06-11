@@ -201,6 +201,16 @@ test("dev auth can submit and inspect a publish request", async ({ page }, testI
   await expectHealthyPage(page, errors);
 });
 
+test("dev admin can open the publish review queue", async ({ page }, testInfo) => {
+  const errors = trackRuntimeErrors(page);
+  const handle = `admin-${Date.now()}-${testInfo.workerIndex}`;
+
+  await page.goto(`/api/dev/sign-in?handle=${handle}&role=admin&redirect=/admin/publish-requests`);
+  await expect(page.getByRole("heading", { name: "Publish requests" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Review" })).toBeVisible();
+  await expectHealthyPage(page, errors);
+});
+
 test("mobile detail has no horizontal overflow", async ({ page }) => {
   const errors = trackRuntimeErrors(page);
 

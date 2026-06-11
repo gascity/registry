@@ -197,7 +197,9 @@
   }
 
   .docsGrid,
-  .twoColumnDocs {
+  .twoColumnDocs,
+  .formGridTwo,
+  .requestActions {
     grid-template-columns: 1fr;
   }
 

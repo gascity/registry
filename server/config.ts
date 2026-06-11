@@ -23,6 +23,10 @@ export type ServerConfig = {
     clientSecret: string;
     webhookSecret?: string;
   };
+  publishValidation: {
+    gcBin: string;
+    timeoutMs: number;
+  };
   isProduction: boolean;
   devAuthEnabled: boolean;
 };
@@ -57,6 +61,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const githubAppClientId = env.GITHUB_APP_CLIENT_ID?.trim();
   const githubAppClientSecret = env.GITHUB_APP_CLIENT_SECRET?.trim();
   const githubAppWebhookSecret = env.GITHUB_APP_WEBHOOK_SECRET?.trim();
+  const publishValidationTimeoutMs = Number.parseInt(
+    env.REGISTRY_PUBLISH_VALIDATION_TIMEOUT_MS ?? "120000",
+    10,
+  );
   const requestedAuthProvider = parseAuthProvider(env.REGISTRY_AUTH_PROVIDER);
   const oidc =
     issuer && clientId && clientSecret
@@ -107,6 +115,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     oidc,
     workos,
     githubApp,
+    publishValidation: {
+      gcBin: env.REGISTRY_GC_BIN?.trim() || "gc",
+      timeoutMs:
+        Number.isFinite(publishValidationTimeoutMs) && publishValidationTimeoutMs > 0
+          ? publishValidationTimeoutMs
+          : 120_000,
+    },
     isProduction,
     devAuthEnabled: env.REGISTRY_DEV_AUTH === "1" && !isProduction,
   };

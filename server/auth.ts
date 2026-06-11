@@ -238,13 +238,17 @@ export async function createDevSession(request: Request, config: ServerConfig, s
   }
   const url = new URL(request.url);
   const handle = url.searchParams.get("handle")?.trim() || "local";
-  const user = await store.ensureUser({
+  let user = await store.ensureUser({
     subject: `dev:${handle}`,
     gasCityUserId: `dev:${handle}`,
     handle,
     displayName: handle === "local" ? "Local Developer" : handle,
     email: `${handle}@dev.registry.local`,
   });
+  const requestedRole = url.searchParams.get("role")?.trim().toLowerCase();
+  if (requestedRole === "admin" || requestedRole === "moderator" || requestedRole === "user") {
+    user = await store.setUserRoleForDev(user.id, requestedRole);
+  }
   const session = await store.createSession(user.id);
   const headers = new Headers();
   appendCookie(headers, sessionCookie, session.token, {

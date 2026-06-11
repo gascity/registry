@@ -4,6 +4,7 @@ export type RouteState =
   | { kind: "home" }
   | { kind: "pack"; name: string }
   | { kind: "account" }
+  | { kind: "adminPublish" }
   | { kind: "verify" }
   | { kind: "publish" };
 
@@ -23,6 +24,9 @@ export const categoryOptions = [
 
 export function parseRoute(pathname: string): RouteState {
   if (pathname === "/account" || pathname === "/account/") return { kind: "account" };
+  if (pathname === "/admin/publish-requests" || pathname === "/admin/publish-requests/") {
+    return { kind: "adminPublish" };
+  }
   if (pathname === "/verify" || pathname === "/verify/") return { kind: "verify" };
   if (pathname === "/publish" || pathname === "/publish/") return { kind: "publish" };
   const match = pathname.match(/^\/packs\/([^/]+)\/?$/);

@@ -8,6 +8,7 @@ import type {
   IdentityClaims,
   PackOwnership,
   PublisherSummary,
+  PublishRegistryEntry,
   PublishRequestInput,
   PublishRequestRow,
   PublicUser,
@@ -174,6 +175,16 @@ function ownershipFromRows(row: any): PackOwnership {
 }
 
 function publishRequestFromRows(row: any, user: PublicUser): PublishRequestRow {
+  const reviewer = row.reviewed_by_user_id && row.reviewed_by_handle
+    ? publicUser({
+        id: row.reviewed_by_user_id,
+        handle: row.reviewed_by_handle,
+        display_name: row.reviewed_by_display_name,
+        avatar_url: row.reviewed_by_avatar_url,
+        email: row.reviewed_by_email,
+        role: row.reviewed_by_role,
+      })
+    : undefined;
   return {
     id: row.id,
     status: publishRequestStatus(row.status),
@@ -191,7 +202,12 @@ function publishRequestFromRows(row: any, user: PublicUser): PublishRequestRow {
     requestedVersion: row.requested_version,
     requestedRef: row.requested_ref ?? undefined,
     requestedDescription: row.requested_description ?? undefined,
+    registryEntry: normalizeRegistryEntry(row.registry_entry),
+    validationError: row.validation_error ?? undefined,
+    validatedAt: row.validated_at ? toIso(row.validated_at) : undefined,
     statusReason: row.status_reason ?? undefined,
+    reviewedAt: row.reviewed_at ? toIso(row.reviewed_at) : undefined,
+    reviewedBy: reviewer,
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
     submittedBy: user,
@@ -202,9 +218,30 @@ function publishRequestStatus(value: unknown): PublishRequestRow["status"] {
   return value === "pending_review" ||
     value === "approved" ||
     value === "rejected" ||
+    value === "validation_failed" ||
     value === "pending_validation"
     ? value
     : "pending_validation";
+}
+
+function normalizeRegistryEntry(value: unknown): PublishRegistryEntry | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const entry = value as PublishRegistryEntry;
+  if (
+    typeof entry.name !== "string" ||
+    typeof entry.description !== "string" ||
+    typeof entry.source !== "string" ||
+    entry.sourceKind !== "git" ||
+    !entry.release ||
+    typeof entry.release.version !== "string" ||
+    typeof entry.release.ref !== "string" ||
+    typeof entry.release.commit !== "string" ||
+    typeof entry.release.hash !== "string" ||
+    typeof entry.release.description !== "string"
+  ) {
+    return undefined;
+  }
+  return entry;
 }
 
 function isSamePublishRequest(left: PublishRequestRow, right: {
@@ -223,6 +260,12 @@ function isSamePublishRequest(left: PublishRequestRow, right: {
     left.requestedName === right.requestedName &&
     left.requestedVersion === right.requestedVersion
   );
+}
+
+function normalizeStatusReason(value: string, fallback: string) {
+  const clean = value.trim().replace(/\s+/g, " ").slice(0, 500);
+  if (!clean) return fallback;
+  return clean;
 }
 
 export class PostgresRegistryStore implements RegistryStore {
@@ -373,7 +416,7 @@ export class PostgresRegistryStore implements RegistryStore {
       CREATE TABLE IF NOT EXISTS pack_publish_requests (
         id text PRIMARY KEY,
         submitter_user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        status text NOT NULL CHECK (status IN ('pending_validation', 'pending_review', 'approved', 'rejected')),
+        status text NOT NULL,
         repo_host text NOT NULL DEFAULT 'github.com',
         repo_owner text NOT NULL,
         repo_name text NOT NULL,
@@ -386,11 +429,27 @@ export class PostgresRegistryStore implements RegistryStore {
         requested_version text NOT NULL,
         requested_ref text,
         requested_description text,
+        registry_entry jsonb,
+        validation_error text,
+        validated_at timestamptz,
         status_reason text,
+        reviewed_by_user_id text REFERENCES users(id) ON DELETE SET NULL,
+        reviewed_at timestamptz,
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       )
     `;
+    await this.sql`ALTER TABLE pack_publish_requests DROP CONSTRAINT IF EXISTS pack_publish_requests_status_check`;
+    await this.sql`
+      ALTER TABLE pack_publish_requests
+      ADD CONSTRAINT pack_publish_requests_status_check
+      CHECK (status IN ('pending_validation', 'validation_failed', 'pending_review', 'approved', 'rejected'))
+    `;
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS registry_entry jsonb`;
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS validation_error text`;
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS validated_at timestamptz`;
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS reviewed_by_user_id text REFERENCES users(id) ON DELETE SET NULL`;
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS reviewed_at timestamptz`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_submitter_idx ON pack_publish_requests (submitter_user_id, created_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_review_idx ON pack_publish_requests (status, created_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_pack_version_idx ON pack_publish_requests (requested_name, requested_version)`;
@@ -529,6 +588,16 @@ export class PostgresRegistryStore implements RegistryStore {
           WHERE id = ${userId}
           RETURNING *
         `;
+    if (!rows[0]) throw new Error("User not found.");
+    return sessionUser(rows[0] as any);
+  }
+
+  async setUserRoleForDev(userId: string, role: "admin" | "moderator" | "user") {
+    const rows = await this.sql`
+      UPDATE users SET role = ${role}, updated_at = now()
+      WHERE id = ${userId}
+      RETURNING *
+    `;
     if (!rows[0]) throw new Error("User not found.");
     return sessionUser(rows[0] as any);
   }
@@ -854,6 +923,38 @@ export class PostgresRegistryStore implements RegistryStore {
     return publishRequestFromRows(row, publicUser(user as any));
   }
 
+  async getPublishRequest(id: string): Promise<PublishRequestRow | null> {
+    const rows = await this.sql`
+      SELECT
+        pack_publish_requests.*,
+        submitter.id AS user_id,
+        submitter.handle,
+        submitter.display_name,
+        submitter.avatar_url,
+        submitter.email,
+        submitter.role,
+        reviewer.id AS reviewed_by_user_id,
+        reviewer.handle AS reviewed_by_handle,
+        reviewer.display_name AS reviewed_by_display_name,
+        reviewer.avatar_url AS reviewed_by_avatar_url,
+        reviewer.email AS reviewed_by_email,
+        reviewer.role AS reviewed_by_role
+      FROM pack_publish_requests
+      JOIN users AS submitter ON submitter.id = pack_publish_requests.submitter_user_id
+      LEFT JOIN users AS reviewer ON reviewer.id = pack_publish_requests.reviewed_by_user_id
+      WHERE pack_publish_requests.id = ${id}
+      LIMIT 1
+    `;
+    return rows[0] ? publishRequestFromRows(rows[0], publicUser({
+      id: rows[0].user_id,
+      handle: rows[0].handle,
+      display_name: rows[0].display_name,
+      avatar_url: rows[0].avatar_url,
+      email: rows[0].email,
+      role: rows[0].role,
+    })) : null;
+  }
+
   async listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]> {
     const [user] = await this.sql`SELECT * FROM users WHERE id = ${userId}`;
     if (!user) return [];
@@ -895,6 +996,126 @@ export class PostgresRegistryStore implements RegistryStore {
         }),
       ),
     );
+  }
+
+  async listApprovedPublishRequests(): Promise<PublishRequestRow[]> {
+    const rows = await this.sql`
+      SELECT
+        pack_publish_requests.*,
+        users.id AS user_id,
+        users.handle,
+        users.display_name,
+        users.avatar_url,
+        users.email,
+        users.role
+      FROM pack_publish_requests
+      JOIN users ON users.id = pack_publish_requests.submitter_user_id
+      WHERE pack_publish_requests.status = 'approved'
+        AND pack_publish_requests.registry_entry IS NOT NULL
+      ORDER BY pack_publish_requests.created_at ASC
+      LIMIT 1000
+    `;
+    return rows.map((row) =>
+      publishRequestFromRows(
+        row,
+        publicUser({
+          id: row.user_id,
+          handle: row.handle,
+          display_name: row.display_name,
+          avatar_url: row.avatar_url,
+          email: row.email,
+          role: row.role,
+        }),
+      ),
+    );
+  }
+
+  async markPublishRequestValidated(
+    id: string,
+    entry: PublishRegistryEntry,
+  ): Promise<PublishRequestRow> {
+    const [row] = await this.sql`
+      UPDATE pack_publish_requests
+      SET status = 'pending_review',
+          registry_entry = ${this.sql.json(entry as any)},
+          validation_error = NULL,
+          validated_at = now(),
+          updated_at = now()
+      WHERE id = ${id}
+      RETURNING id
+    `;
+    if (!row) throw new StoreValidationError("Publish request not found.");
+    const request = await this.getPublishRequest(id);
+    if (!request) throw new Error("Publish request not found after validation.");
+    return request;
+  }
+
+  async markPublishRequestValidationFailed(id: string, error: string): Promise<PublishRequestRow> {
+    const reason = normalizeStatusReason(error, "Validation failed.");
+    const [row] = await this.sql`
+      UPDATE pack_publish_requests
+      SET status = 'validation_failed',
+          registry_entry = NULL,
+          validated_at = NULL,
+          validation_error = ${reason},
+          status_reason = ${reason},
+          updated_at = now()
+      WHERE id = ${id}
+      RETURNING id
+    `;
+    if (!row) throw new StoreValidationError("Publish request not found.");
+    const request = await this.getPublishRequest(id);
+    if (!request) throw new Error("Publish request not found after validation failure.");
+    return request;
+  }
+
+  async approvePublishRequest(actorUserId: string, id: string): Promise<PublishRequestRow> {
+    const current = await this.getPublishRequest(id);
+    if (!current) throw new StoreValidationError("Publish request not found.");
+    if (!current.registryEntry || current.status !== "pending_review") {
+      throw new StoreValidationError("Publish request must be validated before approval.");
+    }
+    await this.sql`
+      UPDATE pack_publish_requests
+      SET status = 'approved',
+          status_reason = NULL,
+          reviewed_by_user_id = ${actorUserId},
+          reviewed_at = now(),
+          updated_at = now()
+      WHERE id = ${id}
+    `;
+    await this.audit(actorUserId, "publish_request.approve", "publish_request", id, {
+      requestedName: current.requestedName,
+      requestedVersion: current.requestedVersion,
+    });
+    const request = await this.getPublishRequest(id);
+    if (!request) throw new Error("Publish request not found after approval.");
+    return request;
+  }
+
+  async rejectPublishRequest(
+    actorUserId: string,
+    id: string,
+    reason: string,
+  ): Promise<PublishRequestRow> {
+    const cleanReason = normalizeStatusReason(reason, "Rejected by registry staff.");
+    const [row] = await this.sql`
+      UPDATE pack_publish_requests
+      SET status = 'rejected',
+          status_reason = ${cleanReason},
+          reviewed_by_user_id = ${actorUserId},
+          reviewed_at = now(),
+          updated_at = now()
+      WHERE id = ${id}
+      RETURNING id
+    `;
+    if (!row) throw new StoreValidationError("Publish request not found.");
+    await this.audit(actorUserId, "publish_request.reject", "publish_request", id, {
+      reason: cleanReason,
+    });
+    const request = await this.getPublishRequest(id);
+    if (!request) throw new Error("Publish request not found after rejection.");
+    return request;
   }
 
   private async resolveHandle(rawHandle: string | undefined, userId: string) {
@@ -1138,6 +1359,14 @@ class FileRegistryStore implements RegistryStore {
     return user;
   }
 
+  async setUserRoleForDev(userId: string, role: "admin" | "moderator" | "user") {
+    const user = this.users.get(userId);
+    if (!user) throw new Error("User not found.");
+    user.role = role;
+    await this.save();
+    return user;
+  }
+
   async listReviews(packKey: string, viewerUserId?: string): Promise<ReviewListResult> {
     const reviews = [...this.reviews.values()]
       .filter((review) => review.packKey === packKey)
@@ -1303,6 +1532,10 @@ class FileRegistryStore implements RegistryStore {
     return request;
   }
 
+  async getPublishRequest(id: string) {
+    return this.publishRequests.get(id) ?? null;
+  }
+
   async listAccountPublishRequests(userId: string) {
     return [...this.publishRequests.values()]
       .filter((request) => request.submittedBy.id === userId)
@@ -1313,6 +1546,86 @@ class FileRegistryStore implements RegistryStore {
     return [...this.publishRequests.values()].sort((left, right) =>
       right.createdAt.localeCompare(left.createdAt),
     );
+  }
+
+  async listApprovedPublishRequests() {
+    return [...this.publishRequests.values()]
+      .filter((request) => request.status === "approved" && request.registryEntry)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async markPublishRequestValidated(id: string, entry: PublishRegistryEntry) {
+    const request = this.requirePublishRequest(id);
+    const now = new Date().toISOString();
+    const next: PublishRequestRow = {
+      ...request,
+      status: "pending_review",
+      registryEntry: entry,
+      validationError: undefined,
+      statusReason: undefined,
+      validatedAt: now,
+      updatedAt: now,
+    };
+    this.publishRequests.set(id, next);
+    await this.save();
+    return next;
+  }
+
+  async markPublishRequestValidationFailed(id: string, error: string) {
+    const request = this.requirePublishRequest(id);
+    const now = new Date().toISOString();
+    const reason = normalizeStatusReason(error, "Validation failed.");
+    const next: PublishRequestRow = {
+      ...request,
+      status: "validation_failed",
+      registryEntry: undefined,
+      validatedAt: undefined,
+      validationError: reason,
+      statusReason: reason,
+      updatedAt: now,
+    };
+    this.publishRequests.set(id, next);
+    await this.save();
+    return next;
+  }
+
+  async approvePublishRequest(actorUserId: string, id: string) {
+    const request = this.requirePublishRequest(id);
+    if (!request.registryEntry || request.status !== "pending_review") {
+      throw new StoreValidationError("Publish request must be validated before approval.");
+    }
+    const reviewer = this.users.get(actorUserId);
+    if (!reviewer) throw new Error("Reviewer not found.");
+    const now = new Date().toISOString();
+    const next: PublishRequestRow = {
+      ...request,
+      status: "approved",
+      statusReason: undefined,
+      reviewedAt: now,
+      reviewedBy: reviewer,
+      updatedAt: now,
+    };
+    this.publishRequests.set(id, next);
+    await this.save();
+    return next;
+  }
+
+  async rejectPublishRequest(actorUserId: string, id: string, reason: string) {
+    const request = this.requirePublishRequest(id);
+    const reviewer = this.users.get(actorUserId);
+    if (!reviewer) throw new Error("Reviewer not found.");
+    const now = new Date().toISOString();
+    const next: PublishRequestRow = {
+      ...request,
+      status: "rejected",
+      statusReason: normalizeStatusReason(reason, "Rejected by registry staff."),
+      reviewedAt: now,
+      reviewedBy: reviewer,
+      updatedAt: now,
+    };
+    this.publishRequests.set(id, next);
+    await this.save();
+    return next;
   }
 
   private async save() {
@@ -1335,6 +1648,12 @@ class FileRegistryStore implements RegistryStore {
       publishRequests: [...this.publishRequests.values()],
     };
     await writeFile(this.filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  }
+
+  private requirePublishRequest(id: string) {
+    const request = this.publishRequests.get(id);
+    if (!request) throw new StoreValidationError("Publish request not found.");
+    return request;
   }
 
   private ensureGithubPublisher(input: VerifiedPackOwnershipInput): PublisherSummary {

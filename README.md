@@ -5,9 +5,11 @@ catalog used by `gc pack registry search/show` and presents Clawhub-style
 browse and detail pages for packs, README content, releases, install commands,
 and trust metadata.
 
-Pack authors do not publish directly into this repository. They publish their
-own `registry.toml`, then add one pointer to `sources.toml`. The aggregate
-catalogs in `public/` are generated from those pointers.
+Pack authors can submit direct publish requests from a pushed GitHub commit.
+The registry validates the upstream pack, stores a synthetic registry-entry
+preview for staff review, and merges approved releases into the runtime
+aggregate. The older `sources.toml` pointer model remains available as a
+manual fallback.
 
 `public/registry.toml` stays compatible with the Gas City registry
 implementation. Website-only data such as README content and Open Graph preview
@@ -29,7 +31,10 @@ Local development needs no external services:
 
 - Reviews, sessions, stars, and profile edits are stored in
   `.registry-data/registry.local.json`.
+- Publish requests and staff approvals use the same local JSON store.
 - The `Dev sign in` button creates a stable fake Gas City identity.
+- Direct publish validation uses `gc pack release hash`; install `gc` locally
+  or set `REGISTRY_GC_BIN=/path/to/gc`.
 - Set `REGISTRY_DATA_PATH=/path/to/file.json` to use a different local state
   file.
 - Set `REGISTRY_DEV_AUTH=0` to hide the auth stub when testing signed-out
@@ -43,6 +48,7 @@ GitHub secrets; do not commit them.
 
 ```bash
 bun audit
+bun run test:unit
 bun run generate:check
 bun run typecheck
 bun run build
@@ -80,6 +86,7 @@ GITHUB_APP_SLUG=<registry GitHub App slug>
 GITHUB_APP_CLIENT_ID=<registry GitHub App client id>
 GITHUB_APP_CLIENT_SECRET=<registry GitHub App client secret>
 GITHUB_APP_WEBHOOK_SECRET=<registry GitHub App webhook secret>
+REGISTRY_GC_BIN=/usr/local/bin/gc
 ```
 
 The production login path uses the same WorkOS/AuthKit application family as
@@ -143,9 +150,10 @@ public/catalog.json
 ```
 
 `public/registry.toml` is generated too, so `gc` can consume the same aggregate
-as a normal pack registry. Set `VITE_CATALOG_URL` at build time to point at
-another generated JSON catalog, or `VITE_REGISTRY_URL` to control the TOML
-fallback.
+as a normal pack registry. At runtime, approved direct publish requests are
+merged into `/registry.toml` and `/catalog.json` before those endpoints are
+served. Set `VITE_CATALOG_URL` at build time to point at another generated JSON
+catalog, or `VITE_REGISTRY_URL` to control the TOML fallback.
 
 ## Adding A Registry Source
 

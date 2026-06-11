@@ -1,4 +1,12 @@
-import { GitCommitHorizontal, GitPullRequest, Save, Star, UserRound } from "lucide-react";
+import {
+  CheckCircle2,
+  GitCommitHorizontal,
+  GitPullRequest,
+  RefreshCw,
+  Save,
+  Star,
+  UserRound,
+} from "lucide-react";
 import type React from "react";
 import { useEffect, useState } from "react";
 import { apiRequest, type AuthState, type PublishRequestRow, type ReviewRow } from "../lib/api";
@@ -18,6 +26,7 @@ export function AccountPage({
   const [handle, setHandle] = useState("");
   const [reviews, setReviews] = useState<ReviewRow[]>([]);
   const [publishRequests, setPublishRequests] = useState<PublishRequestRow[]>([]);
+  const [workingRequestId, setWorkingRequestId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,6 +88,42 @@ export function AccountPage({
       onProfileSaved();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save profile.");
+    }
+  };
+
+  const refreshPublishRequests = async () => {
+    if (!auth.csrfToken) return;
+    const result = await apiRequest<{ publishRequests: PublishRequestRow[] }>(
+      "/api/account/publish-requests",
+      {},
+      auth.csrfToken,
+    );
+    setPublishRequests(result.publishRequests);
+  };
+
+  const validatePublishRequest = async (id: string) => {
+    setNotice(null);
+    setError(null);
+    setWorkingRequestId(id);
+    try {
+      const result = await apiRequest<{ publishRequest: PublishRequestRow }>(
+        `/api/publish-requests/${encodeURIComponent(id)}/validate`,
+        { method: "POST" },
+        auth.csrfToken,
+      );
+      setPublishRequests((requests) =>
+        requests.map((request) => (request.id === id ? result.publishRequest : request)),
+      );
+      setNotice(
+        result.publishRequest.status === "pending_review"
+          ? "Publish request validated and queued for review."
+          : "Publish request validation finished.",
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to validate publish request.");
+      await refreshPublishRequests().catch(() => {});
+    } finally {
+      setWorkingRequestId(null);
     }
   };
 
@@ -157,6 +202,25 @@ export function AccountPage({
                   <span>
                     <GitCommitHorizontal size={13} /> {request.commit.slice(0, 12)}
                   </span>
+                  {request.registryEntry ? (
+                    <div className="requestPreview">
+                      <span>
+                        <CheckCircle2 size={13} /> {request.registryEntry.release.hash}
+                      </span>
+                      <p>{request.registryEntry.description}</p>
+                    </div>
+                  ) : null}
+                  {request.status === "pending_validation" || request.status === "validation_failed" ? (
+                    <button
+                      className="smallMutedButton"
+                      type="button"
+                      disabled={workingRequestId === request.id}
+                      onClick={() => void validatePublishRequest(request.id)}
+                    >
+                      <RefreshCw size={14} />
+                      {workingRequestId === request.id ? "Validating" : "Validate"}
+                    </button>
+                  ) : null}
                   {request.statusReason ? <p>{request.statusReason}</p> : null}
                 </article>
               ))}
@@ -172,6 +236,8 @@ function statusLabel(status: PublishRequestRow["status"]) {
   switch (status) {
     case "pending_validation":
       return "Pending validation";
+    case "validation_failed":
+      return "Validation failed";
     case "pending_review":
       return "Pending review";
     case "approved":
