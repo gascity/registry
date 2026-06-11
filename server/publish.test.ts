@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -98,6 +98,25 @@ describe("file-backed publish requests", () => {
       await store.close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("postgres publish request queries", () => {
+  test("qualifies duplicate lookup columns across joined tables", async () => {
+    const source = await readFile(new URL("./store.ts", import.meta.url), "utf8");
+    const createPublishRequestBody = source.match(
+      /async createPublishRequest\([\s\S]*?\n  async getPublishRequest/,
+    )?.[0];
+
+    expect(createPublishRequestBody).toBeTruthy();
+    expect(createPublishRequestBody).toContain("WHERE pack_publish_requests.requested_name =");
+    expect(createPublishRequestBody).toContain("AND pack_publish_requests.requested_version =");
+    expect(createPublishRequestBody).toContain("AND pack_publish_requests.status <> 'rejected'");
+    expect(createPublishRequestBody).toContain("ORDER BY pack_publish_requests.created_at DESC");
+    expect(createPublishRequestBody).not.toMatch(/\bWHERE requested_name =/);
+    expect(createPublishRequestBody).not.toMatch(/\bAND requested_version =/);
+    expect(createPublishRequestBody).not.toMatch(/\bAND status <> 'rejected'/);
+    expect(createPublishRequestBody).not.toMatch(/\bORDER BY created_at DESC/);
   });
 });
 

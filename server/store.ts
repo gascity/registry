@@ -1352,10 +1352,10 @@ export class PostgresRegistryStore implements RegistryStore {
         users.role
       FROM pack_publish_requests
       JOIN users ON users.id = pack_publish_requests.submitter_user_id
-      WHERE requested_name = ${normalized.requestedName}
-        AND requested_version = ${normalized.requestedVersion}
-        AND status <> 'rejected'
-      ORDER BY created_at DESC
+      WHERE pack_publish_requests.requested_name = ${normalized.requestedName}
+        AND pack_publish_requests.requested_version = ${normalized.requestedVersion}
+        AND pack_publish_requests.status <> 'rejected'
+      ORDER BY pack_publish_requests.created_at DESC
       LIMIT 1
     `;
     if (existing[0]) {
