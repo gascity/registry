@@ -274,10 +274,10 @@
 }
 
 .markdown table {
-  display: block;
+  width: 100%;
   max-width: 100%;
-  overflow-x: auto;
   border-collapse: collapse;
+  table-layout: fixed;
 }
 
 .markdown th,
@@ -285,6 +285,8 @@
   border: 1px solid var(--line);
   padding: 8px 10px;
   text-align: left;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .metadataListWide {

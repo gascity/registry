@@ -58,7 +58,7 @@ test("pack detail exposes README and tabbed metadata", async ({ page }) => {
   await page.goto("/packs/gascity");
   await expect(page.getByRole("heading", { name: "gascity" })).toBeVisible();
   await expect(page.getByRole("tab", { name: /README/ })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("heading", { name: "Gas City Planning Skills" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Gas City Build Pack/ })).toBeVisible();
 
   await page.getByRole("tab", { name: /Releases/ }).click();
   await expect(page).toHaveURL(/#releases/);
