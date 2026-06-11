@@ -39,6 +39,13 @@ schema = 1
     hash = "sha256:d97b8830f959a688f4cb3c61497f630adc4815bb76c11afefb2907f3163a7796"
     description = "Refresh Gas City planning pack release pin."
 
+  [[pack.release]]
+    version = "0.1.2"
+    ref = "main"
+    commit = "5fc675b85d4ae0ebca2f17cb027a24b03f2832f8"
+    hash = "sha256:b4a2acd95938731742c631105a77ebebe703888e9b4d1d543ce1ee0af7b4097f"
+    description = "Mark pack test scripts executable (aligns the release hash with the extension-derived modes used by module embeds)."
+
 [[pack]]
   name = "gastown"
   description = "Default Gas Town coding workflow pack."

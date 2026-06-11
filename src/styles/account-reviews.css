@@ -270,6 +270,40 @@
   max-width: 860px;
 }
 
+.publishFormPanel form {
+  display: grid;
+  gap: 12px;
+}
+
+.publishFormPanel label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.publishFormPanel input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(4, 8, 14, 0.95);
+  color: var(--ink);
+  padding: 10px;
+  outline: none;
+}
+
+.publishFormPanel input:focus {
+  border-color: rgba(242, 217, 149, 0.58);
+}
+
+.publishFormPanel button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 .githubImportPanel {
   display: grid;
   gap: 16px;

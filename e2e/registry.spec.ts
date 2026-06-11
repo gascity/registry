@@ -205,12 +205,17 @@ test("dev auth publish page exposes GitHub import and manual fallback", async ({
   const errors = trackRuntimeErrors(page);
   const handle = `web-publish-${Date.now()}-${testInfo.workerIndex}`;
 
+  await page.setViewportSize({ width: 390, height: 1000 });
   await page.goto(`/api/dev/sign-in?handle=${handle}&redirect=/publish`);
   await expect(page.getByRole("heading", { name: "Publish From GitHub" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Find Packs From GitHub" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Find packs" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Install app/ })).toHaveAttribute("href", /github\.com\/apps/);
   await expect(page.getByText("Manual publish request")).toBeVisible();
+  await page.getByText("Manual publish request").click();
+  await expect(page.getByLabel("GitHub repository")).toBeVisible();
+  await expect(page.getByLabel("Commit SHA")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Submit publish request" })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await expectHealthyPage(page, errors);
 });
