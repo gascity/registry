@@ -10,7 +10,8 @@ import {
   AuthError,
 } from "./auth";
 import { requireCatalogPackSource } from "./catalog";
-import { createStore, StoreValidationError } from "./store";
+import { PublishRequestValidationError } from "./publish";
+import { createStore, StoreConflictError, StoreValidationError } from "./store";
 import { RequestError, assertOrigin, errorJson, json, readJsonBody } from "./http";
 import { enforceRateLimit, withSecurityHeaders } from "./security";
 import {
@@ -25,7 +26,7 @@ import {
   verifyGitHubClaimState,
   verifyGitHubPackOwnership,
 } from "./github";
-import type { ReviewInput } from "./types";
+import type { PublishRequestInput, ReviewInput, SessionRecord } from "./types";
 
 const config = loadConfig();
 const store = createStore(config.databaseUrl, config.localDataPath);
@@ -50,6 +51,10 @@ const server = Bun.serve({
       if (error instanceof AuthError || error instanceof RequestError) {
         response = errorJson(error.status, error.code, error.message);
       } else if (error instanceof StoreValidationError) {
+        response = errorJson(error.status, error.code, error.message);
+      } else if (error instanceof StoreConflictError) {
+        response = errorJson(error.status, error.code, error.message);
+      } else if (error instanceof PublishRequestValidationError) {
         response = errorJson(error.status, error.code, error.message);
       } else {
         console.error("[registry] unhandled request error", error);
@@ -184,6 +189,22 @@ async function handleApi(request: Request) {
     return new Response(null, { status: 204 });
   }
 
+  if (request.method === "POST" && url.pathname === "/api/publish-requests") {
+    requireCsrf(request, session);
+    enforceRateLimit(request, "publish-request-create", { windowMs: 60 * 60 * 1000, max: 20 }, session);
+    const body = await readJsonBody<PublishRequestInput>(request, 16 * 1024);
+    return json(await store.createPublishRequest(session!.user.id, body), { status: 201 });
+  }
+  if (request.method === "GET" && url.pathname === "/api/account/publish-requests") {
+    requireCsrf(request, session);
+    return json({ publishRequests: await store.listAccountPublishRequests(session!.user.id) });
+  }
+  if (request.method === "GET" && url.pathname === "/api/admin/publish-requests") {
+    requireCsrf(request, session);
+    requireRegistryStaff(session);
+    return json({ publishRequests: await store.listPublishRequests() });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/reviews") {
     const packKey = requirePackKey(url);
     return json(await store.listReviews(packKey, session?.user.id));
@@ -245,6 +266,13 @@ function requireSourceUrl(url: URL) {
   const sourceUrl = url.searchParams.get("sourceUrl")?.trim();
   if (!sourceUrl) throw new RequestError(422, "VALIDATION_ERROR", "Source URL required.");
   return sourceUrl;
+}
+
+function requireRegistryStaff(session: SessionRecord | null) {
+  if (!session) throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
+  if (session.user.role !== "admin" && session.user.role !== "moderator") {
+    throw new RequestError(403, "FORBIDDEN", "Registry staff access required.");
+  }
 }
 
 async function serveStatic(url: URL) {

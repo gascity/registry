@@ -78,6 +78,35 @@ export type PackOwnership = {
   };
 };
 
+export type PublishRequestStatus =
+  | "pending_validation"
+  | "pending_review"
+  | "approved"
+  | "rejected";
+
+export type PublishRequestRow = {
+  id: string;
+  status: PublishRequestStatus;
+  repository: {
+    host: "github.com";
+    owner: string;
+    name: string;
+    fullName: string;
+  };
+  repoUrl: string;
+  sourceUrl: string;
+  packPath: string;
+  commit: string;
+  requestedName: string;
+  requestedVersion: string;
+  requestedRef?: string;
+  requestedDescription?: string;
+  statusReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  submittedBy: PublicUser;
+};
+
 const signedOutState: AuthState = {
   user: null,
   csrfToken: null,

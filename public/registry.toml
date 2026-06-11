@@ -52,6 +52,20 @@ schema = 1
     hash = "sha256:275565384903ae22bf9187aa821df135724bd4a639be18e4b4e76f739a555cc4"
     description = "Refresh Gas Town workflow pack release pin."
 
+  [[pack.release]]
+    version = "0.1.2"
+    ref = "main"
+    commit = "1f45471e8bdc5dece030dfc99406ca7d3d45f9c0"
+    hash = "sha256:5d68300d4fdf04b705cb0b4e09ceb55406e42e7ab0d0a12ddba3b1e4d8628b92"
+    description = "Gastown owns its dog pool and shutdown dance; docs reflect the explicit-includes runtime (maintenance pack retired)."
+
+  [[pack.release]]
+    version = "0.1.3"
+    ref = "main"
+    commit = "31382fc6dd86b747d19687f6028d8bcd85e059a7"
+    hash = "sha256:d1be2da74dfbeee2ae15f093c542de68becdb7d86dab06351313f2faf9b482b3"
+    description = "Mark pack test scripts executable (consumer smoke tests require +x on pack scripts)."
+
 [[pack]]
   name = "github"
   description = "GitHub webhook intake services and commands for Gas City."

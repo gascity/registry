@@ -11,15 +11,11 @@ import { REGISTRY_SOURCE_URL } from "../lib/links";
 const installGcCommand = `brew install gastownhall/gascity/gascity
 gc version`;
 
-const stampReleaseCommand = `PACK_COMMIT="$(git rev-parse HEAD)"
+const directPublishCommand = `cd path/to/your-pack
+git status --short
+git push
 
-gc pack release stamp registry.toml my-pack \\
-  --version 0.1.0 \\
-  --ref main \\
-  --commit "$PACK_COMMIT" \\
-  --source "https://github.com/example/gascity-packs/tree/main/my-pack" \\
-  --pack-description "Short description shown in search results." \\
-  --description "Initial release."`;
+gc registry publish .`;
 
 const validateRegistryCommand = `gc pack release validate registry.toml --pack my-pack`;
 
@@ -49,9 +45,9 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
         <p className="eyebrow">Publishing</p>
         <h1>Publish A Pack</h1>
         <p>
-          Pack authors keep their canonical `registry.toml` in their own repository. Gas City
-          Registry accepts one pointer to that file, then CI generates the aggregate
-          `registry.toml` and website JSON.
+          Direct publishing is moving to clean Git checkouts. `gc registry publish` will send an
+          immutable GitHub repo, commit, and pack path to Gas City Registry; the registry then
+          derives the catalog entry and synthetic aggregate from upstream contents.
         </p>
         <div className="docsActions">
           <a className="iconTextButton primary" href={REGISTRY_SOURCE_URL} rel="noreferrer">
@@ -75,14 +71,14 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
       <section className="docsSection">
         <div className="sectionTitle">
           <p className="eyebrow">Model</p>
-          <h2>Author-Owned Registry, Aggregated By CI</h2>
+          <h2>Author-Owned Source, Aggregated By Registry</h2>
         </div>
         <div className="docsCallout">
           <PackagePlus size={22} aria-hidden="true" />
           <p>
-            You publish releases by updating your repo's `registry.toml`. The Gas City registry repo
-            stores only source pointers in `sources.toml`; CI fetches those pointers and regenerates
-            `/registry.toml`, `/catalog.json`, and Open Graph preview assets.
+            The source repository stays canonical. The registry stores publish requests keyed to a
+            full commit SHA, then server-side validation can fetch the upstream pack and regenerate
+            `/registry.toml`, `/catalog.json`, and Open Graph preview assets from approved releases.
           </p>
         </div>
       </section>
@@ -95,26 +91,26 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
         <ol className="stepList">
           <li>
             <strong>Put the pack in a GitHub repository.</strong>
-            <span>Commit and push the pack content before stamping a release.</span>
+            <span>Commit and push the pack content before publishing.</span>
           </li>
           <li>
-            <strong>Stamp your canonical `registry.toml` with `gc`.</strong>
+            <strong>Run `gc registry publish` from the pack root when available.</strong>
             <span>
-              Run `gc pack release stamp` so the release commit, pack name, and content hash are
-              generated from the exact tracked GitHub source.
+              The CLI verifies the checkout is clean, confirms `HEAD` is pushed, and submits the
+              repo, commit, pack path, name, and version to the registry.
             </span>
           </li>
           <li>
-            <strong>Validate the registry file.</strong>
-            <span>Run `gc pack release validate registry.toml` before opening the pointer PR.</span>
+            <strong>Let the registry derive release metadata.</strong>
+            <span>The server validates the exact commit and manufactures the registry entry.</span>
           </li>
           <li>
-            <strong>Add one pointer to `gascity/registry`.</strong>
-            <span>Edit `sources.toml` in this repository and point at your raw `registry.toml` URL.</span>
+            <strong>Review the request status.</strong>
+            <span>Your account page shows whether the release is validating, queued, approved, or rejected.</span>
           </li>
           <li>
             <strong>Let CI regenerate the aggregate.</strong>
-            <span>The PR must include generated `public/registry.toml`, `public/catalog.json`, and `public/og/` updates.</span>
+            <span>Approved releases are folded into the synthetic aggregate consumed by the CLI.</span>
           </li>
           <li>
             <strong>Verify ownership after merge.</strong>
@@ -139,16 +135,15 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Release command</p>
-          <h2>Stamp The Release</h2>
+          <p className="eyebrow">Direct publish target</p>
+          <h2>Submit The Request</h2>
           <p className="mutedText">
-            Run this from the repository that owns `registry.toml`, after the pack commit has been
-            pushed to GitHub. `gc` clones the source, checks the pack name in `pack.toml`, resolves
-            the full commit SHA, and writes the canonical `sha256:` content hash.
+            This is the target CLI shape for the low-friction path. Run it from the pack root after
+            the commit is pushed to GitHub.
           </p>
         </div>
         <pre className="docsCode">
-          <code>{stampReleaseCommand}</code>
+          <code>{directPublishCommand}</code>
         </pre>
       </section>
 
@@ -157,8 +152,8 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
           <p className="eyebrow">Validation</p>
           <h2>Check The Registry File</h2>
           <p className="mutedText">
-            Validation re-fetches the recorded source and verifies every active release hash before
-            you open the pointer PR.
+            Manual registry files remain useful as a fallback and for debugging aggregate output.
+            Validation re-fetches the recorded source and verifies active release hashes.
           </p>
         </div>
         <pre className="docsCode">
@@ -182,11 +177,11 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Pointer PR</p>
+          <p className="eyebrow">Manual fallback</p>
           <h2>sources.toml Entry</h2>
           <p className="mutedText">
-            The only hand-authored change in `gascity/registry` should be a source pointer. The
-            generated aggregate files are committed alongside it.
+            During the transition, authors can still submit a source pointer. The preferred path is
+            direct publishing from a pushed GitHub commit.
           </p>
         </div>
         <pre className="docsCode">
@@ -202,7 +197,7 @@ export function PublishPage({ navigateTo }: { navigateTo: (path: string) => void
         <ul className="checkList">
           <li>
             <TerminalSquare size={16} aria-hidden="true" />
-            Local validation: `gc pack release validate registry.toml`
+            Direct submission: `gc registry publish .`
           </li>
           <li>
             <FileCode2 size={16} aria-hidden="true" />

@@ -101,7 +101,7 @@ test("footer links expose source, verifier, and publishing pages", async ({ page
   await page.getByRole("contentinfo").getByRole("link", { name: "Publish a pack" }).click();
   await expect(page).toHaveURL(/\/publish$/);
   await expect(page.getByRole("heading", { name: "Publish A Pack" })).toBeVisible();
-  await expect(page.getByText("gc pack release stamp registry.toml my-pack")).toBeVisible();
+  await expect(page.locator(".docsCode code").filter({ hasText: "gc registry publish ." })).toBeVisible();
   await expect(page.getByText("gc pack release validate registry.toml --pack my-pack")).toBeVisible();
   await expect(page.getByText("make registry-publish")).toHaveCount(0);
   await expectHealthyPage(page, errors);
@@ -154,6 +154,50 @@ test("dev auth can create and persist a local review", async ({ page }, testInfo
 
   await page.reload();
   await expect(page.getByText(title)).toBeVisible();
+  await expectHealthyPage(page, errors);
+});
+
+test("dev auth can submit and inspect a publish request", async ({ page }, testInfo) => {
+  const errors = trackRuntimeErrors(page);
+  const stamp = `${Date.now()}-${testInfo.workerIndex}`;
+  const handle = `publisher-${stamp}`;
+  const requestedName = `e2e-pack-${stamp}`;
+
+  await page.goto(`/api/dev/sign-in?handle=${handle}&redirect=/account`);
+  await expect(page.getByRole("button", { name: /publisher-/ })).toBeVisible();
+
+  const result = await page.evaluate(async (name) => {
+    const meResponse = await fetch("/api/me", { headers: { Accept: "application/json" } });
+    const me = await meResponse.json();
+    const response = await fetch("/api/publish-requests", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-CSRF-Token": me.csrfToken,
+      },
+      body: JSON.stringify({
+        repoUrl: "https://github.com/gastownhall/gascity-packs",
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        packPath: "packs/example",
+        requestedName: name,
+        requestedVersion: "0.1.0",
+        requestedRef: "refs/tags/v0.1.0",
+      }),
+    });
+    return {
+      status: response.status,
+      body: await response.json(),
+    };
+  }, requestedName);
+
+  expect(result.status).toBe(201);
+  expect(result.body.requestedName).toBe(requestedName);
+
+  await page.goto("/account");
+  await expect(page.getByRole("heading", { name: "Publish requests" })).toBeVisible();
+  await expect(page.getByText(`${requestedName} 0.1.0`)).toBeVisible();
+  await expect(page.getByText("Pending validation")).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 

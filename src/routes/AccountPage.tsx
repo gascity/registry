@@ -1,7 +1,7 @@
-import { Save, Star, UserRound } from "lucide-react";
+import { GitCommitHorizontal, GitPullRequest, Save, Star, UserRound } from "lucide-react";
 import type React from "react";
 import { useEffect, useState } from "react";
-import { apiRequest, type AuthState, type ReviewRow } from "../lib/api";
+import { apiRequest, type AuthState, type PublishRequestRow, type ReviewRow } from "../lib/api";
 
 export function AccountPage({
   auth,
@@ -17,6 +17,7 @@ export function AccountPage({
   const [displayName, setDisplayName] = useState("");
   const [handle, setHandle] = useState("");
   const [reviews, setReviews] = useState<ReviewRow[]>([]);
+  const [publishRequests, setPublishRequests] = useState<PublishRequestRow[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,6 +31,13 @@ export function AccountPage({
     void apiRequest<{ reviews: ReviewRow[] }>("/api/account/reviews", {}, auth.csrfToken)
       .then((result) => setReviews(result.reviews))
       .catch(() => setReviews([]));
+    void apiRequest<{ publishRequests: PublishRequestRow[] }>(
+      "/api/account/publish-requests",
+      {},
+      auth.csrfToken,
+    )
+      .then((result) => setPublishRequests(result.publishRequests))
+      .catch(() => setPublishRequests([]));
   }, [auth.user, auth.csrfToken]);
 
   if (!auth.user) {
@@ -125,7 +133,50 @@ export function AccountPage({
             </div>
           )}
         </section>
+
+        <section className="accountPanel">
+          <h2>Publish requests</h2>
+          {publishRequests.length === 0 ? (
+            <p className="mutedText">No publish requests yet.</p>
+          ) : (
+            <div className="accountRequestList">
+              {publishRequests.map((request) => (
+                <article key={request.id}>
+                  <div className="requestTitle">
+                    <strong>
+                      {request.requestedName} {request.requestedVersion}
+                    </strong>
+                    <span className={`requestStatus ${request.status}`}>
+                      {statusLabel(request.status)}
+                    </span>
+                  </div>
+                  <span>
+                    <GitPullRequest size={13} /> {request.repository.fullName}
+                    {request.packPath === "." ? "" : `/${request.packPath}`}
+                  </span>
+                  <span>
+                    <GitCommitHorizontal size={13} /> {request.commit.slice(0, 12)}
+                  </span>
+                  {request.statusReason ? <p>{request.statusReason}</p> : null}
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
       </div>
     </main>
   );
+}
+
+function statusLabel(status: PublishRequestRow["status"]) {
+  switch (status) {
+    case "pending_validation":
+      return "Pending validation";
+    case "pending_review":
+      return "Pending review";
+    case "approved":
+      return "Approved";
+    case "rejected":
+      return "Rejected";
+  }
 }

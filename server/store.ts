@@ -2,11 +2,14 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import postgres, { type Sql } from "postgres";
 import { randomToken, sha256 } from "./crypto";
+import { normalizePublishRequestInput } from "./publish";
 import type {
   AccountReview,
   IdentityClaims,
   PackOwnership,
   PublisherSummary,
+  PublishRequestInput,
+  PublishRequestRow,
   PublicUser,
   RegistryStore,
   ReviewInput,
@@ -25,6 +28,7 @@ const idPrefix = {
   report: "rpt",
   audit: "aud",
   publisher: "pub",
+  publishRequest: "prq",
 } as const;
 
 export function createStore(databaseUrl: string | undefined, localDataPath?: string): RegistryStore {
@@ -167,6 +171,58 @@ function ownershipFromRows(row: any): PackOwnership {
         })
       : undefined,
   };
+}
+
+function publishRequestFromRows(row: any, user: PublicUser): PublishRequestRow {
+  return {
+    id: row.id,
+    status: publishRequestStatus(row.status),
+    repository: {
+      host: "github.com",
+      owner: row.repo_owner,
+      name: row.repo_name,
+      fullName: row.repo_full_name,
+    },
+    repoUrl: row.repo_url,
+    sourceUrl: row.source_url,
+    packPath: row.pack_path,
+    commit: row.commit_sha,
+    requestedName: row.requested_name,
+    requestedVersion: row.requested_version,
+    requestedRef: row.requested_ref ?? undefined,
+    requestedDescription: row.requested_description ?? undefined,
+    statusReason: row.status_reason ?? undefined,
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+    submittedBy: user,
+  };
+}
+
+function publishRequestStatus(value: unknown): PublishRequestRow["status"] {
+  return value === "pending_review" ||
+    value === "approved" ||
+    value === "rejected" ||
+    value === "pending_validation"
+    ? value
+    : "pending_validation";
+}
+
+function isSamePublishRequest(left: PublishRequestRow, right: {
+  repoUrl: string;
+  sourceUrl: string;
+  packPath: string;
+  commit: string;
+  requestedName: string;
+  requestedVersion: string;
+}) {
+  return (
+    left.repoUrl === right.repoUrl &&
+    left.sourceUrl === right.sourceUrl &&
+    left.packPath === right.packPath &&
+    left.commit === right.commit &&
+    left.requestedName === right.requestedName &&
+    left.requestedVersion === right.requestedVersion
+  );
 }
 
 export class PostgresRegistryStore implements RegistryStore {
@@ -313,6 +369,31 @@ export class PostgresRegistryStore implements RegistryStore {
     `;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_publisher_idx ON pack_ownerships (publisher_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_github_repository_idx ON pack_ownerships (github_repository_id)`;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS pack_publish_requests (
+        id text PRIMARY KEY,
+        submitter_user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status text NOT NULL CHECK (status IN ('pending_validation', 'pending_review', 'approved', 'rejected')),
+        repo_host text NOT NULL DEFAULT 'github.com',
+        repo_owner text NOT NULL,
+        repo_name text NOT NULL,
+        repo_full_name text NOT NULL,
+        repo_url text NOT NULL,
+        source_url text NOT NULL,
+        pack_path text NOT NULL,
+        commit_sha text NOT NULL,
+        requested_name text NOT NULL,
+        requested_version text NOT NULL,
+        requested_ref text,
+        requested_description text,
+        status_reason text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `;
+    await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_submitter_idx ON pack_publish_requests (submitter_user_id, created_at DESC)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_review_idx ON pack_publish_requests (status, created_at DESC)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_pack_version_idx ON pack_publish_requests (requested_name, requested_version)`;
     await this.sql`
       CREATE TABLE IF NOT EXISTS audit_logs (
         id text PRIMARY KEY,
@@ -706,6 +787,116 @@ export class PostgresRegistryStore implements RegistryStore {
     return rows.length;
   }
 
+  async createPublishRequest(
+    userId: string,
+    input: PublishRequestInput,
+  ): Promise<PublishRequestRow> {
+    const normalized = normalizePublishRequestInput(input);
+    const existing = await this.sql`
+      SELECT
+        pack_publish_requests.*,
+        users.id AS user_id,
+        users.handle,
+        users.display_name,
+        users.avatar_url,
+        users.email,
+        users.role
+      FROM pack_publish_requests
+      JOIN users ON users.id = pack_publish_requests.submitter_user_id
+      WHERE requested_name = ${normalized.requestedName}
+        AND requested_version = ${normalized.requestedVersion}
+        AND status <> 'rejected'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+    if (existing[0]) {
+      const row = publishRequestFromRows(
+        existing[0],
+        publicUser({
+          id: existing[0].user_id,
+          handle: existing[0].handle,
+          display_name: existing[0].display_name,
+          avatar_url: existing[0].avatar_url,
+          email: existing[0].email,
+          role: existing[0].role,
+        }),
+      );
+      if (isSamePublishRequest(row, normalized)) return row;
+      throw new StoreConflictError(
+        `A publish request already exists for ${normalized.requestedName} ${normalized.requestedVersion}.`,
+      );
+    }
+
+    const now = new Date();
+    const [row] = await this.sql`
+      INSERT INTO pack_publish_requests (
+        id, submitter_user_id, status, repo_host, repo_owner, repo_name, repo_full_name,
+        repo_url, source_url, pack_path, commit_sha, requested_name, requested_version,
+        requested_ref, requested_description, created_at, updated_at
+      )
+      VALUES (
+        ${newId("publishRequest")}, ${userId}, 'pending_validation', 'github.com',
+        ${normalized.repository.owner}, ${normalized.repository.name}, ${normalized.repository.fullName},
+        ${normalized.repoUrl}, ${normalized.sourceUrl}, ${normalized.packPath}, ${normalized.commit},
+        ${normalized.requestedName}, ${normalized.requestedVersion}, ${normalized.requestedRef ?? null},
+        ${normalized.requestedDescription ?? null}, ${now}, ${now}
+      )
+      RETURNING *
+    `;
+    await this.audit(userId, "publish_request.create", "publish_request", row.id, {
+      requestedName: normalized.requestedName,
+      requestedVersion: normalized.requestedVersion,
+      repoFullName: normalized.repository.fullName,
+      commit: normalized.commit,
+      packPath: normalized.packPath,
+    });
+    const [user] = await this.sql`SELECT * FROM users WHERE id = ${userId}`;
+    return publishRequestFromRows(row, publicUser(user as any));
+  }
+
+  async listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]> {
+    const [user] = await this.sql`SELECT * FROM users WHERE id = ${userId}`;
+    if (!user) return [];
+    const publicSubmitter = publicUser(user as any);
+    const rows = await this.sql`
+      SELECT * FROM pack_publish_requests
+      WHERE submitter_user_id = ${userId}
+      ORDER BY created_at DESC
+      LIMIT 100
+    `;
+    return rows.map((row) => publishRequestFromRows(row, publicSubmitter));
+  }
+
+  async listPublishRequests(): Promise<PublishRequestRow[]> {
+    const rows = await this.sql`
+      SELECT
+        pack_publish_requests.*,
+        users.id AS user_id,
+        users.handle,
+        users.display_name,
+        users.avatar_url,
+        users.email,
+        users.role
+      FROM pack_publish_requests
+      JOIN users ON users.id = pack_publish_requests.submitter_user_id
+      ORDER BY pack_publish_requests.created_at DESC
+      LIMIT 200
+    `;
+    return rows.map((row) =>
+      publishRequestFromRows(
+        row,
+        publicUser({
+          id: row.user_id,
+          handle: row.handle,
+          display_name: row.display_name,
+          avatar_url: row.avatar_url,
+          email: row.email,
+          role: row.role,
+        }),
+      ),
+    );
+  }
+
   private async resolveHandle(rawHandle: string | undefined, userId: string) {
     const base = normalizeHandle(rawHandle) ?? "user";
     for (let index = 1; index <= 50; index += 1) {
@@ -804,6 +995,7 @@ type FileState = {
   publishers?: PublisherSummary[];
   publisherMembers?: Array<{ publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>;
   ownerships?: PackOwnership[];
+  publishRequests?: PublishRequestRow[];
 };
 
 class FileRegistryStore implements RegistryStore {
@@ -819,6 +1011,7 @@ class FileRegistryStore implements RegistryStore {
   private publishers = new Map<string, PublisherSummary>();
   private publisherMembers = new Map<string, { publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>();
   private ownerships = new Map<string, PackOwnership>();
+  private publishRequests = new Map<string, PublishRequestRow>();
   private readonly filePath: string;
 
   constructor(filePath: string) {
@@ -860,6 +1053,12 @@ class FileRegistryStore implements RegistryStore {
         this.publisherMembers.set(`${member.publisherId}:${member.userId}`, member);
       }
       for (const ownership of raw.ownerships ?? []) this.ownerships.set(ownership.packKey, ownership);
+      for (const request of raw.publishRequests ?? []) {
+        this.publishRequests.set(request.id, {
+          ...request,
+          status: publishRequestStatus(request.status),
+        });
+      }
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error;
     }
@@ -1063,6 +1262,59 @@ class FileRegistryStore implements RegistryStore {
     return deleted;
   }
 
+  async createPublishRequest(userId: string, input: PublishRequestInput): Promise<PublishRequestRow> {
+    const normalized = normalizePublishRequestInput(input);
+    const user = this.users.get(userId);
+    if (!user) throw new Error("User not found.");
+    const existing = [...this.publishRequests.values()]
+      .filter(
+        (request) =>
+          request.requestedName === normalized.requestedName &&
+          request.requestedVersion === normalized.requestedVersion &&
+          request.status !== "rejected",
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    if (existing) {
+      if (isSamePublishRequest(existing, normalized)) return existing;
+      throw new StoreConflictError(
+        `A publish request already exists for ${normalized.requestedName} ${normalized.requestedVersion}.`,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const request: PublishRequestRow = {
+      id: newId("publishRequest"),
+      status: "pending_validation",
+      repository: normalized.repository,
+      repoUrl: normalized.repoUrl,
+      sourceUrl: normalized.sourceUrl,
+      packPath: normalized.packPath,
+      commit: normalized.commit,
+      requestedName: normalized.requestedName,
+      requestedVersion: normalized.requestedVersion,
+      requestedRef: normalized.requestedRef,
+      requestedDescription: normalized.requestedDescription,
+      createdAt: now,
+      updatedAt: now,
+      submittedBy: user,
+    };
+    this.publishRequests.set(request.id, request);
+    await this.save();
+    return request;
+  }
+
+  async listAccountPublishRequests(userId: string) {
+    return [...this.publishRequests.values()]
+      .filter((request) => request.submittedBy.id === userId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async listPublishRequests() {
+    return [...this.publishRequests.values()].sort((left, right) =>
+      right.createdAt.localeCompare(left.createdAt),
+    );
+  }
+
   private async save() {
     await mkdir(dirname(this.filePath), { recursive: true });
     const state: FileState = {
@@ -1080,6 +1332,7 @@ class FileRegistryStore implements RegistryStore {
       publishers: [...this.publishers.values()],
       publisherMembers: [...this.publisherMembers.values()],
       ownerships: [...this.ownerships.values()],
+      publishRequests: [...this.publishRequests.values()],
     };
     await writeFile(this.filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   }
@@ -1134,4 +1387,9 @@ function summarizeReviews(reviews: ReviewRow[]) {
 export class StoreValidationError extends Error {
   readonly status = 422;
   readonly code = "VALIDATION_ERROR";
+}
+
+export class StoreConflictError extends Error {
+  readonly status = 409;
+  readonly code = "CONFLICT";
 }

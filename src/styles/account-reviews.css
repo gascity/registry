@@ -148,13 +148,15 @@
 }
 
 .reviewList,
-.accountReviewList {
+.accountReviewList,
+.accountRequestList {
   display: grid;
   gap: 12px;
 }
 
 .reviewItem,
-.accountReviewList article {
+.accountReviewList article,
+.accountRequestList article {
   display: grid;
   gap: 10px;
   border: 1px solid var(--line);
@@ -163,12 +165,43 @@
   padding: 14px;
 }
 
-.accountReviewList span {
+.accountReviewList span,
+.accountRequestList span {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   color: var(--ink-muted);
   font-size: 0.84rem;
+}
+
+.requestTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.requestStatus {
+  border: 1px solid rgba(169, 206, 255, 0.28);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(169, 206, 255, 0.06);
+  color: var(--gc-blue-bright);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.requestStatus.approved {
+  border-color: rgba(242, 217, 149, 0.38);
+  background: rgba(242, 217, 149, 0.08);
+  color: var(--gc-gold-bright);
+}
+
+.requestStatus.rejected {
+  border-color: rgba(255, 143, 90, 0.42);
+  background: rgba(255, 143, 90, 0.08);
+  color: var(--amber);
 }
 
 .reviewMeta {
@@ -195,7 +228,8 @@
 }
 
 .reviewItem p,
-.accountReviewList p {
+.accountReviewList p,
+.accountRequestList p {
   margin-bottom: 0;
   color: var(--ink);
   line-height: 1.55;

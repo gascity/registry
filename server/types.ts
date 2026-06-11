@@ -106,6 +106,54 @@ export type VerifiedPackOwnershipInput = {
   verificationMethod: "github_app_user_token" | "manual";
 };
 
+export type PublishRequestStatus =
+  | "pending_validation"
+  | "pending_review"
+  | "approved"
+  | "rejected";
+
+export type GitHubRepositoryRef = {
+  host: "github.com";
+  owner: string;
+  name: string;
+  fullName: string;
+};
+
+export type PublishRequestInput = {
+  repoUrl: string;
+  commit: string;
+  packPath?: string;
+  requestedName: string;
+  requestedVersion: string;
+  requestedRef?: string;
+  requestedDescription?: string;
+};
+
+export type NormalizedPublishRequestInput = PublishRequestInput & {
+  repository: GitHubRepositoryRef;
+  repoUrl: string;
+  sourceUrl: string;
+  packPath: string;
+};
+
+export type PublishRequestRow = {
+  id: string;
+  status: PublishRequestStatus;
+  repository: GitHubRepositoryRef;
+  repoUrl: string;
+  sourceUrl: string;
+  packPath: string;
+  commit: string;
+  requestedName: string;
+  requestedVersion: string;
+  requestedRef?: string;
+  requestedDescription?: string;
+  statusReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  submittedBy: PublicUser;
+};
+
 export interface RegistryStore {
   readonly kind: "file" | "postgres";
   init(): Promise<void>;
@@ -136,4 +184,7 @@ export interface RegistryStore {
     repositoryIds: string[],
     reason: string,
   ): Promise<number>;
+  createPublishRequest(userId: string, input: PublishRequestInput): Promise<PublishRequestRow>;
+  listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]>;
+  listPublishRequests(): Promise<PublishRequestRow[]>;
 }
