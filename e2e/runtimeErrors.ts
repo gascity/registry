@@ -9,10 +9,17 @@ export function trackRuntimeErrors(page: Page) {
 
   page.on("console", (message) => {
     if (message.type() !== "error") return;
-    errors.push(`console:${message.text()}`);
+    const text = message.text();
+    if (ignoredConsoleError(text)) return;
+    errors.push(`console:${text}`);
   });
 
   return errors;
+}
+
+function ignoredConsoleError(text: string) {
+  // Chromium can emit this when host networking changes during parallel test runs.
+  return text === "Failed to load resource: net::ERR_NETWORK_CHANGED";
 }
 
 export async function expectHealthyPage(page: Page, errors: string[]) {

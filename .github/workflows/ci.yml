@@ -36,6 +36,11 @@ jobs:
       - name: Server and integration tests
         run: bun run test:unit
 
+      - name: Production image smoke
+        run: |
+          docker build -t registry-ci .
+          docker run --rm --entrypoint /usr/local/bin/gc registry-ci pack release hash --help >/dev/null
+
       - name: Install Playwright browsers
         run: bunx playwright install --with-deps chromium
 

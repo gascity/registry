@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -11,7 +11,7 @@ import {
   normalizePublishRequestInput,
   parseGitHubRepositoryUrl,
 } from "./publish";
-import { validatePublishRequestForRegistry } from "./publish-validation";
+import { computePackHash, validatePublishRequestForRegistry } from "./publish-validation";
 import { createStore, StoreConflictError } from "./store";
 import type { ServerConfig } from "./config";
 
@@ -121,6 +121,46 @@ describe("postgres publish request queries", () => {
 });
 
 describe("publish request validation", () => {
+  test("computes pack hashes through gc with immutable source flags", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "registry-gc-"));
+    const gcBin = join(dir, "gc");
+    const argsFile = join(dir, "gc-args.txt");
+    try {
+      await writeFile(
+        gcBin,
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' "$@" > ${JSON.stringify(argsFile)}`,
+          `printf '%s\\n' ${JSON.stringify(hash)}`,
+        ].join("\n"),
+      );
+      await chmod(gcBin, 0o755);
+
+      const computed = await computePackHash(
+        {
+          repoUrl: "https://github.com/gastownhall/gascity-packs",
+          commit,
+          packPath: "packs/example",
+        },
+        { gcBin, timeoutMs: 1_000 },
+      );
+
+      expect(computed).toBe(hash);
+      expect((await readFile(argsFile, "utf8")).trim().split("\n")).toEqual([
+        "pack",
+        "release",
+        "hash",
+        "https://github.com/gastownhall/gascity-packs",
+        "--commit",
+        commit,
+        "--path",
+        "packs/example",
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("builds a synthetic registry entry from upstream pack metadata", async () => {
     const request = {
       id: "prq_test",
