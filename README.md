@@ -149,11 +149,11 @@ Direct publishing uses registry API tokens. Authors can let the CLI create and
 store a revocable token with the normal registry sign-in flow:
 
 ```bash
-gc registry login
-gc registry publish path/to/pack
+gc pack registry login
+gc pack registry publish path/to/pack
 ```
 
-Headless environments can use `gc registry login --device`, or pass an existing
+Headless environments can use `gc pack registry login --device`, or pass an existing
 token with `GC_REGISTRY_TOKEN`. GitHub Actions can publish without a stored
 secret by granting OIDC:
 
@@ -164,7 +164,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - run: gc registry publish path/to/pack
+  - run: gc pack registry publish path/to/pack
 ```
 
 The CLI exchanges GitHub's OIDC token for a 10-minute registry publish token

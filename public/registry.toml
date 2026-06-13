@@ -73,6 +73,13 @@ schema = 1
     hash = "sha256:d1be2da74dfbeee2ae15f093c542de68becdb7d86dab06351313f2faf9b482b3"
     description = "Mark pack test scripts executable (consumer smoke tests require +x on pack scripts)."
 
+  [[pack.release]]
+    version = "0.1.4"
+    ref = "main"
+    commit = "fa91a3b4f1fe5cc9d1ba9ffbdd2d26274680adf9"
+    hash = "sha256:4b7e1331d2cac43334c32a2cbb1d267868c6ec1fb36b2e1beba59568383fe802"
+    description = "Polecat verifies the pushed remote ref before refinery handoff; digest-generate order is city-scoped (ports gascity #3339 and #3320)."
+
 [[pack]]
   name = "github"
   description = "GitHub webhook intake services and commands for Gas City."
