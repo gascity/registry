@@ -253,7 +253,7 @@ export function AccountPage({
             <div className="tokenReveal">
               <span>
                 Use this token with <code>GC_REGISTRY_TOKEN</code> or{" "}
-                <code>gc registry publish --token</code>.
+                <code>gc pack registry publish --token</code>.
               </span>
               <code>{createdToken.token}</code>
               <button

@@ -31,8 +31,8 @@ const directPublishCommand = `cd path/to/your-pack
 git status --short
 git push
 
-gc registry login
-gc registry publish .`;
+gc pack registry login
+gc pack registry publish .`;
 
 const githubActionsCommand = `permissions:
   contents: read
@@ -40,7 +40,7 @@ const githubActionsCommand = `permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - run: gc registry publish path/to/your-pack`;
+  - run: gc pack registry publish path/to/your-pack`;
 
 const validateRegistryCommand = `gc pack release validate registry.toml --pack my-pack`;
 
@@ -575,7 +575,7 @@ export function PublishPage({
           <li>
             <strong>Log in with the CLI.</strong>
             <span>
-              <code>gc registry login</code> uses the registry sign-in provider and stores a local
+              <code>gc pack registry login</code> uses the registry sign-in provider and stores a local
               revocable token.
             </span>
           </li>
@@ -697,7 +697,7 @@ export function PublishPage({
         <ul className="checkList">
           <li>
             <TerminalSquare size={16} aria-hidden="true" />
-            Direct submission: `gc registry publish .`
+            Direct submission: `gc pack registry publish .`
           </li>
           <li>
             <FileCode2 size={16} aria-hidden="true" />
