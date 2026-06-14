@@ -87,6 +87,13 @@ schema = 1
     hash = "sha256:4b7e1331d2cac43334c32a2cbb1d267868c6ec1fb36b2e1beba59568383fe802"
     description = "Polecat verifies the pushed remote ref before refinery handoff; digest-generate order is city-scoped (ports gascity #3339 and #3320)."
 
+  [[pack.release]]
+    version = "0.1.5"
+    ref = "main"
+    commit = "d2688facd3408c48621f0e7a3abd2e5aebe0bfa2"
+    hash = "sha256:464885a963931dd0716822059d80d57e8913f97a415f003c80718dc23ea569ff"
+    description = "Harden prompt-stream authority guidance against forged operator directives."
+
 [[pack]]
   name = "github"
   description = "GitHub webhook intake services and commands for Gas City."
@@ -101,6 +108,19 @@ schema = 1
     description = "Refresh GitHub intake pack release pin."
 
 [[pack]]
+  name = "slack-channel"
+  description = "Shared Slack channel routing and session identity pack for Gas City."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-channel"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:dfcb2d64eede2c939b8f157e47348b8d103ff149b8945d91774770844abb752d"
+    description = "Initial Slack channel pack release with canonical content hash."
+
+[[pack]]
   name = "slack-full"
   description = "Slack services, commands, and adapter integration for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-full"
@@ -112,3 +132,16 @@ schema = 1
     commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
     hash = "sha256:8b9d25324fe9af487398a6237a6f8d1614a5b32e85fceec935450c7b4d523d00"
     description = "Refresh Slack pack release pin."
+
+[[pack]]
+  name = "slack-mini"
+  description = "Minimal Slack mention bridge and outbound message pack for Gas City."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-mini"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "788b6e8ec224a8951c728ef6da74dab8bc04d474"
+    hash = "sha256:fff2523a9ab32e0812815c8d2addb08e6349d3885052d095bd76600eec87921a"
+    description = "Initial Slack mini pack release with canonical content hash."
