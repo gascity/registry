@@ -27,7 +27,11 @@
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "smol-toml": "^1.6.1"
+    "smol-toml": "^1.6.1",
+    "@gascity/tokens": "^0.2.1",
+    "@gascity/ui": "^0.2.0",
+    "@gascity/shell": "^0.1.0",
+    "@gascity/auth": "^0.1.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",

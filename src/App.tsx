@@ -1,6 +1,7 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { AppFrame } from "./components/AppFrame";
+import { ShellFrame } from "@gascity/shell";
+import { registryManifest } from "./lib/manifest";
 import type { CatalogStatus } from "./components/RegistryPrimitives";
 import { useAuthState } from "./lib/api";
 import { fetchRegistryCatalog, type CatalogPack, type RegistryCatalogState } from "./lib/registry";
@@ -68,11 +69,6 @@ function App() {
     setRoute({ kind: "pack", name });
   }, []);
 
-  const navigateAccount = useCallback(() => {
-    updateUrl("/account", "");
-    setRoute({ kind: "account" });
-  }, []);
-
   const navigateTo = useCallback((path: string) => {
     updateUrl(path, "");
     setRoute(parseRoute(path));
@@ -90,18 +86,20 @@ function App() {
   useEffect(() => updatePageMetadata(route, catalog, activePack), [route, catalog, activePack]);
 
   const frame = (children: React.ReactNode) => (
-    <AppFrame
-      auth={auth}
-      isAuthLoading={isAuthLoading}
-      navigateHome={() => navigateHome(searchState, true)}
-      navigateAccount={navigateAccount}
-      navigateTo={navigateTo}
-      signIn={() => signIn()}
-      devSignIn={() => devSignIn()}
-      signOut={() => void signOut()}
+    <ShellFrame
+      manifest={registryManifest(auth.user?.role)}
+      identity={{
+        user: auth.user ? { name: auth.user.displayName || auth.user.handle } : null,
+        isLoading: isAuthLoading,
+        signInEnabled: !auth.user,
+      }}
+      activePath={window.location.pathname}
+      onNavigate={navigateTo}
+      onSignIn={() => signIn()}
+      onSignOut={() => void signOut()}
     >
       {children}
-    </AppFrame>
+    </ShellFrame>
   );
 
   if (route.kind === "account") {
