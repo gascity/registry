@@ -156,7 +156,11 @@ async function handleApi(request: Request) {
     enforceRateLimit(request, "auth-callback", { windowMs: 10 * 60 * 1000, max: 60 });
     return await finishLogin(request, config, store);
   }
-  if (request.method === "GET" && url.pathname === "/api/dev/sign-in") {
+  // Dev-only session backdoor: registered ONLY when dev auth is enabled, which
+  // loadConfig() forces false in production (REGISTRY_DEV_AUTH=1 && !isProduction).
+  // So in prod the route is absent (falls through to 404) AND createDevSession's
+  // own guard 404s — defense in depth. See server/dev-session.test.ts.
+  if (config.devAuthEnabled && request.method === "GET" && url.pathname === "/api/dev/sign-in") {
     enforceRateLimit(request, "dev-sign-in", { windowMs: 10 * 60 * 1000, max: 20 });
     return await createDevSession(request, config, store);
   }
