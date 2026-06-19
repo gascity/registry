@@ -29,10 +29,10 @@
   <path d="M86 450 H1114" stroke="#CED7E2" stroke-opacity="0.18"/>
   <g>
         <text x="88" y="508" fill="#B1C0D1" font-family="Saira, sans-serif" font-size="24">latest</text>
-        <text x="88" y="556" fill="#D9EBFF" font-family="Syncopate, sans-serif" font-size="34" font-weight="700">v0.1.5</text>
+        <text x="88" y="556" fill="#D9EBFF" font-family="Syncopate, sans-serif" font-size="34" font-weight="700">v0.1.10</text>
       </g><g>
         <text x="338" y="508" fill="#B1C0D1" font-family="Saira, sans-serif" font-size="24">releases</text>
-        <text x="338" y="556" fill="#D9EBFF" font-family="Syncopate, sans-serif" font-size="34" font-weight="700">5</text>
+        <text x="338" y="556" fill="#D9EBFF" font-family="Syncopate, sans-serif" font-size="34" font-weight="700">10</text>
       </g><g>
         <text x="588" y="508" fill="#B1C0D1" font-family="Saira, sans-serif" font-size="24">state</text>
         <text x="588" y="556" fill="#D9EBFF" font-family="Syncopate, sans-serif" font-size="34" font-weight="700">active</text>
