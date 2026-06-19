@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "source_count": 1,
-  "pack_count": 8,
+  "pack_count": 9,
   "sources": [
     {
       "name": "gascity-packs",
       "url": "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml",
-      "pack_count": 8
+      "pack_count": 9
     }
   ],
   "og_image": "/og/registry.svg",
@@ -236,6 +236,27 @@
           "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
           "hash": "sha256:53652fd1261adbcff8995fa815750f953fd692ccc2032139d874e9e9a555df73",
           "description": "Refresh GitHub intake pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    },
+    {
+      "pack_key": "gascity-packs--pr-pipeline",
+      "registry": "gascity-packs",
+      "name": "pr-pipeline",
+      "description": "Author-side PR discipline as a pack: planning, blast-radius mapping, outgoing-PR scorecard review, and pre-push gating (mol-pr-start / mol-pr-blast-radius / mol-pr-review / mol-pr-ship).",
+      "source": "https://github.com/gastownhall/gascity-packs//pr-pipeline",
+      "source_kind": "git",
+      "search_text": "pr-pipeline gascity-packs author-side pr discipline as a pack: planning, blast-radius mapping, outgoing-pr scorecard review, and pre-push gating (mol-pr-start / mol-pr-blast-radius / mol-pr-review / mol-pr-ship). https://github.com/gastownhall/gascity-packs//pr-pipeline git 0.1.0 initial pr-pipeline release: four author-side formulas (mol-pr-start, mol-pr-blast-radius, mol-pr-review, mol-pr-ship) + wrapper commands.",
+      "og_image": "/og/pr-pipeline.svg",
+      "latest": "0.1.0",
+      "releases": [
+        {
+          "version": "0.1.0",
+          "ref": "main",
+          "commit": "26614e665705b33f586c8bc41ef73592548114fd",
+          "hash": "sha256:92b4debf702222eb5fbb516e78ebd6397b1bdb98c67df2e542522a8faaa337fe",
+          "description": "Initial pr-pipeline release: four author-side formulas (mol-pr-start, mol-pr-blast-radius, mol-pr-review, mol-pr-ship) + wrapper commands.",
           "withdrawn": false
         }
       ]

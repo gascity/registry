@@ -157,6 +157,19 @@ schema = 1
     description = "Refresh GitHub intake pack release pin."
 
 [[pack]]
+  name = "pr-pipeline"
+  description = "Author-side PR discipline as a pack: planning, blast-radius mapping, outgoing-PR scorecard review, and pre-push gating (mol-pr-start / mol-pr-blast-radius / mol-pr-review / mol-pr-ship)."
+  source = "https://github.com/gastownhall/gascity-packs//pr-pipeline"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "26614e665705b33f586c8bc41ef73592548114fd"
+    hash = "sha256:92b4debf702222eb5fbb516e78ebd6397b1bdb98c67df2e542522a8faaa337fe"
+    description = "Initial pr-pipeline release: four author-side formulas (mol-pr-start, mol-pr-blast-radius, mol-pr-review, mol-pr-ship) + wrapper commands."
+
+[[pack]]
   name = "slack-channel"
   description = "Shared Slack channel routing and session identity pack for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-channel"
