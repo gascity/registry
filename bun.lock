@@ -6,6 +6,7 @@
       "name": "registry",
       "dependencies": {
         "@gascity/auth": "^0.1.6",
+        "@gascity/panel-sdk": "^0.0.3",
         "@gascity/shell": "^0.9.3",
         "@gascity/tokens": "^0.4.1",
         "@gascity/ui": "^0.7.2",
@@ -38,6 +39,8 @@
     "@emnapi/wasi-threads": ["@emnapi/wasi-threads@1.2.1", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-uTII7OYF+/Mes/MrcIOYp5yOtSMLBWSIoLPpcgwipoiKbli6k322tcoFsxoIIxPDqW01SQGAgko4EzZi2BNv2w=="],
 
     "@gascity/auth": ["@gascity/auth@0.1.6", "https://npm.pkg.github.com/download/@gascity/auth/0.1.6/d9c2a885000bbf2e76254c19afcbf36330b02666", { "dependencies": { "@gascity/shell": "*" }, "peerDependencies": { "react": ">=18", "react-dom": ">=18" } }, "sha512-pLO37KYoY7IapPiuWcCU5Mpltn7SOFM01bEEZ3vs2fpDNyAcr8Cte7SkNoHpbjSZyWoGC4SETNb0wNQZG2y1AQ=="],
+
+    "@gascity/panel-sdk": ["@gascity/panel-sdk@0.0.3", "https://npm.pkg.github.com/download/@gascity/panel-sdk/0.0.3/33de85f1891efba77b12faf3ddb8112ba03626cd", { "peerDependencies": { "react": ">=18", "react-dom": ">=18" } }, "sha512-NAxVUqbKETaMQKVAUhu7jLt4d+w5gXBCZzmD1lxr0s6N3DlR3jQxvyJyapQCA6PlW1qWrdgOlzcTf9LJ63A2qg=="],
 
     "@gascity/shell": ["@gascity/shell@0.9.3", "https://npm.pkg.github.com/download/@gascity/shell/0.9.3/d9540c200b05177da4ebda9f52f9757c226e0d7d", { "dependencies": { "@gascity/tokens": "^0.4.1" }, "peerDependencies": { "react": ">=18", "react-dom": ">=18" } }, "sha512-ubsbmD2nxr/nVw+AMT6N7fKz8dNhE7QiGCz/3NXEIXVnqb4XVfDhW+ozkAEg34xrPcgpLrzrNhgGAf80m/1KLA=="],
 

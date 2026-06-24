@@ -14,9 +14,9 @@
       content="Browse versioned Gas City packs, registry releases, and import commands."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:image" content="/og/registry.svg" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:image" content="/og/registry.svg" />
+    <!-- og:image / twitter:image are injected at runtime (mount-base aware) in App.tsx;
+         a static absolute /og/... would escape the apex /registry/ mount. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

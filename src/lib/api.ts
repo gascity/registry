@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { withBase } from "./base";
 
 export type PublicUser = {
   id: string;
@@ -191,7 +192,7 @@ export function useAuthState() {
   const refresh = useCallback(async () => {
     setIsLoading(true);
     try {
-      const response = await fetch("/api/me", { headers: { Accept: "application/json" } });
+      const response = await fetch(withBase("/api/me"), { headers: { Accept: "application/json" } });
       if (!response.ok) {
         setAuth(signedOutState);
         return;
@@ -211,10 +212,10 @@ export function useAuthState() {
   const actions = useMemo(
     () => ({
       signIn(redirectTo?: unknown) {
-        window.location.href = `/api/auth/login?redirect=${encodeURIComponent(authRedirectTarget(redirectTo))}`;
+        window.location.href = `${withBase("/api/auth/login")}?redirect=${encodeURIComponent(authRedirectTarget(redirectTo))}`;
       },
       devSignIn(redirectTo?: unknown) {
-        window.location.href = `/api/dev/sign-in?redirect=${encodeURIComponent(authRedirectTarget(redirectTo))}`;
+        window.location.href = `${withBase("/api/dev/sign-in")}?redirect=${encodeURIComponent(authRedirectTarget(redirectTo))}`;
       },
       async signOut() {
         await apiRequest("/api/auth/logout", { method: "POST" }, auth.csrfToken);
@@ -237,7 +238,7 @@ export async function apiRequest<T>(
   headers.set("Accept", "application/json");
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (csrfToken) headers.set("X-CSRF-Token", csrfToken);
-  const response = await fetch(path, { ...init, headers });
+  const response = await fetch(withBase(path), { ...init, headers });
   if (response.status === 204) return undefined as T;
   const data = await response.json().catch(() => null);
   if (!response.ok) {

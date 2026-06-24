@@ -21,7 +21,11 @@ RUN --mount=type=secret,id=gh_token \
 COPY . .
 ARG VITE_CATALOG_URL
 ARG VITE_REGISTRY_URL
-RUN bun run build
+# Mount prefix baked into the SPA at build time: "/" -> standalone image
+# (registry.gascity.com + the CLI contract); "/registry/" -> the apex-panel image
+# framed at works.gascity.com/registry/. CI builds both from this one Dockerfile.
+ARG REGISTRY_WEB_BASE=/
+RUN REGISTRY_WEB_BASE="$REGISTRY_WEB_BASE" bun run build
 
 # Stage 3: serve static assets and /api through the Bun BFF.
 FROM oven/bun:1-alpine

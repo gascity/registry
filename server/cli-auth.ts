@@ -53,7 +53,9 @@ export function validateCliLoopbackRedirectUri(value: unknown) {
 }
 
 export function buildCliVerificationUris(config: ServerConfig, userCode: string) {
-  const verificationUri = `${config.appUrl}/cli/device`;
+  // The human opens this page in a browser — keep it under the mount so it
+  // resolves correctly whether served standalone or under the apex /registry/.
+  const verificationUri = `${config.appUrl}${config.mountBase}/cli/device`;
   const complete = new URL(verificationUri);
   complete.searchParams.set("code", userCode);
   return {

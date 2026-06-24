@@ -282,7 +282,10 @@ export function revokedRepositoryIdsFromWebhook(event: string, payload: GitHubWe
 }
 
 function githubCallbackUrl(config: ServerConfig) {
-  return `${config.appUrl}/api/ownership/github/callback`;
+  // Browser-facing GitHub App callback — mount-prefixed under the apex
+  // (works.gascity.com/registry/...). The apex deploy's callback must be added
+  // to the GitHub App's allowed callback URLs (like the OIDC redirect_uri).
+  return `${config.appUrl}${config.mountBase}/api/ownership/github/callback`;
 }
 
 export async function exchangeGitHubCode(config: ServerConfig, code: string) {

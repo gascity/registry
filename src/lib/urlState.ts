@@ -1,3 +1,5 @@
+import { stripBase, withBase } from "./base";
+
 export type SortKey = "featured" | "name" | "latest" | "releases";
 export type ViewMode = "list" | "grid";
 export type RouteState =
@@ -24,7 +26,9 @@ export const categoryOptions = [
   { value: "knowledge", label: "Knowledge" },
 ];
 
-export function parseRoute(pathname: string): RouteState {
+export function parseRoute(rawPathname: string): RouteState {
+  // Routes are matched logically (root-relative); strip the apex /registry mount.
+  const pathname = stripBase(rawPathname);
   if (pathname === "/account" || pathname === "/account/") return { kind: "account" };
   if (pathname === "/admin/publish-requests" || pathname === "/admin/publish-requests/") {
     return { kind: "adminPublish" };
@@ -71,7 +75,8 @@ export function buildSearchString({
 }
 
 export function updateUrl(pathname: string, search: string, replace = false) {
-  const next = `${pathname}${search}`;
+  // Logical paths in; write the real (mount-prefixed) URL to history.
+  const next = `${withBase(pathname)}${search}`;
   if (`${window.location.pathname}${window.location.search}${window.location.hash}` === next) return;
   if (replace) window.history.replaceState(null, "", next);
   else window.history.pushState(null, "", next);

@@ -10,6 +10,7 @@ function baseConfig(over: Partial<ServerConfig>): ServerConfig {
   return {
     port: 0,
     appUrl: "http://127.0.0.1:0",
+    mountBase: "",
     sessionSecret: "dev-session-test-secret-value-32chars",
     localDataPath: ".registry-data/dev-session-test.json",
     publishValidation: { gcBin: "gc", timeoutMs: 1_000 },

@@ -344,6 +344,7 @@ function testConfig(): ServerConfig {
   return {
     port: 0,
     appUrl: "http://127.0.0.1:0",
+    mountBase: "",
     sessionSecret: "integration-test-session-secret-value",
     localDataPath: ".registry-data/integration-test.json",
     githubApp: {

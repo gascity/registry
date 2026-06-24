@@ -1,6 +1,10 @@
 export type ServerConfig = {
   port: number;
   appUrl: string;
+  // The mount prefix this deploy is framed under: "" standalone, "/registry"
+  // under the apex (works.gascity.com/registry/). Used for cookie Path scoping
+  // and the OIDC redirect_uri; appUrl stays a BARE ORIGIN.
+  mountBase: string;
   sessionSecret: string;
   databaseUrl?: string;
   localDataPath: string;
@@ -38,6 +42,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     env.APP_URL ??
       (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : "http://127.0.0.1:8080"),
   );
+  // "" standalone, "/registry" under the apex mount (set on the apex deploy only).
+  const mountBase = trimTrailingSlash(env.REGISTRY_MOUNT_BASE?.trim() ?? "");
   const sessionSecret = env.SESSION_SECRET?.trim() || "dev-insecure-registry-session-secret";
   const databaseUrl = env.DATABASE_URL?.trim() || undefined;
   if (isProduction && sessionSecret === "dev-insecure-registry-session-secret") {
@@ -108,6 +114,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   return {
     port: Number.isFinite(port) && port > 0 ? port : 8080,
     appUrl,
+    mountBase,
     sessionSecret,
     databaseUrl,
     localDataPath: env.REGISTRY_DATA_PATH?.trim() || ".registry-data/registry.local.json",

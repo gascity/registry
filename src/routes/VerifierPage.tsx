@@ -8,6 +8,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { GITHUB_APP_INSTALL_URL } from "../lib/links";
+import { withBase } from "../lib/base";
 
 export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => void }) {
   return (
@@ -28,7 +29,7 @@ export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => voi
           </a>
           <a
             className="smallMutedButton"
-            href="/publish"
+            href={withBase("/publish")}
             onClick={(event) => {
               event.preventDefault();
               navigateTo("/publish");
