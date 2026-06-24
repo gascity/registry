@@ -13,7 +13,10 @@ test("home exposes copyable registry endpoint and real pack links", async ({ pag
   await endpointCopy.click();
   await expect(endpointCopy).toContainText("Copied");
 
-  const packLink = page.getByRole("link", { name: /gascity/i }).first();
+  // Target the gascity pack link by href, not by accessible name: other packs
+  // (e.g. "contributing") mention "gascity" in their card text and can sort ahead of it,
+  // so a name-based `.first()` would grab the wrong link.
+  const packLink = page.locator('a[href^="/packs/gascity"]').first();
   await expect(packLink).toHaveAttribute("href", /\/packs\/gascity/);
   await packLink.click();
   await expect(page).toHaveURL(/\/packs\/gascity/);
