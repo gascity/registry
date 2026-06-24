@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "source_count": 1,
-  "pack_count": 9,
+  "pack_count": 11,
   "sources": [
     {
       "name": "gascity-packs",
       "url": "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml",
-      "pack_count": 9
+      "pack_count": 11
     }
   ],
   "og_image": "/og/registry.svg",
@@ -32,6 +32,43 @@
           "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
           "hash": "sha256:b2b0ca765403fcdfdf3b22bed4752c8983e549bde98cd5f5f4467c92189cebdd",
           "description": "Refresh CASS session-search pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    },
+    {
+      "pack_key": "gascity-packs--contributing",
+      "registry": "gascity-packs",
+      "name": "contributing",
+      "description": "The external-contributor lifecycle for gastownhall/gascity — write a good issue, find priority work, plan a PR, map its blast radius, and self-review against the codebase audit. Each step produces an artifact you act on; the pack stops before pushing — opening the PR is your call. Self-contained: gas-city's actual standards (the B-rule adoption-review audit, blast-radius dimensions, test tiers) are baked into the skills; no imports.",
+      "source": "https://github.com/gastownhall/gascity-packs//contributing",
+      "source_kind": "git",
+      "search_text": "contributing gascity-packs the external-contributor lifecycle for gastownhall/gascity — write a good issue, find priority work, plan a pr, map its blast radius, and self-review against the codebase audit. each step produces an artifact you act on; the pack stops before pushing — opening the pr is your call. self-contained: gas-city's actual standards (the b-rule adoption-review audit, blast-radius dimensions, test tiers) are baked into the skills; no imports. https://github.com/gastownhall/gascity-packs//contributing git 0.1.0 initial contributing pack release. 0.2.0 self-contained gas-city contributor lifecycle: drops the pr-pipeline import, bakes in the b-rule adoption-review audit, blast-radius dimensions, and test-tier strategy (7 skills, zero imports). 0.2.1 yaml-safe skill front matter (0.2.0 had an unquoted colon that broke parsing) plus a durability pass — removes time-pinned references (pr-number citations, dated product names, build-timeout numbers, drift-prone counts) so the skills resist staleness. no behavior change.",
+      "og_image": "/og/contributing.svg",
+      "latest": "0.2.1",
+      "releases": [
+        {
+          "version": "0.1.0",
+          "ref": "main",
+          "commit": "16f8297d4e62e143456bfbe4a00e0980a7d9400e",
+          "hash": "sha256:8ee58fba7a87a2390fe707ccb593eec3f25b303782696d836d800e68992beeef",
+          "description": "Initial contributing pack release.",
+          "withdrawn": false
+        },
+        {
+          "version": "0.2.0",
+          "ref": "main",
+          "commit": "7dd57dd9be7d286f19f74c27a00a4359392734a4",
+          "hash": "sha256:3ba4ad08c81ab8d2cb9bd591a0f546435e14a9132b1d4d4745bde03d0feb94ad",
+          "description": "Self-contained gas-city contributor lifecycle: drops the pr-pipeline import, bakes in the B-rule adoption-review audit, blast-radius dimensions, and test-tier strategy (7 skills, zero imports).",
+          "withdrawn": false
+        },
+        {
+          "version": "0.2.1",
+          "ref": "main",
+          "commit": "5b7c5c1320ee6537f5b9c661d2e52712140320df",
+          "hash": "sha256:3757a3dee523efb29e7cf1f9927c70c9bf491eba6d8416e147430aa6130702cf",
+          "description": "YAML-safe skill front matter (0.2.0 had an unquoted colon that broke parsing) plus a durability pass — removes time-pinned references (PR-number citations, dated product names, build-timeout numbers, drift-prone counts) so the skills resist staleness. No behavior change.",
           "withdrawn": false
         }
       ]
@@ -236,6 +273,31 @@
           "commit": "788b6e8ec224a8951c728ef6da74dab8bc04d474",
           "hash": "sha256:53652fd1261adbcff8995fa815750f953fd692ccc2032139d874e9e9a555df73",
           "description": "Refresh GitHub intake pack release pin.",
+          "withdrawn": false
+        }
+      ]
+    },
+    {
+      "pack_key": "gascity-packs--oversight-rig",
+      "registry": "gascity-packs",
+      "name": "oversight-rig",
+      "description": "Disaggregates project-level work scoping out of the mayor — adds one always-on, rig-scoped project-lead per rig that triages its rig and dispatches its own ready work directly, with deterministic severity-based escalation (no relay agent). Composes with any slack adapter pack; ships only the oversight role and its escalation machinery, not a slack bridge.",
+      "source": "https://github.com/gastownhall/gascity-packs/tree/main/oversight-rig",
+      "source_kind": "git",
+      "search_text": "oversight-rig gascity-packs disaggregates project-level work scoping out of the mayor — adds one always-on, rig-scoped project-lead per rig that triages its rig and dispatches its own ready work directly, with deterministic severity-based escalation (no relay agent). composes with any slack adapter pack; ships only the oversight role and its escalation machinery, not a slack bridge. https://github.com/gastownhall/gascity-packs/tree/main/oversight-rig git # oversight-rig a drop-in gas city pack that **disaggregates project-level work scoping out of the mayor**. it adds one always-on, rig-scoped `project-lead` role per rig, so the mayor stops being the bottleneck for every project's day-to-day triage and dispatch. ## the problem it solves in a single-mayor city, the mayor ends up in the minutiae of every project's work scoping — what to dispatch, what's blocked, what to escalate — across every rig at once. that doesn't scale. ## the model ``` mayor (city, unchanged) ──── plans cross-cutting work, handles escalations rig: foo rig: bar … project-lead-foo project-lead-bar • bounded to foo's beads • bounded to bar's beads • reads foo/.gc/ • reads bar/.gc/ project-brief.md project-brief.md • dispatches its own • dispatches its own ready work directly ready work directly ``` - **`project-lead`** (rig scope, always-on, one per rig) - bounded to a single rig's beads. reads its persona, current focus, and escalation triggers from `<rig>/.gc/project-brief.md` — each project owns its own scoping context, so it never piles onto the mayor. - triages its rig every tick and **dispatches ready, in-scope work in its own rig directly** — it does not route every dispatch through the mayor. - judges severity (info vs escalate) and writes structured rollup beads. - **the mayor stays unchanged** and shrinks to what is genuinely cross-cutting: planning work that spans rigs, and reacting to escalations. ## deterministic escalation (no relay agent) the project-lead writes a rollup bead labeled `severity:escalate`. a scheduled order (`escalate-rollups`) uses a mechanical condition trigger that checks for undelivered escalate-severity rollups and delivers them via extmsg — **no second agent decides \"is this escalation-worthy.\"** the judgment is made once, by the agent with the right context, and the rollup bead is the audit trail. human replies route straight back to the bound project-lead. ## what's in the pack - `agents/project-lead/` — the role (agent config, prompt template, and a `project-brief.template.md` to copy per rig) - `orders/` — `patrol-project-leads` (triage cadence) and `escalate-rollups` (deterministic delivery) - `assets/scripts/` — the delivery script and a rig→channel resolver ## requirements - an extmsg/slack adapter in the city for outbound delivery and inbound replies — **compose this pack with your slack pack** (e.g. `slack-full`, `slack-channel`, or `slack-mini`). this pack ships only the oversight role and its escalation machinery, not a slack bridge. - optional: the project-lead's rig-scoped dispatch examples use convoy formulas (`mol-decompose`, `mol-pr-from-issue`) supplied by a workflow pack (e.g. `gastown`). the role works without them. ## install 1. add the pack to your `city.toml` and stamp a `project-lead` per rig. 2. for each rig under oversight, author its brief: ```bash cp agents/project-lead/project-brief.template.md <rig-root>/.gc/project-brief.md # then edit the brief to fit the project ``` 3. bind each rig's `project-lead` session to that rig's channel via your slack pack so escalations deliver and replies route back. 4. `gc supervisor reload` — picks up the new agents and orders. 0.1.0 initial oversight-rig release: rig-scoped project-lead + deterministic escalation machinery.",
+      "readme": {
+        "url": "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/oversight-rig/README.md",
+        "content": "# oversight-rig\n\nA drop-in Gas City pack that **disaggregates project-level work scoping out of the mayor**. It adds one always-on, rig-scoped `project-lead` role per rig, so the mayor stops being the bottleneck for every project's day-to-day triage and dispatch.\n\n## The problem it solves\n\nIn a single-mayor city, the mayor ends up in the minutiae of every project's work scoping — what to dispatch, what's blocked, what to escalate — across every rig at once. That doesn't scale.\n\n## The model\n\n```\nmayor (city, unchanged) ──── plans cross-cutting work, handles escalations\n\n  rig: foo                      rig: bar                  …\n  project-lead-foo              project-lead-bar\n  • bounded to foo's beads      • bounded to bar's beads\n  • reads foo/.gc/              • reads bar/.gc/\n    project-brief.md              project-brief.md\n  • dispatches its own          • dispatches its own\n    ready work directly           ready work directly\n```\n\n- **`project-lead`** (rig scope, always-on, one per rig)\n  - Bounded to a single rig's beads. Reads its persona, current focus, and escalation triggers from `<rig>/.gc/project-brief.md` — each project owns its own scoping context, so it never piles onto the mayor.\n  - Triages its rig every tick and **dispatches ready, in-scope work in its own rig directly** — it does not route every dispatch through the mayor.\n  - Judges severity (info vs escalate) and writes structured rollup beads.\n- **The mayor stays unchanged** and shrinks to what is genuinely cross-cutting: planning work that spans rigs, and reacting to escalations.\n\n## Deterministic escalation (no relay agent)\n\nThe project-lead writes a rollup bead labeled `severity:escalate`. A scheduled order (`escalate-rollups`) uses a mechanical condition trigger that checks for undelivered escalate-severity rollups and delivers them via extmsg — **no second agent decides \"is this escalation-worthy.\"** The judgment is made once, by the agent with the right context, and the rollup bead is the audit trail. Human replies route straight back to the bound project-lead.\n\n## What's in the pack\n\n- `agents/project-lead/` — the role (agent config, prompt template, and a `project-brief.template.md` to copy per rig)\n- `orders/` — `patrol-project-leads` (triage cadence) and `escalate-rollups` (deterministic delivery)\n- `assets/scripts/` — the delivery script and a rig→channel resolver\n\n## Requirements\n\n- An extmsg/slack adapter in the city for outbound delivery and inbound replies — **compose this pack with your slack pack** (e.g. `slack-full`, `slack-channel`, or `slack-mini`). This pack ships only the oversight role and its escalation machinery, not a slack bridge.\n- Optional: the project-lead's rig-scoped dispatch examples use convoy formulas (`mol-decompose`, `mol-pr-from-issue`) supplied by a workflow pack (e.g. `gastown`). The role works without them.\n\n## Install\n\n1. Add the pack to your `city.toml` and stamp a `project-lead` per rig.\n2. For each rig under oversight, author its brief:\n   ```bash\n   cp agents/project-lead/project-brief.template.md <rig-root>/.gc/project-brief.md\n   # then edit the brief to fit the project\n   ```\n3. Bind each rig's `project-lead` session to that rig's channel via your slack pack so escalations deliver and replies route back.\n4. `gc supervisor reload` — picks up the new agents and orders."
+      },
+      "og_image": "/og/oversight-rig.svg",
+      "latest": "0.1.0",
+      "releases": [
+        {
+          "version": "0.1.0",
+          "ref": "main",
+          "commit": "a1490ecf90238f3af52ab2e7f24e30b5b62cbfc2",
+          "hash": "sha256:c06f30e61407994cef7e16aafecbc71afbbc9f8cdfd0d506146fdf95837333cf",
+          "description": "Initial oversight-rig release: rig-scoped project-lead + deterministic escalation machinery.",
           "withdrawn": false
         }
       ]
