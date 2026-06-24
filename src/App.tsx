@@ -1,7 +1,9 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { ShellFrame } from "@gascity/shell";
-import { registryManifest } from "./lib/manifest";
+import { ProductShell, ShellFrame } from "@gascity/shell";
+import { registryManifest, registrySubNav } from "./lib/manifest";
+import { isEmbedded } from "./lib/embed";
+import { PrimaryFooter } from "./components/PrimaryFooter";
 import type { CatalogStatus } from "./components/RegistryPrimitives";
 import { useAuthState } from "./lib/api";
 import { fetchRegistryCatalog, type CatalogPack, type RegistryCatalogState } from "./lib/registry";
@@ -85,22 +87,44 @@ function App() {
 
   useEffect(() => updatePageMetadata(route, catalog, activePack), [route, catalog, activePack]);
 
-  const frame = (children: React.ReactNode) => (
-    <ShellFrame
-      manifest={registryManifest(auth.user?.role)}
-      identity={{
-        user: auth.user ? { name: auth.user.displayName || auth.user.handle } : null,
-        isLoading: isAuthLoading,
-        signInEnabled: !auth.user,
-      }}
-      activePath={window.location.pathname}
-      onNavigate={navigateTo}
-      onSignIn={() => signIn()}
-      onSignOut={() => void signOut()}
-    >
-      {children}
-    </ShellFrame>
-  );
+  const frame = (children: React.ReactNode) => {
+    const activePath = window.location.pathname;
+
+    // Embedded in the apex: render only registry's window (a chromeless
+    // ProductShell sub-nav). The apex owns the outer strip + rail, so rendering
+    // our own ShellFrame here would nest a second full cockpit inside the apex.
+    if (isEmbedded()) {
+      return (
+        <ProductShell
+          items={registrySubNav(auth.user?.role)}
+          activePath={activePath}
+          onNavigate={navigateTo}
+          ariaLabel="Registry sections"
+        >
+          {children}
+        </ProductShell>
+      );
+    }
+
+    // Standalone site: the full cockpit chrome + the public footer.
+    return (
+      <ShellFrame
+        manifest={registryManifest(auth.user?.role)}
+        identity={{
+          user: auth.user ? { name: auth.user.displayName || auth.user.handle } : null,
+          isLoading: isAuthLoading,
+          signInEnabled: !auth.user,
+        }}
+        activePath={activePath}
+        onNavigate={navigateTo}
+        onSignIn={() => signIn()}
+        onSignOut={() => void signOut()}
+      >
+        {children}
+        <PrimaryFooter navigateTo={navigateTo} />
+      </ShellFrame>
+    );
+  };
 
   if (route.kind === "account") {
     return frame(

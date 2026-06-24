@@ -290,7 +290,8 @@ test("dev admin can open the publish review queue", async ({ page }, testInfo) =
 
   await page.goto(`/api/dev/sign-in?handle=${handle}&role=admin&redirect=/admin/publish-requests`);
   await expect(page.getByRole("heading", { name: "Publish requests" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Review" })).toBeVisible();
+  // The shell rail exposes the admin-gated "Review" section as a nav button.
+  await expect(page.getByRole("button", { name: "Review" })).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 
@@ -322,3 +323,23 @@ for (const width of [320, 390, 768, 1024, 1440]) {
     await expectHealthyPage(page, errors);
   });
 }
+
+test("embedded in an apex iframe renders just the window, not a nested cockpit", async ({ page }) => {
+  // Load a same-origin host first (frame-ancestors 'self' rejects a cross-origin
+  // about:blank parent), then frame registry the way the apex Space does.
+  await page.goto("/");
+  await page.evaluate(() => {
+    const f = document.createElement("iframe");
+    f.title = "registry";
+    f.src = "/";
+    f.style.cssText = "width:100%;height:680px;border:0";
+    document.body.replaceChildren(f);
+  });
+  const panel = page.frameLocator('iframe[title="registry"]');
+
+  // Embedded → the chromeless ProductShell (.gcs-product). The full standalone
+  // cockpit (.gcs-shell with its top strip + product rail) must NOT be nested in.
+  await expect(panel.locator(".gcs-product")).toBeVisible();
+  await expect(panel.locator(".gcs-shell")).toHaveCount(0);
+  await expect(panel.getByRole("heading", { name: "Registry" })).toBeVisible();
+});

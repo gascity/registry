@@ -20,7 +20,10 @@ export function withSecurityHeaders(response: Response, config: ServerConfig) {
   headers.set("Content-Security-Policy", contentSecurityPolicy(config));
   headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   headers.set("X-Content-Type-Options", "nosniff");
-  headers.set("X-Frame-Options", "DENY");
+  // SAMEORIGIN (not DENY): the apex cockpit embeds registry as a same-origin
+  // iframe "Space". Cross-origin framing (clickjacking) is still blocked — see
+  // `frame-ancestors 'self'` in the CSP below, which supersedes this for modern UAs.
+  headers.set("X-Frame-Options", "SAMEORIGIN");
   headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   if (config.isProduction) {
     headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
@@ -59,7 +62,9 @@ function contentSecurityPolicy(config: ServerConfig) {
     "default-src 'self'",
     "base-uri 'self'",
     "object-src 'none'",
-    "frame-ancestors 'none'",
+    // 'self' so the same-origin apex cockpit can frame registry as a Space;
+    // any cross-origin framing is still rejected.
+    "frame-ancestors 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com data:",

@@ -473,6 +473,31 @@ h3 {
   color: var(--ink);
 }
 
+/* At very narrow widths (~320px) the list body can be narrower than a long pack
+   name or source pill; truncate the title + meta so they never push past the
+   viewport instead of forcing horizontal scroll. */
+.packListTitle {
+  min-width: 0;
+}
+
+.packListTitle strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.packMeta {
+  min-width: 0;
+}
+
+.packMeta span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sourceNote {
   margin-top: 18px;
   color: var(--ink-muted);
