@@ -221,3 +221,13 @@
     grid-row: auto;
   }
 }
+
+/* Phones: stack the registry stats strip. Two columns can't fit a metric's
+   value + label at ~320px without overflowing the viewport, and the exact
+   width is font-dependent (it just fits with wider local fonts but trips the
+   narrower CI fonts). One column per metric is overflow-proof at any width. */
+@media (max-width: 480px) {
+  .statsStrip {
+    grid-template-columns: 1fr;
+  }
+}
