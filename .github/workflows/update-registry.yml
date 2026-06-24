@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  packages: read # the @gascity/* deps live on GitHub Packages (org-internal)
 
 jobs:
   update:
@@ -21,6 +22,10 @@ jobs:
           bun-version: "1.3.12"
 
       - name: Install dependencies
+        # .npmrc reads ${NODE_AUTH_TOKEN}; the built-in GITHUB_TOKEN (packages:read)
+        # can read the org-internal @gascity/* packages. Without this the install 401s.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun install --frozen-lockfile
 
       - name: Regenerate aggregate catalog
