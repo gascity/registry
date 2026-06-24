@@ -1,0 +1,73 @@
+name: image
+# Build + push the registry server image to GHCR. registry.gascity.com runs on the
+# identity-v0 product cluster; its Deployment (gascity/infra:
+# identity-v0/flux/apps/registry/registry.yaml) pins ghcr.io/gascity/gascity-registry
+# by @sha256. This is HUMAN-GATED (like accounts): on push to main CI publishes the
+# image, then a human bumps the pinned digest in a deploy(...) PR and Flux rolls it.
+# PRs build-only to validate the Dockerfile; pushes to main publish.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Push only on branch/dispatch builds; PRs build-only to validate the Dockerfile.
+      # The gascity-registry package is connected to this repo (org.opencontainers.image.source
+      # below), so the per-repo GITHUB_TOKEN (packages: write) publishes it — no PAT.
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/gascity/gascity-registry
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          # metadata-action sets org.opencontainers.image.source=<this repo>, which
+          # links the GHCR package to the repo so the per-repo GITHUB_TOKEN can write it.
+          labels: ${{ steps.meta.outputs.labels }}
+          # The Dockerfile installs @gascity/* from GitHub Packages (.npmrc reads
+          # ${NODE_AUTH_TOKEN}); pass the token as a BuildKit secret, never a layer.
+          # REGISTRY_WEB_BASE defaults to "/" (the standalone registry.gascity.com build).
+          secrets: |
+            gh_token=${{ secrets.GITHUB_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Surface the immutable digest so a human can pin it in the infra deploy PR.
+      - if: github.event_name != 'pull_request'
+        name: Pinnable digest
+        run: |
+          echo "Pin this in gascity/infra identity-v0/flux/apps/registry/registry.yaml:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "image: ghcr.io/gascity/gascity-registry@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
