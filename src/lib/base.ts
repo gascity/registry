@@ -18,9 +18,10 @@ export function withBase(path: string): string {
   return MOUNT_BASE + path;
 }
 
-/** Strip the mount base off a browser path so logical (root-relative) route matching works. */
+/** Strip the mount base off a browser path so logical (root-relative) route matching works.
+ *  Boundary-aware: "/registry" and "/registry/x" strip; "/registryfoo" is left untouched. */
 export function stripBase(path: string): string {
-  if (MOUNT_BASE && path.startsWith(MOUNT_BASE)) {
+  if (MOUNT_BASE && (path === MOUNT_BASE || path.startsWith(`${MOUNT_BASE}/`))) {
     return path.slice(MOUNT_BASE.length) || "/";
   }
   return path;

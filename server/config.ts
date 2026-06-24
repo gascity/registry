@@ -42,8 +42,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     env.APP_URL ??
       (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}` : "http://127.0.0.1:8080"),
   );
-  // "" standalone, "/registry" under the apex mount (set on the apex deploy only).
-  const mountBase = trimTrailingSlash(env.REGISTRY_MOUNT_BASE?.trim() ?? "");
+  // "" standalone, "/registry" under the apex mount. Dev fallback only — in a
+  // built server it's overridden from the dist asset prefix (the single source of
+  // truth, so the cookie Path can never disagree with the client). Normalize a
+  // fat-fingered value missing its leading slash.
+  let mountBase = trimTrailingSlash(env.REGISTRY_MOUNT_BASE?.trim() ?? "");
+  if (mountBase && !mountBase.startsWith("/")) mountBase = `/${mountBase}`;
   const sessionSecret = env.SESSION_SECRET?.trim() || "dev-insecure-registry-session-secret";
   const databaseUrl = env.DATABASE_URL?.trim() || undefined;
   if (isProduction && sessionSecret === "dev-insecure-registry-session-secret") {

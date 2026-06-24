@@ -73,7 +73,7 @@ async function startOidcLogin(request: Request, config: ServerConfig) {
     throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
   }
   const url = new URL(request.url);
-  const redirectTo = safeRedirectPath(url.searchParams.get("redirect"));
+  const redirectTo = safeRedirectPath(config, url.searchParams.get("redirect"));
   const state: OAuthState = {
     state: randomToken(18),
     nonce: randomToken(18),
@@ -108,7 +108,7 @@ async function startWorkosLogin(request: Request, config: ServerConfig) {
     throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
   }
   const url = new URL(request.url);
-  const redirectTo = safeRedirectPath(url.searchParams.get("redirect"));
+  const redirectTo = safeRedirectPath(config, url.searchParams.get("redirect"));
   const state: OAuthState = {
     state: randomToken(18),
     nonce: "",
@@ -269,7 +269,7 @@ export async function createDevSession(request: Request, config: ServerConfig, s
     maxAge: sessionMaxAgeSeconds,
     path: cookiePath(config),
   });
-  return redirect(safeRedirectPath(url.searchParams.get("redirect")), headers);
+  return redirect(safeRedirectPath(config, url.searchParams.get("redirect")), headers);
 }
 
 export async function clearSession(request: Request, config: ServerConfig, store: RegistryStore) {

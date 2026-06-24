@@ -390,7 +390,10 @@ async function handleApi(request: Request) {
       const imported = await store.createGitHubPublishImport(session.user.id, importInput);
       return new Response(null, {
         status: 302,
-        headers: { Location: `${publishImportState.redirectTo}?githubImport=${encodeURIComponent(imported.id)}` },
+        headers: {
+          // mount-prefixed so the browser lands back in registry, not the apex shell root.
+          Location: `${config.mountBase}${publishImportState.redirectTo}?githubImport=${encodeURIComponent(imported.id)}`,
+        },
       });
     }
     const claim = verifyGitHubClaimState(config, state);
@@ -410,7 +413,8 @@ async function handleApi(request: Request) {
     });
     return new Response(null, {
       status: 302,
-      headers: { Location: claim.redirectTo },
+      // mount-prefixed so the browser lands back in registry, not the apex shell root.
+      headers: { Location: `${config.mountBase}${claim.redirectTo}` },
     });
   }
   if (request.method === "POST" && url.pathname === "/api/github/webhook") {

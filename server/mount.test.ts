@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createRegistryFetchHandler } from "./app";
 import { createStore } from "./store";
 import type { ServerConfig } from "./config";
-import { assertOrigin, cookiePath } from "./http";
+import { assertOrigin, cookiePath, safeRedirectPath } from "./http";
 
 // The apex frames registry at works.gascity.com/registry/ (same origin); the edge
 // strips /registry so the server still sees root paths, but the BROWSER-visible
@@ -45,6 +45,23 @@ describe("registry under the apex /registry mount", () => {
   test("cookiePath scopes to the mount ('/registry/' apex, '/' standalone)", () => {
     expect(cookiePath(baseConfig({ mountBase: "/registry" }))).toBe("/registry/");
     expect(cookiePath(baseConfig({ mountBase: "" }))).toBe("/");
+  });
+
+  test("safeRedirectPath rejects post-normalization open redirects and confines to the mount", () => {
+    const apex = baseConfig(APEX);
+    const std = baseConfig({ mountBase: "" });
+    // The high-sev open redirect: "/..//evil" normalizes to "//evil" (cross-origin).
+    for (const evil of ["/..//evil.com", "/.//evil.com", "/foo/..//evil.com"]) {
+      expect(safeRedirectPath(apex, evil)).toBe("/registry/");
+      expect(safeRedirectPath(std, evil)).toBe("/");
+    }
+    // Confine to the mount; default and out-of-mount paths land at the mount home.
+    expect(safeRedirectPath(apex, "/registry/account")).toBe("/registry/account");
+    expect(safeRedirectPath(apex, "/account")).toBe("/registry/");
+    expect(safeRedirectPath(apex, null)).toBe("/registry/");
+    // Standalone keeps a valid same-origin path and "/" home.
+    expect(safeRedirectPath(std, "/account")).toBe("/account");
+    expect(safeRedirectPath(std, null)).toBe("/");
   });
 
   test("assertOrigin accepts a same-origin POST and rejects a cross-origin one", () => {

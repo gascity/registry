@@ -91,14 +91,23 @@ export function assertOrigin(request: Request, config: ServerConfig) {
   }
 }
 
-export function safeRedirectPath(value: string | null | undefined) {
-  if (!value) return "/";
-  if (!value.startsWith("/") || value.startsWith("//")) return "/";
+export function safeRedirectPath(config: ServerConfig, value: string | null | undefined) {
+  // Default / fallback lands inside the mount ("/" standalone, "/registry/" apex).
+  const home = cookiePath(config);
+  if (!value) return home;
+  if (!value.startsWith("/") || value.startsWith("//")) return home;
   try {
     const parsed = new URL(value, "https://registry.gascity.com");
+    // Reject post-normalization protocol-relative paths (e.g. "/..//evil" -> "//evil",
+    // which the raw-input check above misses) — that's a cross-origin open redirect.
+    if (!parsed.pathname.startsWith("/") || parsed.pathname.startsWith("//")) return home;
+    // Confine to the mount so a post-login redirect can't escape onto the apex shell
+    // or a sibling product on the shared origin (no-op standalone: mountBase === "").
+    const base = config.mountBase;
+    if (base && parsed.pathname !== base && !parsed.pathname.startsWith(`${base}/`)) return home;
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
-    return "/";
+    return home;
   }
 }
 
