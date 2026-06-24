@@ -45,13 +45,20 @@ export function appendCookie(headers: Headers, name: string, value: string, opti
   headers.append("Set-Cookie", parts.join("; "));
 }
 
+// Cookies are scoped to the mount so the apex deploy's HttpOnly session is sent
+// only to /registry/* — never to the apex shell or sibling products that share
+// the works.gascity.com origin. "" standalone -> "/", "/registry" -> "/registry/".
+export function cookiePath(config: ServerConfig) {
+  return `${config.mountBase || ""}/`;
+}
+
 export function clearCookie(headers: Headers, name: string, config: ServerConfig) {
   appendCookie(headers, name, "", {
     httpOnly: true,
     secure: config.isProduction,
     sameSite: "Lax",
     maxAge: 0,
-    path: "/",
+    path: cookiePath(config),
   });
 }
 
@@ -71,19 +78,36 @@ export function assertOrigin(request: Request, config: ServerConfig) {
   if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return;
   const origin = request.headers.get("origin");
   if (!origin) return;
-  if (origin !== config.appUrl) {
+  // Origin-vs-origin compare (the browser Origin header has no path; appUrl is a
+  // bare origin). Same-origin only — the apex frames registry same-origin.
+  let ok = false;
+  try {
+    ok = new URL(origin).origin === new URL(config.appUrl).origin;
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
     throw new RequestError(403, "BAD_ORIGIN", "Request origin is not allowed.");
   }
 }
 
-export function safeRedirectPath(value: string | null | undefined) {
-  if (!value) return "/";
-  if (!value.startsWith("/") || value.startsWith("//")) return "/";
+export function safeRedirectPath(config: ServerConfig, value: string | null | undefined) {
+  // Default / fallback lands inside the mount ("/" standalone, "/registry/" apex).
+  const home = cookiePath(config);
+  if (!value) return home;
+  if (!value.startsWith("/") || value.startsWith("//")) return home;
   try {
     const parsed = new URL(value, "https://registry.gascity.com");
+    // Reject post-normalization protocol-relative paths (e.g. "/..//evil" -> "//evil",
+    // which the raw-input check above misses) — that's a cross-origin open redirect.
+    if (!parsed.pathname.startsWith("/") || parsed.pathname.startsWith("//")) return home;
+    // Confine to the mount so a post-login redirect can't escape onto the apex shell
+    // or a sibling product on the shared origin (no-op standalone: mountBase === "").
+    const base = config.mountBase;
+    if (base && parsed.pathname !== base && !parsed.pathname.startsWith(`${base}/`)) return home;
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
-    return "/";
+    return home;
   }
 }
 

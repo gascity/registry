@@ -1,7 +1,7 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import type { ServerConfig } from "./config";
 import { pkceChallenge, randomToken, signValue, verifySignedValue } from "./crypto";
-import { appendCookie, parseCookies, redirect, safeRedirectPath } from "./http";
+import { appendCookie, cookiePath, parseCookies, redirect, safeRedirectPath } from "./http";
 import { parseBearerToken } from "./tokens";
 import type { ApiTokenAuthResult, IdentityClaims, RegistryStore, SessionRecord } from "./types";
 
@@ -73,7 +73,7 @@ async function startOidcLogin(request: Request, config: ServerConfig) {
     throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
   }
   const url = new URL(request.url);
-  const redirectTo = safeRedirectPath(url.searchParams.get("redirect"));
+  const redirectTo = safeRedirectPath(config, url.searchParams.get("redirect"));
   const state: OAuthState = {
     state: randomToken(18),
     nonce: randomToken(18),
@@ -98,7 +98,7 @@ async function startOidcLogin(request: Request, config: ServerConfig) {
     secure: config.isProduction,
     sameSite: "Lax",
     maxAge: oauthMaxAgeSeconds,
-    path: "/",
+    path: cookiePath(config),
   });
   return redirect(authorizationUrl.toString(), headers);
 }
@@ -108,7 +108,7 @@ async function startWorkosLogin(request: Request, config: ServerConfig) {
     throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
   }
   const url = new URL(request.url);
-  const redirectTo = safeRedirectPath(url.searchParams.get("redirect"));
+  const redirectTo = safeRedirectPath(config, url.searchParams.get("redirect"));
   const state: OAuthState = {
     state: randomToken(18),
     nonce: "",
@@ -129,7 +129,7 @@ async function startWorkosLogin(request: Request, config: ServerConfig) {
     secure: config.isProduction,
     sameSite: "Lax",
     maxAge: oauthMaxAgeSeconds,
-    path: "/",
+    path: cookiePath(config),
   });
   return redirect(authorizationUrl.toString(), headers);
 }
@@ -164,14 +164,14 @@ export async function finishLogin(request: Request, config: ServerConfig, store:
     secure: config.isProduction,
     sameSite: "Lax",
     maxAge: sessionMaxAgeSeconds,
-    path: "/",
+    path: cookiePath(config),
   });
   appendCookie(headers, oauthCookie, "", {
     httpOnly: true,
     secure: config.isProduction,
     sameSite: "Lax",
     maxAge: 0,
-    path: "/",
+    path: cookiePath(config),
   });
   return redirect(oauthState.redirectTo, headers);
 }
@@ -267,9 +267,9 @@ export async function createDevSession(request: Request, config: ServerConfig, s
     secure: false,
     sameSite: "Lax",
     maxAge: sessionMaxAgeSeconds,
-    path: "/",
+    path: cookiePath(config),
   });
-  return redirect(safeRedirectPath(url.searchParams.get("redirect")), headers);
+  return redirect(safeRedirectPath(config, url.searchParams.get("redirect")), headers);
 }
 
 export async function clearSession(request: Request, config: ServerConfig, store: RegistryStore) {
@@ -281,7 +281,7 @@ export async function clearSession(request: Request, config: ServerConfig, store
     secure: config.isProduction,
     sameSite: "Lax",
     maxAge: 0,
-    path: "/",
+    path: cookiePath(config),
   });
   return new Response(null, { status: 204, headers });
 }
@@ -389,7 +389,11 @@ function clientIp(request: Request) {
 }
 
 function callbackUrl(config: ServerConfig) {
-  return `${config.appUrl}/api/auth/callback`;
+  // Browser-visible callback: under the apex the IdP must return to
+  // https://works.gascity.com/registry/api/auth/callback (the edge strips
+  // /registry so the server still routes /api/auth/callback at root). Must
+  // byte-match the value sent on the authorize request and the token exchange.
+  return `${config.appUrl}${config.mountBase}/api/auth/callback`;
 }
 
 export class AuthError extends Error {

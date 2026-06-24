@@ -23,6 +23,7 @@ import {
   type PublishRequestRow,
 } from "../lib/api";
 import { GITHUB_APP_INSTALL_URL, REGISTRY_SOURCE_URL } from "../lib/links";
+import { withBase } from "../lib/base";
 
 const installGcCommand = `brew install gastownhall/gascity/gascity
 gc version`;
@@ -251,7 +252,7 @@ export function PublishPage({
           </a>
           <a
             className="smallMutedButton"
-            href="/verify"
+            href={withBase("/verify")}
             onClick={(event) => {
               event.preventDefault();
               navigateTo("/verify");

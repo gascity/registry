@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { PanelProvider } from "@gascity/panel-sdk";
 import "@gascity/shell/styles.css"; // shared product chrome (pulls in @gascity/tokens)
 import App from "./App";
 import { initOpenPanel } from "./lib/openpanel";
@@ -12,8 +13,13 @@ if (!rootElement) {
 
 initOpenPanel();
 
+// PanelProvider OUTSIDE the app so the apex bridge handshake stays stable for the
+// iframe lifetime; it auto-detects iframe-vs-standalone and no-ops when standalone.
+// panelId MUST equal the apex slug ("registry").
 createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <PanelProvider panelId="registry">
+      <App />
+    </PanelProvider>
   </StrictMode>,
 );

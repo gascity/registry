@@ -278,6 +278,7 @@ function testConfig(): ServerConfig {
   return {
     port: 8080,
     appUrl: "http://127.0.0.1:8080",
+    mountBase: "",
     sessionSecret: "test-secret-test-secret-test-secret",
     localDataPath: ".registry-data/test.json",
     publishValidation: {

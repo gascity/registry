@@ -1,5 +1,6 @@
 import type React from "react";
 import { REGISTRY_SOURCE_URL } from "../lib/links";
+import { withBase } from "../lib/base";
 
 /**
  * The standalone site footer (the apex provides its own chrome, so this only
@@ -23,10 +24,10 @@ export function PrimaryFooter({ navigateTo }: { navigateTo: (path: string) => vo
         <a href={REGISTRY_SOURCE_URL} target="_blank" rel="noreferrer">
           Source
         </a>
-        <a href="/verify" onClick={go("/verify")}>
+        <a href={withBase("/verify")} onClick={go("/verify")}>
           Verification flow
         </a>
-        <a href="/publish" onClick={go("/publish")}>
+        <a href={withBase("/publish")} onClick={go("/publish")}>
           Publish a pack
         </a>
       </nav>

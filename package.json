@@ -31,7 +31,8 @@
     "@gascity/tokens": "^0.4.1",
     "@gascity/ui": "^0.7.2",
     "@gascity/shell": "^0.9.3",
-    "@gascity/auth": "^0.1.6"
+    "@gascity/auth": "^0.1.6",
+    "@gascity/panel-sdk": "^0.0.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",

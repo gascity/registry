@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ProductShell, ShellFrame } from "@gascity/shell";
 import { registryManifest, registrySubNav } from "./lib/manifest";
 import { isEmbedded } from "./lib/embed";
+import { stripBase, withBase } from "./lib/base";
 import { PrimaryFooter } from "./components/PrimaryFooter";
 import type { CatalogStatus } from "./components/RegistryPrimitives";
 import { useAuthState } from "./lib/api";
@@ -88,7 +89,8 @@ function App() {
   useEffect(() => updatePageMetadata(route, catalog, activePack), [route, catalog, activePack]);
 
   const frame = (children: React.ReactNode) => {
-    const activePath = window.location.pathname;
+    // Manifest/sub-nav hrefs are logical (root-relative), so strip the mount.
+    const activePath = stripBase(window.location.pathname);
 
     // Embedded in the apex: render only registry's window (a chromeless
     // ProductShell sub-nav). The apex owns the outer strip + rail, so rendering
@@ -241,7 +243,12 @@ function updatePageMetadata(
         ? "How to publish a new pack pointer to the Gas City Registry aggregate."
     : "Browse versioned Gas City packs, registry releases, and import commands.";
   const imagePath = isPack ? activePack.ogImage : catalog.ogImage;
-  const image = imagePath ? new URL(imagePath, window.location.origin).toString() : undefined;
+  const image = imagePath
+    ? new URL(
+        imagePath.startsWith("/") ? withBase(imagePath) : imagePath,
+        window.location.origin,
+      ).toString()
+    : undefined;
   const url = new URL(
     `${window.location.pathname}${window.location.search}`,
     window.location.origin,

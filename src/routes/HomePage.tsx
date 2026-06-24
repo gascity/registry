@@ -10,16 +10,19 @@ import {
 } from "../components/RegistryPrimitives";
 import { filterAndSortPacks } from "../lib/catalogFilters";
 import { releaseCounts, type RegistryCatalogState } from "../lib/registry";
+import { REGISTRY_PUBLIC_URL } from "../lib/links";
+import { isEmbedded } from "../lib/embed";
 import {
   categoryOptions,
   sortOptions,
   type SearchState,
 } from "../lib/urlState";
 
-const registryEndpoint =
-  typeof window === "undefined"
-    ? "https://registry.gascity.com/registry.toml"
-    : `${window.location.origin}/registry.toml`;
+// Standalone: advertise this host's own origin (registry.gascity.com in prod).
+// Embedded in the apex: pin the canonical public origin, never works.gascity.com.
+const registryEndpoint = `${
+  typeof window !== "undefined" && !isEmbedded() ? window.location.origin : REGISTRY_PUBLIC_URL
+}/registry.toml`;
 
 export function HomePage({
   catalogStatus,

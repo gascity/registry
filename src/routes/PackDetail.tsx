@@ -14,6 +14,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CopyButton } from "../components/CopyButton";
 import { ReviewPanel } from "../components/ReviewPanel";
+import { withBase } from "../lib/base";
 import {
   CatalogLoadState,
   EmptyState,
@@ -493,7 +494,7 @@ function TrustTab({
         </p>
         <a
           className="inlineDocLink"
-          href="/verify"
+          href={withBase("/verify")}
           onClick={(event) => {
             event.preventDefault();
             navigateTo("/verify");

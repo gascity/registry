@@ -1,10 +1,14 @@
 import { Bot, Database, GitBranch, MessageCircle, MessagesSquare, PackageSearch } from "lucide-react";
 import { parse } from "smol-toml";
+import { withBase } from "./base";
 
+// The UI's own catalog fetch is mount-relative (under /registry/ in the apex, the
+// edge strips the prefix so the bun server still serves /catalog.json at root).
+// The PUBLIC CLI endpoint is server-side and unaffected by this.
 const PRIMARY_REGISTRY_URL =
-  import.meta.env.VITE_CATALOG_URL?.trim() || "/catalog.json";
+  import.meta.env.VITE_CATALOG_URL?.trim() || withBase("/catalog.json");
 
-const FALLBACK_REGISTRY_URL = import.meta.env.VITE_REGISTRY_URL?.trim() || "/registry.toml";
+const FALLBACK_REGISTRY_URL = import.meta.env.VITE_REGISTRY_URL?.trim() || withBase("/registry.toml");
 
 export type CatalogRelease = {
   version: string;
