@@ -1,5 +1,14 @@
 import { KeyRound, Terminal } from "lucide-react";
 import { useMemo, useState } from "react";
+import {
+  AppPage,
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  Text,
+} from "@gascity/ui";
 import { apiRequest, type ApiTokenCreateResult, type AuthState } from "../lib/api";
 
 type CliAuthTokenResponse = {
@@ -27,23 +36,24 @@ export function CliAuthPage({
 
   if (!auth.user) {
     return (
-      <main className="accountPage">
-        <section className="signInPromptInline large">
-          <Terminal size={24} />
-          <strong>Sign in to authorize the CLI.</strong>
-          <p>The CLI will receive a registry API token after you approve this request.</p>
-          <div className="promptActions">
-            {auth.devAuthEnabled ? (
-              <button className="iconTextButton" type="button" onClick={devSignIn}>
-                Dev sign in
-              </button>
-            ) : null}
-            <button className="iconTextButton primary" type="button" onClick={signIn}>
-              Sign in
-            </button>
-          </div>
-        </section>
-      </main>
+      <div className="accountPage">
+        <EmptyState
+          className="signInPromptInline large"
+          icon={<Terminal size={24} />}
+          title="Sign in to authorize the CLI."
+          description="The CLI will receive a registry API token after you approve this request."
+          action={
+            <div className="promptActions">
+              {auth.devAuthEnabled ? (
+                <Button variant="secondary" onClick={devSignIn}>
+                  Dev sign in
+                </Button>
+              ) : null}
+              <Button onClick={signIn}>Sign in</Button>
+            </div>
+          }
+        />
+      </div>
     );
   }
 
@@ -73,30 +83,32 @@ export function CliAuthPage({
   };
 
   return (
-    <main className="accountPage">
-      <header className="accountHeader">
-        <p className="eyebrow">CLI login</p>
-        <h1>Authorize Gas City CLI</h1>
-        <p>Signed in as @{auth.user.handle}. Approving creates a revocable registry API token.</p>
-      </header>
-
-      <section className="accountPanel cliAuthPanel">
-        <div className="requestTitle">
-          <strong>{label}</strong>
-          <span className="requestStatus approved">Local callback</span>
-        </div>
-        <span className="mutedText">{redirectUri || "No callback URI provided."}</span>
-        <button
-          className="iconTextButton primary"
-          type="button"
-          disabled={isAuthorizing}
+    <AppPage
+      className="accountPage"
+      eyebrow="CLI login"
+      title="Authorize Gas City CLI"
+      subtitle={`Signed in as @${auth.user.handle}. Approving creates a revocable registry API token.`}
+    >
+      <Card variant="panel" className="cliAuthPanel">
+        <CardHeader
+          title={label}
+          icon={<Terminal size={16} />}
+          action={<Badge status="info">Local callback</Badge>}
+        />
+        <Text tone="muted">{redirectUri || "No callback URI provided."}</Text>
+        <Button
+          iconStart={<KeyRound size={15} />}
+          loading={isAuthorizing}
           onClick={() => void authorize()}
         >
-          <KeyRound size={15} />
           {isAuthorizing ? "Authorizing" : "Authorize CLI"}
-        </button>
-        {error ? <p className="formError" role="alert">{error}</p> : null}
-      </section>
-    </main>
+        </Button>
+        {error ? (
+          <Text className="formError" role="alert">
+            {error}
+          </Text>
+        ) : null}
+      </Card>
+    </AppPage>
   );
 }

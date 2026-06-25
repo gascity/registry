@@ -1,5 +1,6 @@
 import { ChevronRight } from "lucide-react";
 import type React from "react";
+import { Card, Chip } from "@gascity/ui";
 import {
   categoryForPack,
   latestActiveRelease,
@@ -30,17 +31,19 @@ export function PackLink({ pack, searchState, view, onNavigate }: PackLinkProps)
   if (view === "card") {
     return (
       <a className="packCard" href={href} onClick={navigate}>
-        <div className="packCardHeader">
-          <PackIcon pack={pack} />
-          <StatusBadge pack={pack} />
-        </div>
-        <h3>{pack.name}</h3>
-        <p>{pack.description}</p>
-        <div className="packMeta">
-          <span>{category.label}</span>
-          <span>{latest ? `v${latest.version}` : "No active release"}</span>
-          <span>{pack.releases.length} releases</span>
-        </div>
+        <Card variant="surface" interactive className="packCardInner">
+          <div className="packCardHeader">
+            <PackIcon pack={pack} />
+            <StatusBadge pack={pack} />
+          </div>
+          <h3>{pack.name}</h3>
+          <p>{pack.description}</p>
+          <div className="packMeta">
+            <Chip mono={false}>{category.label}</Chip>
+            <Chip>{latest ? `v${latest.version}` : "No active release"}</Chip>
+            <Chip>{pack.releases.length} releases</Chip>
+          </div>
+        </Card>
       </a>
     );
   }
@@ -55,9 +58,9 @@ export function PackLink({ pack, searchState, view, onNavigate }: PackLinkProps)
         </span>
         <span>{pack.description}</span>
         <span className="packMeta">
-          <span>{category.label}</span>
-          <span>{latest ? `v${latest.version}` : "No active release"}</span>
-          <span>{shortSource(pack.source)}</span>
+          <Chip mono={false}>{category.label}</Chip>
+          <Chip>{latest ? `v${latest.version}` : "No active release"}</Chip>
+          <Chip>{shortSource(pack.source)}</Chip>
         </span>
       </span>
       <ChevronRight size={18} aria-hidden="true" />

@@ -1,6 +1,7 @@
-import { Flag, Loader2, Save, ShieldCheck, Star, ThumbsUp, Trash2 } from "lucide-react";
+import { Flag, Loader2, Save, Star, ThumbsUp, Trash2 } from "lucide-react";
 import type React from "react";
 import { useEffect, useMemo, useState } from "react";
+import { Badge, Button, Card, CardHeader, ErrorState, Input } from "@gascity/ui";
 import {
   apiRequest,
   type AuthState,
@@ -177,35 +178,35 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
   const summary = state?.summary;
 
   return (
-    <section className="reviewsPanel" aria-labelledby="reviews-title">
-      <div className="reviewsHeader">
-        <div>
-          <p className="eyebrow">Community signal</p>
-          <h2 id="reviews-title">Reviews</h2>
-        </div>
-        <div className="reviewSummary" aria-label="Review summary">
-          <span>
-            <Star size={15} aria-hidden="true" />
-            {summary?.averageRating ?? "No rating"}
-          </span>
-          <span>{summary?.count ?? 0} reviews</span>
-          <span>{summary?.recommendCount ?? 0} recommend</span>
-        </div>
+    <Card className="reviewsPanel" aria-labelledby="reviews-title">
+      <CardHeader eyebrow="Community signal" title={<span id="reviews-title">Reviews</span>} />
+      {/* Summary lives in the card BODY (not the CardHeader action slot, which doesn't
+          wrap and overflowed the viewport at mobile widths). A wrapping flex row. */}
+      <div className="reviewSummary" aria-label="Review summary">
+        <span>
+          <Star size={15} aria-hidden="true" />
+          {summary?.averageRating ?? "No rating"}
+        </span>
+        <span>{summary?.count ?? 0} reviews</span>
+        <span>{summary?.recommendCount ?? 0} recommend</span>
       </div>
 
       {auth.user ? (
         <div className="reviewComposer">
           <div className="reviewComposerHeader">
             <strong>{viewerReview ? "Update your review" : "Review this pack"}</strong>
-            <button
+            <Button
+              variant={state?.viewerHasStarred ? "secondary" : "ghost"}
               className={state?.viewerHasStarred ? "savePackButton active" : "savePackButton"}
               type="button"
               onClick={() => void toggleStar()}
               aria-pressed={Boolean(state?.viewerHasStarred)}
+              iconStart={
+                <Star size={15} fill={state?.viewerHasStarred ? "currentColor" : "none"} />
+              }
             >
-              <Star size={15} fill={state?.viewerHasStarred ? "currentColor" : "none"} />
               {state?.viewerHasStarred ? "Saved" : "Save"}
-            </button>
+            </Button>
           </div>
           <form onSubmit={(event) => void submitReview(event)}>
             <fieldset className="ratingField">
@@ -222,16 +223,14 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
                 </button>
               ))}
             </fieldset>
-            <label>
-              <span>Title</span>
-              <input
-                value={title}
-                maxLength={120}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="Short summary"
-              />
-            </label>
-            <label>
+            <Input
+              label="Title"
+              value={title}
+              maxLength={120}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="Short summary"
+            />
+            <label className="reviewBodyField">
               <span>Review</span>
               <textarea
                 value={body}
@@ -252,15 +251,23 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
             </label>
             <div className="formActions">
               {viewerReview ? (
-                <button className="textDangerButton" type="button" onClick={() => void deleteReview()}>
-                  <Trash2 size={15} />
+                <Button
+                  variant="danger"
+                  type="button"
+                  onClick={() => void deleteReview()}
+                  iconStart={<Trash2 size={15} />}
+                >
                   Delete
-                </button>
+                </Button>
               ) : null}
-              <button className="iconTextButton primary" type="submit" disabled={isSubmitting}>
-                <Save size={15} />
+              <Button
+                variant="primary"
+                type="submit"
+                loading={isSubmitting}
+                iconStart={isSubmitting ? undefined : <Save size={15} />}
+              >
                 {isSubmitting ? "Saving" : "Save review"}
-              </button>
+              </Button>
             </div>
           </form>
         </div>
@@ -270,19 +277,23 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
           <p>Reviews use your Gas City account identity and can be edited later.</p>
           <div className="promptActions">
             {auth.devAuthEnabled ? (
-              <button className="iconTextButton" type="button" onClick={devSignIn}>
+              <Button variant="ghost" type="button" onClick={devSignIn}>
                 Dev sign in
-              </button>
+              </Button>
             ) : null}
-            <button className="iconTextButton primary" type="button" onClick={signIn}>
+            <Button variant="primary" type="button" onClick={signIn}>
               Sign in
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
       {notice ? <p className="formNotice">{notice}</p> : null}
-      {error ? <p className="formError" role="alert">{error}</p> : null}
+      {error ? (
+        <div className="formError" role="alert">
+          <ErrorState compact message={error} />
+        </div>
+      ) : null}
       {isLoading ? (
         <div className="inlineState">
           <Loader2 className="spin" size={18} />
@@ -300,10 +311,14 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
                   <div className="reviewMeta">
                     <span>@{review.user.handle} · {new Date(review.updatedAt).toLocaleDateString()}</span>
                     {verifiedPublisherId === review.user.id ? (
-                      <span className="verifiedAuthorBadge" title="Verified pack author">
-                        <ShieldCheck size={13} aria-hidden="true" />
+                      <Badge
+                        status="success"
+                        dot
+                        className="verifiedAuthorBadge"
+                        title="Verified pack author"
+                      >
                         Verified author
-                      </span>
+                      </Badge>
                     ) : null}
                   </div>
                 </div>
@@ -335,24 +350,29 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
                       required
                     />
                     <div className="formActions">
-                      <button type="button" className="iconTextButton" onClick={() => setReportingId(null)}>
+                      <Button variant="ghost" type="button" onClick={() => setReportingId(null)}>
                         Cancel
-                      </button>
-                      <button type="submit" className="iconTextButton primary">
+                      </Button>
+                      <Button variant="primary" type="submit">
                         Submit report
-                      </button>
+                      </Button>
                     </div>
                   </form>
                 ) : (
-                  <button className="smallMutedButton" type="button" onClick={() => setReportingId(review.id)}>
-                    <Flag size={14} /> Report
-                  </button>
+                  <Button
+                    variant="ghost"
+                    type="button"
+                    onClick={() => setReportingId(review.id)}
+                    iconStart={<Flag size={14} />}
+                  >
+                    Report
+                  </Button>
                 )
               ) : null}
             </article>
           ))}
         </div>
       )}
-    </section>
+    </Card>
   );
 }

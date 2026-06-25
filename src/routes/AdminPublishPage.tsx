@@ -8,6 +8,14 @@ import {
   XCircle,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import {
+  AppPage,
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Text,
+} from "@gascity/ui";
 import { apiRequest, type AuthState, type PublishRequestRow } from "../lib/api";
 
 export function AdminPublishPage({
@@ -34,35 +42,37 @@ export function AdminPublishPage({
 
   if (!auth.user) {
     return (
-      <main className="accountPage">
-        <section className="signInPromptInline large">
-          <UserRound size={24} />
-          <strong>Sign in to review publish requests.</strong>
-          <p>Registry staff can validate, approve, and reject direct publish requests.</p>
-          <div className="promptActions">
-            {auth.devAuthEnabled ? (
-              <button className="iconTextButton" type="button" onClick={devSignIn}>
-                Dev sign in
-              </button>
-            ) : null}
-            <button className="iconTextButton primary" type="button" onClick={signIn}>
-              Sign in
-            </button>
-          </div>
-        </section>
-      </main>
+      <div className="accountPage">
+        <EmptyState
+          className="signInPromptInline large"
+          icon={<UserRound size={24} />}
+          title="Sign in to review publish requests."
+          description="Registry staff can validate, approve, and reject direct publish requests."
+          action={
+            <div className="promptActions">
+              {auth.devAuthEnabled ? (
+                <Button variant="secondary" onClick={devSignIn}>
+                  Dev sign in
+                </Button>
+              ) : null}
+              <Button onClick={signIn}>Sign in</Button>
+            </div>
+          }
+        />
+      </div>
     );
   }
 
   if (!canReview) {
     return (
-      <main className="accountPage">
-        <section className="signInPromptInline large">
-          <ShieldCheck size={24} />
-          <strong>Registry staff access required.</strong>
-          <p>This queue is limited to registry moderators and admins.</p>
-        </section>
-      </main>
+      <div className="accountPage">
+        <EmptyState
+          className="signInPromptInline large"
+          icon={<ShieldCheck size={24} />}
+          title="Registry staff access required."
+          description="This queue is limited to registry moderators and admins."
+        />
+      </div>
     );
   }
 
@@ -114,18 +124,23 @@ export function AdminPublishPage({
   }
 
   return (
-    <main className="accountPage">
-      <header className="accountHeader">
-        <p className="eyebrow">Review</p>
-        <h1>Publish requests</h1>
-        <p>Validate upstream GitHub packs, then approve releases into the synthetic aggregate.</p>
-      </header>
+    <AppPage
+      className="accountPage"
+      eyebrow="Review"
+      title="Publish requests"
+      subtitle="Validate upstream GitHub packs, then approve releases into the synthetic aggregate."
+    >
+      {error ? (
+        <Text className="formError" role="alert">
+          {error}
+        </Text>
+      ) : null}
 
-      {error ? <p className="formError" role="alert">{error}</p> : null}
-
-      <section className="accountPanel">
+      <Card className="accountPanel">
         {publishRequests.length === 0 ? (
-          <p className="mutedText">No publish requests yet.</p>
+          <Text className="mutedText" tone="muted">
+            No publish requests yet.
+          </Text>
         ) : (
           <div className="accountRequestList">
             {publishRequests.map((request) => (
@@ -134,9 +149,9 @@ export function AdminPublishPage({
                   <strong>
                     {request.requestedName} {request.requestedVersion}
                   </strong>
-                  <span className={`requestStatus ${request.status}`}>
+                  <Badge status={statusStatus(request.status)}>
                     {statusLabel(request.status)}
-                  </span>
+                  </Badge>
                 </div>
                 <span>
                   <GitPullRequest size={13} /> {request.repository.fullName}
@@ -158,30 +173,35 @@ export function AdminPublishPage({
                 <div className="requestActions">
                   {(request.status === "pending_validation" ||
                     request.status === "validation_failed") ? (
-                    <button
-                      className="smallMutedButton"
-                      type="button"
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      iconStart={<RefreshCw size={14} />}
                       disabled={workingRequestId === request.id}
                       onClick={() => void runAction(request, "validate")}
                     >
-                      <RefreshCw size={14} />
                       Validate
-                    </button>
+                    </Button>
                   ) : null}
                   {request.status === "pending_review" ? (
-                    <button
-                      className="smallMutedButton"
-                      type="button"
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      iconStart={<CheckCircle2 size={14} />}
                       disabled={workingRequestId === request.id}
                       onClick={() => void runAction(request, "approve")}
                     >
-                      <CheckCircle2 size={14} />
                       Approve
-                    </button>
+                    </Button>
                   ) : null}
                   {request.status !== "approved" && request.status !== "rejected" ? (
                     <>
+                      {/* Inline action-row field: the kit <Input> always renders a
+                          visible uppercase label, which doesn't fit this 3-up grid.
+                          Reuse the kit input styling (gc-input) and keep the exact
+                          accessible name the original carried. */}
                       <input
+                        className="gc-input"
                         aria-label={`Reject reason for ${request.requestedName}`}
                         placeholder="Reason"
                         value={rejectReasons[request.id] ?? ""}
@@ -192,15 +212,15 @@ export function AdminPublishPage({
                           }))
                         }
                       />
-                      <button
-                        className="textDangerButton"
-                        type="button"
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        iconStart={<XCircle size={14} />}
                         disabled={workingRequestId === request.id}
                         onClick={() => void runAction(request, "reject")}
                       >
-                        <XCircle size={14} />
                         Reject
-                      </button>
+                      </Button>
                     </>
                   ) : null}
                 </div>
@@ -208,8 +228,8 @@ export function AdminPublishPage({
             ))}
           </div>
         )}
-      </section>
-    </main>
+      </Card>
+    </AppPage>
   );
 }
 
@@ -225,5 +245,17 @@ function statusLabel(status: PublishRequestRow["status"]) {
       return "Approved";
     case "rejected":
       return "Rejected";
+  }
+}
+
+function statusStatus(status: PublishRequestRow["status"]) {
+  switch (status) {
+    case "approved":
+      return "success" as const;
+    case "rejected":
+    case "validation_failed":
+      return "danger" as const;
+    default:
+      return "info" as const;
   }
 }

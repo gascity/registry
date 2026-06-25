@@ -1,5 +1,9 @@
 .reviewsPanel {
   display: grid;
+  /* Pin a shrinkable column — a bare grid auto-sizes the implicit column to the
+     head's max-content (~243px), overflowing the narrow mobile card (the 320px
+     cockpit leaves ~216px of content). minmax(0,1fr) lets it shrink + wrap. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   margin-top: 24px;
   padding: 18px;
@@ -44,17 +48,21 @@
   background: rgba(169, 206, 255, 0.05);
 }
 
-.reviewComposer,
-.signInPromptInline,
-.accountPanel {
+.reviewComposer {
   padding: 16px;
 }
 
+/* .accountPanel is now a kit <Card> (gc-card owns surface + padding); its form
+   keeps the stacked layout in design-system spacing. */
 .reviewComposer form,
-.accountPanel form,
 .reportForm {
   display: grid;
   gap: 12px;
+}
+
+.accountPanel form {
+  display: grid;
+  gap: var(--gc-space-3);
 }
 
 .formGridTwo {
@@ -63,8 +71,7 @@
   gap: 12px;
 }
 
-.reviewComposer label,
-.accountPanel label {
+.reviewComposer label {
   display: grid;
   gap: 6px;
   color: var(--ink-muted);
@@ -86,7 +93,6 @@
 
 .reviewComposer input,
 .reviewComposer textarea,
-.accountPanel input,
 .reportForm textarea {
   width: 100%;
   border: 1px solid var(--line);
@@ -98,16 +104,10 @@
   resize: vertical;
 }
 
-.accountPanel button:disabled {
-  cursor: wait;
-  opacity: 0.62;
-}
-
 .reviewComposer input:focus,
 .reviewComposer textarea:focus,
-.accountPanel input:focus,
 .reportForm textarea:focus {
-  border-color: rgba(242, 217, 149, 0.58);
+  border-color: var(--color-focus-ring);
 }
 
 .ratingField {
@@ -150,26 +150,20 @@
 
 .formNotice {
   margin: 0;
-  color: var(--gc-blue-bright);
+  color: var(--color-status-success);
 }
 
 .formError {
   margin: 0;
-  color: var(--amber);
+  color: var(--color-status-danger);
 }
 
-.reviewList,
-.accountReviewList,
-.accountTokenList,
-.accountRequestList {
+.reviewList {
   display: grid;
   gap: 12px;
 }
 
-.reviewItem,
-.accountReviewList article,
-.accountTokenList article,
-.accountRequestList article {
+.reviewItem {
   display: grid;
   gap: 10px;
   border: 1px solid var(--line);
@@ -178,14 +172,32 @@
   padding: 14px;
 }
 
+.accountReviewList,
+.accountTokenList,
+.accountRequestList {
+  display: grid;
+  gap: var(--gc-space-3);
+}
+
+.accountReviewList article,
+.accountTokenList article,
+.accountRequestList article {
+  display: grid;
+  gap: var(--gc-space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+  background: var(--color-bg-inset);
+  padding: var(--gc-space-4);
+}
+
 .accountReviewList span,
 .accountTokenList span,
 .accountRequestList span {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: var(--ink-muted);
-  font-size: 0.84rem;
+  gap: var(--gc-space-1);
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
 }
 
 .requestTitle {
@@ -193,69 +205,70 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--gc-space-2);
 }
 
 .requestStatus {
-  border: 1px solid rgba(169, 206, 255, 0.28);
-  border-radius: 999px;
-  padding: 2px 8px;
-  background: rgba(169, 206, 255, 0.06);
-  color: var(--gc-blue-bright);
-  font-size: 0.78rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  padding: 2px var(--gc-space-2);
+  background: var(--color-surface);
+  color: var(--color-text-bright);
+  font-size: var(--gc-text-xs);
   font-weight: 700;
 }
 
 .requestStatus.approved {
-  border-color: rgba(242, 217, 149, 0.38);
-  background: rgba(242, 217, 149, 0.08);
-  color: var(--gc-gold-bright);
+  border-color: var(--color-status-success);
+  background: var(--color-status-success-surface);
+  color: var(--color-status-success);
 }
 
 .requestStatus.rejected {
-  border-color: rgba(255, 143, 90, 0.42);
-  background: rgba(255, 143, 90, 0.08);
-  color: var(--amber);
+  border-color: var(--color-status-danger);
+  background: var(--color-status-danger-surface);
+  color: var(--color-status-danger);
 }
 
 .requestStatus.validation_failed {
-  border-color: rgba(255, 143, 90, 0.42);
-  background: rgba(255, 143, 90, 0.08);
-  color: var(--amber);
+  border-color: var(--color-status-danger);
+  background: var(--color-status-danger-surface);
+  color: var(--color-status-danger);
 }
 
 .requestPreview {
   display: grid;
-  gap: 6px;
-  border: 1px solid rgba(169, 206, 255, 0.16);
-  border-radius: var(--radius);
-  background: rgba(169, 206, 255, 0.04);
-  padding: 10px;
+  gap: var(--gc-space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+  background: var(--color-bg-inset);
+  padding: var(--gc-space-3);
 }
 
 .tokenReveal {
   display: grid;
-  gap: 8px;
-  border: 1px solid rgba(242, 217, 149, 0.34);
-  border-radius: var(--radius);
-  background: rgba(242, 217, 149, 0.08);
-  padding: 12px;
+  gap: var(--gc-space-2);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-surface);
+  background: var(--color-status-warn-surface);
+  padding: var(--gc-space-3);
 }
 
 .tokenReveal > code {
   overflow-x: auto;
-  border: 1px solid rgba(169, 206, 255, 0.18);
-  border-radius: var(--radius);
-  background: rgba(4, 8, 14, 0.78);
-  color: var(--gc-gold-bright);
-  padding: 9px;
-  font-size: 0.82rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-bg-canvas);
+  color: var(--color-accent-text);
+  padding: var(--gc-space-2);
+  font-family: var(--font-code);
+  font-size: var(--gc-text-sm);
 }
 
 .requestActions {
   display: grid;
   grid-template-columns: repeat(3, minmax(120px, auto));
-  gap: 8px;
+  gap: var(--gc-space-2);
   align-items: center;
 }
 
@@ -296,7 +309,7 @@
 }
 
 .publishFormPanel input:focus {
-  border-color: rgba(242, 217, 149, 0.58);
+  border-color: var(--color-focus-ring);
 }
 
 .publishFormPanel button:disabled {
@@ -307,12 +320,10 @@
 .githubImportPanel {
   display: grid;
   gap: 16px;
-  border: 1px solid rgba(242, 217, 149, 0.28);
+  border: 1px solid var(--color-accent);
   border-radius: var(--radius);
-  background:
-    linear-gradient(180deg, rgba(242, 217, 149, 0.08), rgba(242, 217, 149, 0) 30%),
-    rgba(169, 206, 255, 0.035);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  background: var(--color-surface-raised);
+  box-shadow: var(--gc-inset-highlight);
   padding: 16px;
 }
 
@@ -469,7 +480,7 @@
 }
 
 .manualPublishDetails summary:focus-visible {
-  outline: 2px solid rgba(242, 217, 149, 0.58);
+  outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
 
@@ -543,11 +554,11 @@
 }
 
 .verifiedAuthorBadge {
-  border: 1px solid rgba(242, 217, 149, 0.38);
-  border-radius: 999px;
+  border: 1px solid var(--color-status-success);
+  border-radius: var(--radius-pill);
   padding: 1px 7px;
-  background: rgba(242, 217, 149, 0.08);
-  color: var(--gc-gold-bright);
+  background: var(--color-status-success-surface);
+  color: var(--color-status-success);
 }
 
 .reviewItem p,
@@ -560,40 +571,87 @@
   overflow-wrap: anywhere;
 }
 
+/* Shared sign-in prompt. When rendered as a kit <EmptyState> (gc-emptystate owns
+   the centered flex layout) we don't impose our own grid; the :not() guard keeps
+   the legacy bare-<div> usages (ReviewPanel) stacking as before. */
 .signInPromptInline {
+  color: var(--color-text-muted);
+}
+
+.signInPromptInline:not(.gc-emptystate):not(.gc-card):not(.gc-panel) {
   display: grid;
-  gap: 8px;
-  color: var(--ink-muted);
+  gap: var(--gc-space-2);
+  padding: var(--gc-space-4);
 }
 
 .signInPromptInline strong {
-  color: var(--ink);
+  color: var(--color-text-primary);
 }
 
 .signInPromptInline.large {
   min-height: 260px;
+}
+
+.signInPromptInline.large:not(.gc-emptystate) {
   align-content: center;
   justify-items: start;
 }
 
 .accountPage {
-  padding-top: 34px;
-}
-
-.accountHeader p {
-  max-width: 68ch;
-  color: var(--ink-muted);
-  line-height: 1.6;
+  padding-top: var(--gc-space-8);
 }
 
 .accountGrid {
   display: grid;
   grid-template-columns: minmax(260px, 420px) minmax(0, 1fr);
-  gap: 18px;
+  gap: var(--gc-space-5);
 }
 
+/* .accountPanel is a kit <Card>; this only adds the stacked body layout so the
+   header + form + lists flow vertically inside the card. */
 .accountPanel {
   display: grid;
   align-content: start;
-  gap: 14px;
+  gap: var(--gc-space-4);
+}
+
+/* The section <h2> we hand to <CardHeader title> so the heading role/name the e2e
+   asserts survives the card swap. It must read exactly like the kit gc-card__title
+   it sits inside, so it inherits font + clears the UA heading margin/size. */
+.gc-card__title .cardTitleHeading {
+  margin: 0;
+  font: inherit;
+  color: inherit;
+}
+
+/* Mobile overflow guard (re-skin): a review must never overflow a 320px viewport —
+   wrap the header/meta rows and break long titles / @handles / emails / dates. */
+.reviewItem,
+.reviewItemHeader,
+.reviewMeta {
+  min-width: 0;
+}
+.reviewItemHeader {
+  flex-wrap: wrap;
+}
+.reviewItem *,
+.reviewMeta > span,
+.reviewSummary span {
+  overflow-wrap: anywhere;
+}
+
+/* Same implicit-grid trap: pin the sign-in prompt's column shrinkable so its
+   copy wraps inside the narrow mobile review card instead of overflowing. */
+.signInPromptInline:not(.gc-emptystate):not(.gc-card):not(.gc-panel) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Mobile guard: header/action flex rows must wrap so buttons never overflow the
+   narrow review card (the 320px standalone cockpit leaves ~180px of card content). */
+.reviewsHeader,
+.reviewComposerHeader,
+.reviewItemHeader,
+.formActions,
+.promptActions {
+  flex-wrap: wrap;
 }

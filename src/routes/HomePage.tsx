@@ -1,5 +1,15 @@
-import { Grid2X2, List, Search, SlidersHorizontal, X } from "lucide-react";
+import { Grid2X2, List, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  AppPage,
+  Card,
+  CardHeader,
+  Eyebrow,
+  Input,
+  SegmentedControl,
+  StatGrid,
+} from "@gascity/ui";
 import { CopyButton } from "../components/CopyButton";
 import { PackLink } from "../components/PackLink";
 import {
@@ -16,6 +26,8 @@ import {
   categoryOptions,
   sortOptions,
   type SearchState,
+  type SortKey,
+  type ViewMode,
 } from "../lib/urlState";
 
 // Standalone: advertise this host's own origin (registry.gascity.com in prod).
@@ -23,6 +35,30 @@ import {
 const registryEndpoint = `${
   typeof window !== "undefined" && !isEmbedded() ? window.location.origin : REGISTRY_PUBLIC_URL
 }/registry.toml`;
+
+const summary =
+  "Discover versioned Gas City workflow packs, review immutable content hashes, and copy import commands that match `gc pack registry show`.";
+
+const viewOptions: { value: ViewMode; label: ReactNode }[] = [
+  {
+    value: "list",
+    label: (
+      <>
+        <List size={16} aria-hidden="true" />
+        <span className="gc-sr-only">List view</span>
+      </>
+    ),
+  },
+  {
+    value: "grid",
+    label: (
+      <>
+        <Grid2X2 size={16} aria-hidden="true" />
+        <span className="gc-sr-only">Grid view</span>
+      </>
+    ),
+  },
+];
 
 export function HomePage({
   catalogStatus,
@@ -97,16 +133,12 @@ export function HomePage({
       </div>
       <fieldset>
         <legend>Sort by</legend>
-        {sortOptions.map((option) => (
-          <button
-            key={option.value}
-            className={searchState.sort === option.value ? "active" : ""}
-            type="button"
-            onClick={() => setSearchField("sort", option.value)}
-          >
-            {option.label}
-          </button>
-        ))}
+        <SegmentedControl<SortKey>
+          ariaLabel="Sort by"
+          options={sortOptions}
+          value={searchState.sort}
+          onChange={(value) => setSearchField("sort", value)}
+        />
       </fieldset>
       <fieldset>
         <legend>Categories</legend>
@@ -149,14 +181,8 @@ export function HomePage({
 
   return (
     <main>
-      <section className="hero compactHero">
-        <div className="heroCopy">
-          <p className="eyebrow">First-party pack catalog</p>
-          <h1>Registry</h1>
-          <p className="heroSummary">
-            Discover versioned Gas City workflow packs, review immutable content hashes, and copy
-            import commands that match `gc pack registry show`.
-          </p>
+      <AppPage eyebrow="Registry · Catalog" title="Registry" subtitle={summary}>
+        <section className="hero compactHero">
           <form
             className="heroSearch"
             onSubmit={(event) => {
@@ -164,145 +190,138 @@ export function HomePage({
               updateSearchState(searchState);
             }}
           >
-            <Search size={18} aria-hidden="true" />
-            <input
+            <Input
+              label="Search registry packs"
               type="search"
               value={searchState.query}
               onChange={(event) => setSearchField("query", event.target.value)}
               placeholder="Search packs, integrations, workflows..."
-              aria-label="Search registry packs"
             />
           </form>
-        </div>
 
-        <aside className="endpointPanel" aria-label="CLI registry endpoint">
-          <p className="eyebrow">CLI endpoint</p>
-          <code>{registryEndpoint}</code>
-          <CopyButton text={registryEndpoint} ariaLabel="Copy registry TOML endpoint" />
-          <p>Use this URL anywhere `gc` expects a pack registry.</p>
-        </aside>
-      </section>
+          <Card
+            variant="panel"
+            className="endpointPanel"
+            aria-label="CLI registry endpoint"
+          >
+            <CardHeader eyebrow="CLI endpoint" title="Registry endpoint" />
+            <code>{registryEndpoint}</code>
+            <CopyButton text={registryEndpoint} ariaLabel="Copy registry TOML endpoint" />
+            <p>Use this URL anywhere `gc` expects a pack registry.</p>
+          </Card>
+        </section>
 
-      <section className="statsStrip compactStats" aria-label="Registry summary">
-        <Metric value={catalog.packs.length} label="packs" />
-        <Metric value={counts.active} label="active releases" />
-        <Metric value={counts.withdrawn} label="withdrawn" />
-        <Metric value="sha256" label="content identity" />
-      </section>
+        <section className="statsStrip compactStats" aria-label="Registry summary">
+          <StatGrid>
+            <Metric value={catalog.packs.length} label="packs" />
+            <Metric value={counts.active} label="active releases" />
+            <Metric value={counts.withdrawn} label="withdrawn" />
+            <Metric value="sha256" label="content identity" />
+          </StatGrid>
+        </section>
 
-      {featuredPacks.length > 0 ? (
-        <section className="featured" aria-labelledby="featured-title">
-          <div className="sectionTitle">
-            <p className="eyebrow">Start here</p>
-            <h2 id="featured-title">Featured packs</h2>
+        {featuredPacks.length > 0 ? (
+          <section className="featured" aria-labelledby="featured-title">
+            <div className="sectionTitle">
+              <Eyebrow>Start here</Eyebrow>
+              <h2 id="featured-title">Featured packs</h2>
+            </div>
+            <div className="featuredGrid">
+              {featuredPacks.map((pack) => (
+                <PackLink
+                  key={pack.name}
+                  pack={pack}
+                  searchState={searchState}
+                  view="card"
+                  onNavigate={navigatePack}
+                />
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <section className="browseSection" aria-labelledby="browse-title">
+          <div className="browseHeader">
+            <button
+              ref={filterButtonRef}
+              className="filterButton"
+              type="button"
+              onClick={() => setFiltersOpen(true)}
+            >
+              <SlidersHorizontal size={16} />
+              Filters
+            </button>
+            <div>
+              <Eyebrow>Browse</Eyebrow>
+              <h2 id="browse-title">
+                Packs <span>{filteredPacks.length}</span>
+              </h2>
+            </div>
           </div>
-          <div className="featuredGrid">
-            {featuredPacks.map((pack) => (
-              <PackLink
-                key={pack.name}
-                pack={pack}
-                searchState={searchState}
-                view="card"
-                onNavigate={navigatePack}
-              />
-            ))}
+
+          {filtersOpen ? (
+            <div className="filterBackdrop" onClick={() => closeFilters(true)} aria-hidden="true" />
+          ) : null}
+          <div className="browseLayout">
+            {filterSidebar}
+            <div className="browseResults">
+              {activeFilters.length > 0 ? (
+                <div className="activeFilters" aria-label="Active filters">
+                  {activeFilters.map((label) => (
+                    <span key={label}>{label}</span>
+                  ))}
+                  <button type="button" onClick={clearFilters}>
+                    Clear
+                  </button>
+                </div>
+              ) : null}
+              <div className="resultsToolbar">
+                <span>
+                  {catalogStatus.state === "loading"
+                    ? "Loading packs"
+                    : `${filteredPacks.length} result${filteredPacks.length === 1 ? "" : "s"}`}
+                </span>
+                <SegmentedControl<ViewMode>
+                  ariaLabel="View mode"
+                  options={viewOptions}
+                  value={searchState.view}
+                  onChange={(value) => setSearchField("view", value)}
+                />
+              </div>
+
+              <CatalogLoadState catalogStatus={catalogStatus} />
+
+              {catalogStatus.state === "ready" && filteredPacks.length === 0 ? (
+                <EmptyState
+                  title="No packs found"
+                  description="Try another search term, switch category, or include withdrawn releases."
+                />
+              ) : null}
+
+              {catalogStatus.state === "ready" && filteredPacks.length > 0 ? (
+                <div className={searchState.view === "grid" ? "packGrid" : "packList"}>
+                  {filteredPacks.map((pack) => (
+                    <PackLink
+                      key={pack.name}
+                      pack={pack}
+                      searchState={searchState}
+                      view={searchState.view === "grid" ? "card" : "list"}
+                      onNavigate={navigatePack}
+                    />
+                  ))}
+                </div>
+              ) : null}
+
+              {catalogStatus.state === "ready" ? (
+                <p className="sourceNote">
+                  Catalog source: <code>{catalog.sourceUrl}</code>
+                  {catalog.loadedFromFallback ? " (fallback)" : ""}
+                </p>
+              ) : null}
+            </div>
           </div>
         </section>
-      ) : null}
-
-      <section className="browseSection" aria-labelledby="browse-title">
-        <div className="browseHeader">
-          <button
-            ref={filterButtonRef}
-            className="filterButton"
-            type="button"
-            onClick={() => setFiltersOpen(true)}
-          >
-            <SlidersHorizontal size={16} />
-            Filters
-          </button>
-          <div>
-            <p className="eyebrow">Browse</p>
-            <h2 id="browse-title">
-              Packs <span>{filteredPacks.length}</span>
-            </h2>
-          </div>
-        </div>
-
-        {filtersOpen ? (
-          <div className="filterBackdrop" onClick={() => closeFilters(true)} aria-hidden="true" />
-        ) : null}
-        <div className="browseLayout">
-          {filterSidebar}
-          <div className="browseResults">
-            {activeFilters.length > 0 ? (
-              <div className="activeFilters" aria-label="Active filters">
-                {activeFilters.map((label) => (
-                  <span key={label}>{label}</span>
-                ))}
-                <button type="button" onClick={clearFilters}>
-                  Clear
-                </button>
-              </div>
-            ) : null}
-            <div className="resultsToolbar">
-              <span>
-                {catalogStatus.state === "loading"
-                  ? "Loading packs"
-                  : `${filteredPacks.length} result${filteredPacks.length === 1 ? "" : "s"}`}
-              </span>
-              <div className="viewToggle" aria-label="View mode">
-                <button
-                  className={searchState.view === "list" ? "active" : ""}
-                  type="button"
-                  aria-label="List view"
-                  onClick={() => setSearchField("view", "list")}
-                >
-                  <List size={16} />
-                </button>
-                <button
-                  className={searchState.view === "grid" ? "active" : ""}
-                  type="button"
-                  aria-label="Grid view"
-                  onClick={() => setSearchField("view", "grid")}
-                >
-                  <Grid2X2 size={16} />
-                </button>
-              </div>
-            </div>
-
-            <CatalogLoadState catalogStatus={catalogStatus} />
-
-            {catalogStatus.state === "ready" && filteredPacks.length === 0 ? (
-              <EmptyState
-                title="No packs found"
-                body="Try another search term, switch category, or include withdrawn releases."
-              />
-            ) : null}
-
-            {catalogStatus.state === "ready" && filteredPacks.length > 0 ? (
-              <div className={searchState.view === "grid" ? "packGrid" : "packList"}>
-                {filteredPacks.map((pack) => (
-                  <PackLink
-                    key={pack.name}
-                    pack={pack}
-                    searchState={searchState}
-                    view={searchState.view === "grid" ? "card" : "list"}
-                    onNavigate={navigatePack}
-                  />
-                ))}
-              </div>
-            ) : null}
-
-            {catalogStatus.state === "ready" ? (
-              <p className="sourceNote">
-                Catalog source: <code>{catalog.sourceUrl}</code>
-                {catalog.loadedFromFallback ? " (fallback)" : ""}
-              </p>
-            ) : null}
-          </div>
-        </div>
-      </section>
+      </AppPage>
     </main>
   );
 }
