@@ -3,49 +3,48 @@
   font-family: var(--font-body);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --gc-black: #050912;
-  --gc-dark: #09111b;
-  --gc-surface: #101a28;
-  --gc-surface-strong: #162233;
-  --gc-panel: rgba(10, 16, 25, 0.9);
-  --gc-blue: #7aa0cb;
-  --gc-blue-bright: #d9ebff;
-  --gc-cobalt: #3c5777;
-  --gc-plasma: #a9ceff;
-  --gc-spark: #ff8f5a;
-  --gc-gold: #cfa548;
-  --gc-gold-bright: #f2d995;
-  --gc-brass: #8d6830;
-  --gc-chrome: #ced7e2;
-  --gc-silver: #92a5b9;
-  --gc-grid: rgba(124, 170, 222, 0.08);
-  --gc-text: #e8eef7;
-  --gc-text-dim: #b1c0d1;
-  --gc-text-bright: #f8fbff;
-  --font-display: "Syncopate", "Avenir Next Condensed", sans-serif;
-  --font-body: "Saira", "Gill Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
-  --radius: 6px;
-  --shadow-soft: 0 28px 56px rgba(0, 0, 0, 0.34);
-  --shadow-blue: 0 0 36px rgba(130, 173, 228, 0.16);
-  --shadow-warm: 0 0 32px rgba(207, 165, 72, 0.18);
-  --bg: var(--gc-black);
-  --bg-soft: var(--gc-dark);
-  --surface: var(--gc-surface);
-  --surface-strong: var(--gc-surface-strong);
-  --line: rgba(206, 215, 226, 0.18);
-  --line-strong: rgba(206, 215, 226, 0.28);
-  --ink: var(--gc-text);
-  --ink-muted: var(--gc-text-dim);
-  --accent: var(--gc-gold-bright);
-  --accent-deep: var(--gc-gold);
-  --amber: var(--gc-spark);
-  --red: var(--gc-spark);
-  --blue: var(--gc-plasma);
-  --panel-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 18%),
-    linear-gradient(135deg, rgba(24, 36, 53, 0.88), rgba(10, 16, 25, 0.96));
-  background: var(--bg);
-  color: var(--ink);
+  --gc-black: var(--color-bg-canvas);
+  --gc-dark: var(--color-bg-subtle);
+  --gc-surface: var(--color-surface);
+  --gc-surface-strong: var(--color-surface-raised);
+  --gc-panel: var(--color-surface-raised);
+  --gc-blue: var(--color-product-registry);
+  --gc-blue-bright: var(--color-text-bright);
+  --gc-cobalt: var(--color-accent);
+  --gc-plasma: var(--color-accent-text);
+  --gc-spark: var(--color-status-warn);
+  --gc-gold: var(--color-product-registry);
+  --gc-gold-bright: var(--color-product-registry);
+  --gc-brass: var(--color-accent-heritage);
+  --gc-chrome: var(--color-text-muted);
+  --gc-silver: var(--color-text-muted);
+  --gc-grid: var(--color-border);
+  --gc-text: var(--color-text-primary);
+  --gc-text-dim: var(--color-text-muted);
+  --gc-text-bright: var(--color-text-bright);
+  --font-display: var(--font-heading);
+  --font-body: var(--font-text);
+  --font-mono: var(--font-code);
+  --radius: var(--radius-surface);
+  --shadow-soft: var(--gc-shadow-soft);
+  --shadow-blue: var(--gc-shadow-blue);
+  --shadow-warm: var(--gc-shadow-warm);
+  --bg: var(--color-bg-canvas);
+  --bg-soft: var(--color-bg-subtle);
+  --surface: var(--color-surface);
+  --surface-strong: var(--color-surface-raised);
+  --line: var(--color-border);
+  --line-strong: var(--color-border-strong);
+  --ink: var(--color-text-primary);
+  --ink-muted: var(--color-text-muted);
+  --accent: var(--color-product-registry);
+  --accent-deep: var(--color-accent);
+  --amber: var(--color-status-warn);
+  --red: var(--color-status-danger);
+  --blue: var(--color-accent-text);
+  --panel-bg: var(--color-surface-raised);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
 }
 
 * {
@@ -56,18 +55,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background:
-    linear-gradient(
-      135deg,
-      rgba(255, 143, 90, 0.06),
-      transparent 25%,
-      rgba(169, 206, 255, 0.04) 58%,
-      transparent 82%
-    ),
-    repeating-linear-gradient(90deg, transparent 0, transparent 79px, var(--gc-grid) 80px),
-    repeating-linear-gradient(0deg, transparent 0, transparent 79px, rgba(124, 170, 222, 0.05) 80px),
-    linear-gradient(180deg, #07101b 0%, #050912 48%, #03060d 100%);
-  background-attachment: fixed;
+  background: var(--color-bg-canvas);
   color: var(--ink);
   font-family: var(--font-body);
   font-weight: 400;
@@ -143,25 +131,25 @@ code {
   display: grid;
   flex: none;
   place-items: center;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-control);
 }
 
 .brandMark {
   width: 36px;
   height: 36px;
-  border-color: rgba(242, 217, 149, 0.78);
+  border-color: var(--color-focus-ring);
   background: linear-gradient(135deg, var(--gc-gold-bright), #d7b35d 55%, #a97e37);
   color: #08111a;
-  box-shadow: inset 0 1px 0 rgba(255, 248, 220, 0.32), var(--shadow-warm);
+  box-shadow: inset 0 1px 0 rgba(255, 248, 220, 0.32), var(--gc-shadow-warm);
 }
 
 .packIcon {
   width: 38px;
   height: 38px;
-  border-color: rgba(169, 206, 255, 0.26);
-  background: rgba(169, 206, 255, 0.08);
-  color: var(--gc-gold-bright);
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-accent-text);
 }
 
 .siteNav {
@@ -280,13 +268,13 @@ code {
 .iconOnlyButton:focus-visible,
 .smallMutedButton:focus-visible,
 .savePackButton:focus-visible {
-  border-color: rgba(242, 217, 149, 0.48);
+  border-color: var(--color-focus-ring);
   color: var(--ink);
   outline: none;
 }
 
 .iconTextButton.primary {
-  border-color: rgba(242, 217, 149, 0.58);
+  border-color: var(--color-focus-ring);
   background: linear-gradient(135deg, var(--gc-gold-bright), #d7b35d 55%, #a97e37);
   color: #08111a;
   font-weight: 700;
@@ -307,4 +295,13 @@ code {
   border-color: rgba(255, 143, 90, 0.38);
   background: rgba(255, 143, 90, 0.08);
   color: var(--amber);
+}
+
+/* @gascity/ui's .gc-page has container-type:inline-size + margin-inline:auto and
+   relies on flex cross-stretch for its width. In registry's ShellFrame/ProductShell
+   layout that stretch is suppressed (auto cross-margins), so the page can collapse to
+   min-content (~48px) — hiding content + causing mobile overflow. Pin a definite width;
+   the kit's max-width:64rem + margin-inline:auto still clamp + center it. */
+.gc-page {
+  width: 100%;
 }

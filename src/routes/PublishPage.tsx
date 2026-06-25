@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useEffect, useState } from "react";
+import { AppPage, Button, Card, CardHeader, Eyebrow, Input, Text } from "@gascity/ui";
 import {
   apiRequest,
   type AuthState,
@@ -23,7 +24,6 @@ import {
   type PublishRequestRow,
 } from "../lib/api";
 import { GITHUB_APP_INSTALL_URL, REGISTRY_SOURCE_URL } from "../lib/links";
-import { withBase } from "../lib/base";
 
 const installGcCommand = `brew install gastownhall/gascity/gascity
 gc version`;
@@ -235,81 +235,72 @@ export function PublishPage({
   };
 
   return (
-    <main className="docsPage">
-      <section className="docsHero">
-        <p className="eyebrow">Publishing</p>
-        <h1>Publish A Pack</h1>
-        <p>
-          Direct publishing uses clean Git checkouts. The CLI sends an immutable GitHub repo,
-          commit, and pack path to Gas City Registry; the registry then derives the catalog entry
-          and synthetic aggregate from upstream contents.
-        </p>
-        <div className="docsActions">
-          <a className="iconTextButton primary" href={REGISTRY_SOURCE_URL} rel="noreferrer">
-            <GitPullRequest size={16} aria-hidden="true" />
-            Open registry source
-            <ExternalLink size={15} aria-hidden="true" />
-          </a>
-          <a
-            className="smallMutedButton"
-            href={withBase("/verify")}
-            onClick={(event) => {
-              event.preventDefault();
-              navigateTo("/verify");
+    <AppPage
+      className="docsPage"
+      eyebrow="Registry · Publish"
+      title="Publish A Pack"
+      subtitle="Direct publishing uses clean Git checkouts. The CLI sends an immutable GitHub repo, commit, and pack path to Gas City Registry; the registry then derives the catalog entry and synthetic aggregate from upstream contents."
+      actions={
+        <>
+          <Button
+            accent
+            iconStart={<GitPullRequest size={16} aria-hidden="true" />}
+            onClick={() => {
+              window.location.href = REGISTRY_SOURCE_URL;
             }}
           >
+            Open registry source
+            <ExternalLink size={15} aria-hidden="true" />
+          </Button>
+          <Button variant="secondary" onClick={() => navigateTo("/verify")}>
             Verification flow
-          </a>
-        </div>
-      </section>
-
+          </Button>
+        </>
+      }
+    >
       <section className="docsSection">
         <div className="sectionTitle">
-          <p className="eyebrow">Submit</p>
+          <Eyebrow>Submit</Eyebrow>
           <h2>Publish From GitHub</h2>
         </div>
         {!auth.user ? (
-          <div className="signInPromptInline">
+          <Card variant="surface" className="signInPromptInline">
             <UserRound size={20} />
             <strong>Sign in to submit a pack.</strong>
-            <p>Publish requests are tied to your Gas City account.</p>
+            <Text tone="muted">Publish requests are tied to your Gas City account.</Text>
             <div className="promptActions">
               {auth.devAuthEnabled ? (
-                <button className="iconTextButton" type="button" onClick={devSignIn}>
+                <Button variant="secondary" onClick={devSignIn}>
                   Dev sign in
-                </button>
+                </Button>
               ) : null}
-              <button className="iconTextButton primary" type="button" onClick={signIn}>
+              <Button accent onClick={signIn}>
                 Sign in
-              </button>
+              </Button>
             </div>
-          </div>
+          </Card>
         ) : (
           <div className="publishFormPanel">
-            <div className="githubImportPanel">
+            <Card variant="surface" className="githubImportPanel">
               <div className="githubImportIntro">
                 <div>
-                  <p className="eyebrow">Fast path</p>
+                  <Eyebrow>Fast path</Eyebrow>
                   <h3>Find Packs From GitHub</h3>
-                  <p>
+                  <Text tone="muted">
                     Scan public repositories where the Registry GitHub App is installed and your
                     GitHub account can publish changes.
-                  </p>
+                  </Text>
                 </div>
                 <div className="githubImportActions">
-                  <button
-                    className="iconTextButton primary"
+                  <Button
+                    accent
                     type="button"
                     onClick={() => void startGitHubImport()}
-                    disabled={isStartingGitHubImport}
+                    loading={isStartingGitHubImport}
+                    iconStart={<GitBranch size={15} />}
                   >
-                    {isStartingGitHubImport ? (
-                      <Loader2 className="spinIcon" size={15} />
-                    ) : (
-                      <GitBranch size={15} />
-                    )}
                     {isStartingGitHubImport ? "Opening GitHub" : "Find packs"}
-                  </button>
+                  </Button>
                   <a className="smallMutedButton" href={GITHUB_APP_INSTALL_URL} rel="noreferrer">
                     Install app
                     <ExternalLink size={14} aria-hidden="true" />
@@ -370,61 +361,44 @@ export function PublishPage({
                               </a>
                             </div>
                             <div className="formGridTwo">
-                              <label>
-                                <span>Pack name</span>
-                                <input
-                                  value={draft.requestedName}
-                                  readOnly
-                                  required
-                                />
-                              </label>
-                              <label>
-                                <span>Version</span>
-                                <input
-                                  placeholder="0.1.0"
-                                  value={draft.requestedVersion}
-                                  onChange={(event) =>
-                                    updateCandidateDraft(candidate, "requestedVersion", event.target.value)
-                                  }
-                                  required
-                                />
-                              </label>
-                            </div>
-                            <label>
-                              <span>Ref label</span>
-                              <input
-                                value={draft.requestedRef}
+                              <Input label="Pack name" value={draft.requestedName} readOnly required />
+                              <Input
+                                label="Version"
+                                placeholder="0.1.0"
+                                value={draft.requestedVersion}
                                 onChange={(event) =>
-                                  updateCandidateDraft(candidate, "requestedRef", event.target.value)
+                                  updateCandidateDraft(candidate, "requestedVersion", event.target.value)
                                 }
                                 required
                               />
-                            </label>
-                            <label>
-                              <span>Description</span>
-                              <input
-                                placeholder="Short description shown in search results."
-                                value={draft.requestedDescription}
-                                onChange={(event) =>
-                                  updateCandidateDraft(candidate, "requestedDescription", event.target.value)
-                                }
-                              />
-                            </label>
+                            </div>
+                            <Input
+                              label="Ref label"
+                              value={draft.requestedRef}
+                              onChange={(event) =>
+                                updateCandidateDraft(candidate, "requestedRef", event.target.value)
+                              }
+                              required
+                            />
+                            <Input
+                              label="Description"
+                              placeholder="Short description shown in search results."
+                              value={draft.requestedDescription}
+                              onChange={(event) =>
+                                updateCandidateDraft(candidate, "requestedDescription", event.target.value)
+                              }
+                            />
                             {candidate.warnings.length > 0 ? (
                               <p className="candidateWarning">{candidate.warnings.join(" ")}</p>
                             ) : null}
-                            <button
-                              className="iconTextButton primary"
+                            <Button
+                              accent
                               type="submit"
-                              disabled={isSubmittingCandidate}
+                              loading={isSubmittingCandidate}
+                              iconStart={<CheckCircle2 size={15} />}
                             >
-                              {isSubmittingCandidate ? (
-                                <Loader2 className="spinIcon" size={15} />
-                              ) : (
-                                <CheckCircle2 size={15} />
-                              )}
                               {isSubmittingCandidate ? "Submitting" : "Submit this pack"}
-                            </button>
+                            </Button>
                           </form>
                         );
                       })}
@@ -450,7 +424,7 @@ export function PublishPage({
               ) : null}
 
               {githubError ? <p className="formError" role="alert">{githubError}</p> : null}
-            </div>
+            </Card>
 
             <details className="manualPublishDetails">
               <summary>
@@ -463,74 +437,59 @@ export function PublishPage({
 
               <form onSubmit={(event) => void submitPublishRequest(event)}>
                 <div className="formGridTwo">
-                  <label>
-                    <span>GitHub repository</span>
-                    <input
-                      placeholder="https://github.com/org/repo"
-                      value={repoUrl}
-                      onChange={(event) => setRepoUrl(event.target.value)}
-                      required
-                    />
-                  </label>
-                  <label>
-                    <span>Pack path</span>
-                    <input
-                      placeholder="."
-                      value={packPath}
-                      onChange={(event) => setPackPath(event.target.value)}
-                      required
-                    />
-                  </label>
-                </div>
-                <label>
-                  <span>Commit SHA</span>
-                  <input
-                    placeholder="0123456789abcdef0123456789abcdef01234567"
-                    value={commit}
-                    onChange={(event) => setCommit(event.target.value)}
+                  <Input
+                    label="GitHub repository"
+                    placeholder="https://github.com/org/repo"
+                    value={repoUrl}
+                    onChange={(event) => setRepoUrl(event.target.value)}
                     required
                   />
-                </label>
-                <div className="formGridTwo">
-                  <label>
-                    <span>Pack name</span>
-                    <input
-                      placeholder="my-pack"
-                      value={requestedName}
-                      onChange={(event) => setRequestedName(event.target.value)}
-                      required
-                    />
-                  </label>
-                  <label>
-                    <span>Version</span>
-                    <input
-                      placeholder="0.1.0"
-                      value={requestedVersion}
-                      onChange={(event) => setRequestedVersion(event.target.value)}
-                      required
-                    />
-                  </label>
+                  <Input
+                    label="Pack path"
+                    placeholder="."
+                    value={packPath}
+                    onChange={(event) => setPackPath(event.target.value)}
+                    required
+                  />
                 </div>
-                <label>
-                  <span>Ref label</span>
-                  <input
-                    placeholder="refs/tags/v0.1.0 or main"
-                    value={requestedRef}
-                    onChange={(event) => setRequestedRef(event.target.value)}
+                <Input
+                  label="Commit SHA"
+                  placeholder="0123456789abcdef0123456789abcdef01234567"
+                  value={commit}
+                  onChange={(event) => setCommit(event.target.value)}
+                  required
+                />
+                <div className="formGridTwo">
+                  <Input
+                    label="Pack name"
+                    placeholder="my-pack"
+                    value={requestedName}
+                    onChange={(event) => setRequestedName(event.target.value)}
+                    required
                   />
-                </label>
-                <label>
-                  <span>Description</span>
-                  <input
-                    placeholder="Short description shown in search results."
-                    value={requestedDescription}
-                    onChange={(event) => setRequestedDescription(event.target.value)}
+                  <Input
+                    label="Version"
+                    placeholder="0.1.0"
+                    value={requestedVersion}
+                    onChange={(event) => setRequestedVersion(event.target.value)}
+                    required
                   />
-                </label>
-                <button className="iconTextButton primary" type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? <Loader2 className="spinIcon" size={15} /> : <Send size={15} />}
+                </div>
+                <Input
+                  label="Ref label"
+                  placeholder="refs/tags/v0.1.0 or main"
+                  value={requestedRef}
+                  onChange={(event) => setRequestedRef(event.target.value)}
+                />
+                <Input
+                  label="Description"
+                  placeholder="Short description shown in search results."
+                  value={requestedDescription}
+                  onChange={(event) => setRequestedDescription(event.target.value)}
+                />
+                <Button accent type="submit" loading={isSubmitting} iconStart={<Send size={15} />}>
                   {isSubmitting ? "Submitting" : "Submit publish request"}
-                </button>
+                </Button>
               </form>
             </details>
             {publishRequest ? (
@@ -550,22 +509,22 @@ export function PublishPage({
 
       <section className="docsSection">
         <div className="sectionTitle">
-          <p className="eyebrow">Model</p>
+          <Eyebrow>Model</Eyebrow>
           <h2>Author-Owned Source, Aggregated By Registry</h2>
         </div>
-        <div className="docsCallout">
+        <Card variant="surface" className="docsCallout">
           <PackagePlus size={22} aria-hidden="true" />
           <p>
             The source repository stays canonical. The registry stores publish requests keyed to a
             full commit SHA, then server-side validation can fetch the upstream pack and regenerate
             `/registry.toml`, `/catalog.json`, and Open Graph preview assets from approved releases.
           </p>
-        </div>
+        </Card>
       </section>
 
       <section className="docsSection">
         <div className="sectionTitle">
-          <p className="eyebrow">Steps</p>
+          <Eyebrow>Steps</Eyebrow>
           <h2>Submit A New Pack</h2>
         </div>
         <ol className="stepList">
@@ -609,7 +568,7 @@ export function PublishPage({
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Install gc</p>
+          <Eyebrow>Install gc</Eyebrow>
           <h2>Use The Canonical Tool</h2>
           <p className="mutedText">
             `gc` owns the release hash format. Install it first, then use the `pack release`
@@ -623,7 +582,7 @@ export function PublishPage({
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Direct publish target</p>
+          <Eyebrow>Direct publish target</Eyebrow>
           <h2>Submit The Request</h2>
           <p className="mutedText">
             Run this from the pack root after signing in and pushing the commit to GitHub.
@@ -636,7 +595,7 @@ export function PublishPage({
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Automated releases</p>
+          <Eyebrow>Automated releases</Eyebrow>
           <h2>Use GitHub Actions OIDC</h2>
           <p className="mutedText">
             CI can publish without a stored secret. The workflow grants `id-token: write`; the CLI
@@ -650,7 +609,7 @@ export function PublishPage({
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Validation</p>
+          <Eyebrow>Validation</Eyebrow>
           <h2>Check The Registry File</h2>
           <p className="mutedText">
             Manual registry files remain useful as a fallback and for debugging aggregate output.
@@ -664,7 +623,7 @@ export function PublishPage({
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Canonical registry.toml</p>
+          <Eyebrow>Canonical registry.toml</Eyebrow>
           <h2>File Shape</h2>
           <p className="mutedText">
             The aggregator currently accepts `source_kind = "git"`, version strings shaped as
@@ -678,7 +637,7 @@ export function PublishPage({
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Manual fallback</p>
+          <Eyebrow>Manual fallback</Eyebrow>
           <h2>sources.toml Entry</h2>
           <p className="mutedText">
             During the transition, authors can still submit a source pointer. The preferred path is
@@ -692,7 +651,7 @@ export function PublishPage({
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">After merge</p>
+          <Eyebrow>After merge</Eyebrow>
           <h2>Where It Appears</h2>
         </div>
         <ul className="checkList">
@@ -714,7 +673,7 @@ export function PublishPage({
           </li>
         </ul>
       </section>
-    </main>
+    </AppPage>
   );
 }
 

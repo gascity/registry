@@ -1,5 +1,6 @@
 import { CheckCircle2, Copy } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Button } from "@gascity/ui";
 
 type CopyState = "idle" | "copied" | "failed";
 
@@ -26,11 +27,19 @@ export function CopyButton({ text, ariaLabel }: { text: string; ariaLabel: strin
     copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy";
 
   return (
-    <button
+    <Button
       className="copyButton"
-      type="button"
+      variant="secondary"
+      size="sm"
       data-copy-state={copyState}
       aria-label={ariaLabel}
+      iconStart={
+        copyState === "copied" ? (
+          <CheckCircle2 size={16} aria-hidden="true" />
+        ) : (
+          <Copy size={16} aria-hidden="true" />
+        )
+      }
       onClick={() => {
         void copyText(text)
           .then((didCopy) => {
@@ -43,13 +52,8 @@ export function CopyButton({ text, ariaLabel }: { text: string; ariaLabel: strin
           });
       }}
     >
-      {copyState === "copied" ? (
-        <CheckCircle2 size={16} aria-hidden="true" />
-      ) : (
-        <Copy size={16} aria-hidden="true" />
-      )}
       <span aria-live="polite">{buttonLabel}</span>
-    </button>
+    </Button>
   );
 }
 

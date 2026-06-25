@@ -12,6 +12,19 @@ import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  AppPage,
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  Chip,
+  ErrorState,
+  StatGrid,
+  StatTile,
+  Table,
+  type Column,
+} from "@gascity/ui";
 import { CopyButton } from "../components/CopyButton";
 import { ReviewPanel } from "../components/ReviewPanel";
 import { withBase } from "../lib/base";
@@ -19,7 +32,6 @@ import {
   CatalogLoadState,
   EmptyState,
   PackIcon,
-  ReleaseRow,
   shortSource,
   StatusBadge,
   type CatalogStatus,
@@ -30,6 +42,7 @@ import {
   categoryForPack,
   compareVersions,
   latestActiveRelease,
+  shortCommit,
   type CatalogPack,
   type CatalogRelease,
 } from "../lib/registry";
@@ -70,9 +83,9 @@ export function PackDetail({
   if (catalogStatus.state !== "ready") {
     return (
       <main className="detailPage">
-        <button className="backButton" type="button" onClick={onBack}>
+        <Button variant="ghost" type="button" onClick={onBack}>
           Browse packs
-        </button>
+        </Button>
         <CatalogLoadState catalogStatus={catalogStatus} />
       </main>
     );
@@ -81,12 +94,12 @@ export function PackDetail({
   if (!pack) {
     return (
       <main className="detailPage">
-        <button className="backButton" type="button" onClick={onBack}>
+        <Button variant="ghost" type="button" onClick={onBack}>
           Browse packs
-        </button>
+        </Button>
         <EmptyState
           title={`Pack "${requestedName}" was not found`}
-          body="The catalog loaded successfully, but this pack name is not present."
+          description="The catalog loaded successfully, but this pack name is not present."
         />
       </main>
     );
@@ -99,72 +112,65 @@ export function PackDetail({
 
   return (
     <main className="detailPage">
-      <button className="backButton" type="button" onClick={onBack}>
-        Browse packs
-      </button>
-
-      <section className="detailHero">
-        <div>
-          <div className="detailKicker">
-            <PackIcon pack={pack} />
-            <span>{categoryForPack(pack).label}</span>
-            <StatusBadge pack={pack} />
-          </div>
-          <h1>{pack.name}</h1>
-          <p>{pack.description}</p>
+      <AppPage
+        eyebrow="Registry · Pack"
+        title={pack.name}
+        subtitle={pack.description}
+        actions={
+          <Button variant="ghost" type="button" onClick={onBack}>
+            Browse packs
+          </Button>
+        }
+      >
+        <div className="detailKicker">
+          <PackIcon pack={pack} />
+          <span>{categoryForPack(pack).label}</span>
+          <StatusBadge pack={pack} />
         </div>
-        <aside className="detailSnapshot" aria-label="Pack summary">
-          <dl className="metadataList">
-            <div>
-              <dt>Registry</dt>
-              <dd>{pack.registry}</dd>
-            </div>
-            <div>
-              <dt>Latest</dt>
-              <dd>{latest ? `v${latest.version}` : "None"}</dd>
-            </div>
-            <div>
-              <dt>Active releases</dt>
-              <dd>{activeReleases}</dd>
-            </div>
-            <div>
-              <dt>Reviews</dt>
-              <dd>
-                {reviewSummary?.count
-                  ? `${reviewSummary.averageRating}/5 from ${reviewSummary.count}`
-                  : "None yet"}
-              </dd>
-            </div>
-          </dl>
-        </aside>
-      </section>
 
-      {commands ? (
-        <section className="installCallout" aria-label="Primary install command">
-          <div>
-            <p className="eyebrow">Install</p>
-            <code>{commands.floating}</code>
-          </div>
-          <CopyButton text={commands.floating} ariaLabel="Copy primary install command" />
-        </section>
-      ) : null}
+        <StatGrid className="detailSnapshot" aria-label="Pack summary">
+          <StatTile label="Registry" value={pack.registry} />
+          <StatTile label="Latest" value={latest ? `v${latest.version}` : "None"} />
+          <StatTile label="Active releases" value={activeReleases} />
+          <StatTile
+            label="Reviews"
+            value={
+              reviewSummary?.count
+                ? `${reviewSummary.averageRating}/5 from ${reviewSummary.count}`
+                : "None yet"
+            }
+          />
+        </StatGrid>
 
-      <PackDetailTabs
-        pack={pack}
-        latest={latest}
-        sortedReleases={sortedReleases}
-        auth={auth}
-        signIn={signIn}
-        devSignIn={devSignIn}
-        navigateTo={navigateTo}
-      />
-      <ReviewPanel
-        pack={pack}
-        auth={auth}
-        signIn={signIn}
-        devSignIn={devSignIn}
-        onReviewSummary={setReviewSummary}
-      />
+        {commands ? (
+          <Card variant="panel" className="installCallout" aria-label="Primary install command">
+            <CardHeader
+              eyebrow="Install"
+              title={<code>{commands.floating}</code>}
+              action={
+                <CopyButton text={commands.floating} ariaLabel="Copy primary install command" />
+              }
+            />
+          </Card>
+        ) : null}
+
+        <PackDetailTabs
+          pack={pack}
+          latest={latest}
+          sortedReleases={sortedReleases}
+          auth={auth}
+          signIn={signIn}
+          devSignIn={devSignIn}
+          navigateTo={navigateTo}
+        />
+        <ReviewPanel
+          pack={pack}
+          auth={auth}
+          signIn={signIn}
+          devSignIn={devSignIn}
+          onReviewSummary={setReviewSummary}
+        />
+      </AppPage>
     </main>
   );
 }
@@ -230,7 +236,7 @@ function PackDetailTabs({
   };
 
   return (
-    <section className="tabCard" aria-label="Pack details">
+    <Card className="tabCard" aria-label="Pack details">
       <div className="tabHeader" role="tablist" aria-label={`${pack.name} detail tabs`}>
         {tabs.map((tab, index) => (
           <button
@@ -289,7 +295,7 @@ function PackDetailTabs({
           />
         ) : null}
       </div>
-    </section>
+    </Card>
   );
 }
 
@@ -303,7 +309,7 @@ function ReadmeTab({ pack }: { pack: CatalogPack }) {
     return (
       <EmptyState
         title="No README found"
-        body="The aggregate catalog did not find a README for this pack."
+        description="The aggregate catalog did not find a README for this pack."
       />
     );
   }
@@ -356,20 +362,64 @@ function InstallTab({ pack, latest }: { pack: CatalogPack; latest: CatalogReleas
 
 function CommandBlock({ label, command }: { label: string; command: string }) {
   return (
-    <div className="commandBlock">
+    <Card className="commandBlock">
       <span>{label}</span>
       <code>{command}</code>
       <CopyButton text={command} ariaLabel={`Copy ${label} command`} />
-    </div>
+    </Card>
   );
 }
 
 function ReleasesTab({ releases }: { releases: CatalogRelease[] }) {
+  const columns: Column<CatalogRelease>[] = [
+    {
+      key: "version",
+      header: "Version",
+      render: (release) => (
+        <div className="releaseVersionCell">
+          <strong>v{release.version}</strong>
+          {release.withdrawn ? <Badge status="warn">Withdrawn</Badge> : null}
+        </div>
+      ),
+    },
+    {
+      key: "description",
+      header: "Description",
+      render: (release) => (
+        <div className="releaseDescCell">
+          <span>{release.description}</span>
+          {release.withdrawn && release.withdrawnReason ? (
+            <em>Withdrawn: {release.withdrawnReason}</em>
+          ) : null}
+        </div>
+      ),
+    },
+    { key: "ref", header: "Ref", render: (release) => <Chip>{release.ref}</Chip> },
+    {
+      key: "commit",
+      header: "Commit",
+      render: (release) => <Chip>{shortCommit(release.commit)}</Chip>,
+    },
+    {
+      key: "hash",
+      header: "Hash",
+      render: (release) => <code className="releaseHashCell">{release.hash}</code>,
+    },
+  ];
+
   return (
     <div className="releaseTable">
-      {releases.map((release) => (
-        <ReleaseRow key={`${release.version}-${release.commit}`} release={release} />
-      ))}
+      <Table
+        columns={columns}
+        rows={releases}
+        rowKey={(release) => `${release.version}-${release.commit}`}
+        empty={
+          <EmptyState
+            title="No releases"
+            description="This pack does not have any published releases yet."
+          />
+        }
+      />
     </div>
   );
 }
@@ -504,62 +554,71 @@ function TrustTab({
           <BookOpen size={14} aria-hidden="true" />
         </a>
       </div>
-      <div className="ownershipPanel">
-        <div>
-          <p className="eyebrow">Source attribution</p>
-          <h3>{ownership?.sourceRepository?.fullName ?? shortSource(pack.source)}</h3>
-          {isLoading ? (
-            <p className="mutedText">
-              <Loader2 className="spin" size={14} aria-hidden="true" /> Checking ownership
-            </p>
-          ) : ownership?.verificationStatus === "verified" && ownership.publisher ? (
-            <p className="ownershipStatus verified">
-              <ShieldCheck size={15} aria-hidden="true" />
-              Verified author @{ownership.publisher.handle}
-            </p>
-          ) : (
-            <p className="ownershipStatus">Unverified source</p>
-          )}
-        </div>
+      <Card variant="panel" className="ownershipPanel">
+        <CardHeader
+          eyebrow="Source attribution"
+          title={ownership?.sourceRepository?.fullName ?? shortSource(pack.source)}
+          action={
+            isLoading ? (
+              <span className="ownershipStatus">
+                <Loader2 className="spin" size={14} aria-hidden="true" /> Checking ownership
+              </span>
+            ) : ownership?.verificationStatus === "verified" && ownership.publisher ? (
+              <Badge status="success" dot>
+                Verified author @{ownership.publisher.handle}
+              </Badge>
+            ) : (
+              <span className="ownershipStatus">Unverified source</span>
+            )
+          }
+        />
         {ownership?.verificationStatus === "verified" ? null : auth.user ? (
           <div className="ownershipActions">
             {ownership?.githubApp?.installUrl ? (
-              <a className="smallMutedButton" href={ownership.githubApp.installUrl} rel="noreferrer">
-                <GitBranch size={15} aria-hidden="true" />
+              <Button
+                variant="ghost"
+                iconStart={<GitBranch size={15} aria-hidden="true" />}
+                onClick={() => {
+                  if (ownership.githubApp?.installUrl) {
+                    window.location.href = ownership.githubApp.installUrl;
+                  }
+                }}
+              >
                 Install app
-              </a>
+              </Button>
             ) : null}
-            <button
-              className="iconTextButton"
+            <Button
+              variant="secondary"
               type="button"
               disabled={!ownership?.githubApp?.configured || isVerifying}
+              loading={isVerifying}
+              iconStart={isVerifying ? undefined : <GitBranch size={15} aria-hidden="true" />}
               onClick={() => void verifyOwnership()}
             >
-              {isVerifying ? (
-                <Loader2 className="spin" size={15} aria-hidden="true" />
-              ) : (
-                <GitBranch size={15} aria-hidden="true" />
-              )}
               Verify
-            </button>
+            </Button>
           </div>
         ) : (
           <div className="ownershipActions">
             {auth.devAuthEnabled ? (
-              <button className="smallMutedButton" type="button" onClick={devSignIn}>
+              <Button variant="ghost" type="button" onClick={devSignIn}>
                 Dev sign in
-              </button>
+              </Button>
             ) : null}
-            <button className="iconTextButton" type="button" onClick={signIn}>
+            <Button variant="secondary" type="button" onClick={signIn}>
               Sign in
-            </button>
+            </Button>
           </div>
         )}
-        {error ? <p className="formError">{error}</p> : null}
+        {error ? (
+          <div className="ownershipFeedback">
+            <ErrorState compact message={error} />
+          </div>
+        ) : null}
         {!isLoading && auth.user && !ownership?.githubApp?.configured ? (
           <p className="mutedText">GitHub App verification is not configured in this environment.</p>
         ) : null}
-      </div>
+      </Card>
     </div>
   );
 }

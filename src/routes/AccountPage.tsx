@@ -13,6 +13,16 @@ import {
 import type React from "react";
 import { useEffect, useState } from "react";
 import {
+  AppPage,
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  Input,
+  Text,
+} from "@gascity/ui";
+import {
   apiRequest,
   type ApiTokenCreateResult,
   type ApiTokenRow,
@@ -70,23 +80,24 @@ export function AccountPage({
 
   if (!auth.user) {
     return (
-      <main className="accountPage">
-        <section className="signInPromptInline large">
-          <UserRound size={24} />
-          <strong>Sign in to manage your registry account.</strong>
-          <p>Your account stores reviews, saved packs, and profile display details.</p>
-          <div className="promptActions">
-            {auth.devAuthEnabled ? (
-              <button className="iconTextButton" type="button" onClick={devSignIn}>
-                Dev sign in
-              </button>
-            ) : null}
-            <button className="iconTextButton primary" type="button" onClick={signIn}>
-              Sign in
-            </button>
-          </div>
-        </section>
-      </main>
+      <div className="accountPage">
+        <EmptyState
+          className="signInPromptInline large"
+          icon={<UserRound size={24} />}
+          title="Sign in to manage your registry account."
+          description="Your account stores reviews, saved packs, and profile display details."
+          action={
+            <div className="promptActions">
+              {auth.devAuthEnabled ? (
+                <Button variant="secondary" onClick={devSignIn}>
+                  Dev sign in
+                </Button>
+              ) : null}
+              <Button onClick={signIn}>Sign in</Button>
+            </div>
+          }
+        />
+      </div>
     );
   }
 
@@ -201,84 +212,99 @@ export function AccountPage({
   };
 
   return (
-    <main className="accountPage">
-      <header className="accountHeader">
-        <p className="eyebrow">Account</p>
-        <h1>Registry profile</h1>
-        <p>Persistent registry state is keyed to your Gas City account identity.</p>
-      </header>
-
+    <AppPage
+      className="accountPage"
+      eyebrow="Account"
+      title="Registry profile"
+      subtitle="Persistent registry state is keyed to your Gas City account identity."
+    >
       <div className="accountGrid">
-        <section className="accountPanel">
-          <h2>Profile</h2>
+        <Card className="accountPanel">
+          <CardHeader title={<h2 className="cardTitleHeading">Profile</h2>} icon={<UserRound size={16} />} />
           <form onSubmit={(event) => void saveProfile(event)}>
-            <label>
-              <span>Handle</span>
-              <input value={handle} onChange={(event) => setHandle(event.target.value)} />
-            </label>
-            <label>
-              <span>Display name</span>
-              <input
-                value={displayName}
-                onChange={(event) => setDisplayName(event.target.value)}
-                required
-              />
-            </label>
-            <button className="iconTextButton primary" type="submit">
-              <Save size={15} />
+            <Input
+              label="Handle"
+              value={handle}
+              onChange={(event) => setHandle(event.target.value)}
+            />
+            <Input
+              label="Display name"
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+              required
+            />
+            <Button type="submit" iconStart={<Save size={15} />}>
               Save profile
-            </button>
+            </Button>
           </form>
-          {notice ? <p className="formNotice">{notice}</p> : null}
-          {error ? <p className="formError" role="alert">{error}</p> : null}
-        </section>
+          {notice ? (
+            <Text className="formNotice" tone="muted">
+              {notice}
+            </Text>
+          ) : null}
+          {error ? (
+            <Text className="formError" role="alert">
+              {error}
+            </Text>
+          ) : null}
+        </Card>
 
-        <section className="accountPanel">
-          <h2>API tokens</h2>
+        <Card className="accountPanel">
+          <CardHeader title={<h2 className="cardTitleHeading">API tokens</h2>} icon={<KeyRound size={16} />} />
           <form onSubmit={(event) => void createApiToken(event)}>
-            <label>
-              <span>Label</span>
-              <input value={tokenLabel} onChange={(event) => setTokenLabel(event.target.value)} />
-            </label>
-            <button
-              className="iconTextButton primary"
+            <Input
+              label="Label"
+              value={tokenLabel}
+              onChange={(event) => setTokenLabel(event.target.value)}
+            />
+            <Button
               type="submit"
-              disabled={workingTokenId === "new"}
+              iconStart={<KeyRound size={15} />}
+              loading={workingTokenId === "new"}
             >
-              <KeyRound size={15} />
               {workingTokenId === "new" ? "Creating" : "Create token"}
-            </button>
+            </Button>
           </form>
           {createdToken ? (
             <div className="tokenReveal">
-              <span>
+              <Text as="span" tone="muted">
                 Use this token with <code>GC_REGISTRY_TOKEN</code> or{" "}
                 <code>gc pack registry publish --token</code>.
-              </span>
+              </Text>
               <code>{createdToken.token}</code>
-              <button
-                className="smallMutedButton"
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
+                iconStart={<Copy size={14} />}
                 onClick={() => void navigator.clipboard.writeText(createdToken.token)}
               >
-                <Copy size={14} />
                 Copy
-              </button>
+              </Button>
             </div>
           ) : null}
-          {tokenNotice ? <p className="formNotice">{tokenNotice}</p> : null}
-          {tokenError ? <p className="formError" role="alert">{tokenError}</p> : null}
+          {tokenNotice ? (
+            <Text className="formNotice" tone="muted">
+              {tokenNotice}
+            </Text>
+          ) : null}
+          {tokenError ? (
+            <Text className="formError" role="alert">
+              {tokenError}
+            </Text>
+          ) : null}
           {apiTokens.length === 0 ? (
-            <p className="mutedText">No API tokens yet.</p>
+            <Text className="mutedText" tone="muted">
+              No API tokens yet.
+            </Text>
           ) : (
             <div className="accountTokenList">
               {apiTokens.map((token) => (
                 <article key={token.id}>
                   <div className="requestTitle">
                     <strong>{token.label}</strong>
-                    <span className={`requestStatus ${token.revokedAt ? "rejected" : "approved"}`}>
+                    <Badge status={token.revokedAt ? "danger" : "success"}>
                       {token.revokedAt ? "Revoked" : "Active"}
-                    </span>
+                    </Badge>
                   </div>
                   <span>
                     <KeyRound size={13} /> {token.prefix}...
@@ -286,26 +312,28 @@ export function AccountPage({
                   <span>Created {formatDate(token.createdAt)}</span>
                   {token.lastUsedAt ? <span>Last used {formatDate(token.lastUsedAt)}</span> : null}
                   {!token.revokedAt ? (
-                    <button
-                      className="smallMutedButton"
-                      type="button"
-                      disabled={workingTokenId === token.id}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      iconStart={<Trash2 size={14} />}
+                      loading={workingTokenId === token.id}
                       onClick={() => void revokeApiToken(token.id)}
                     >
-                      <Trash2 size={14} />
                       {workingTokenId === token.id ? "Revoking" : "Revoke"}
-                    </button>
+                    </Button>
                   ) : null}
                 </article>
               ))}
             </div>
           )}
-        </section>
+        </Card>
 
-        <section className="accountPanel">
-          <h2>My reviews</h2>
+        <Card className="accountPanel">
+          <CardHeader title={<h2 className="cardTitleHeading">My reviews</h2>} icon={<Star size={16} />} />
           {reviews.length === 0 ? (
-            <p className="mutedText">No reviews yet.</p>
+            <Text className="mutedText" tone="muted">
+              No reviews yet.
+            </Text>
           ) : (
             <div className="accountReviewList">
               {reviews.map((review) => (
@@ -319,12 +347,14 @@ export function AccountPage({
               ))}
             </div>
           )}
-        </section>
+        </Card>
 
-        <section className="accountPanel">
-          <h2>Publish requests</h2>
+        <Card className="accountPanel">
+          <CardHeader title={<h2 className="cardTitleHeading">Publish requests</h2>} icon={<GitPullRequest size={16} />} />
           {publishRequests.length === 0 ? (
-            <p className="mutedText">No publish requests yet.</p>
+            <Text className="mutedText" tone="muted">
+              No publish requests yet.
+            </Text>
           ) : (
             <div className="accountRequestList">
               {publishRequests.map((request) => (
@@ -333,9 +363,9 @@ export function AccountPage({
                     <strong>
                       {request.requestedName} {request.requestedVersion}
                     </strong>
-                    <span className={`requestStatus ${request.status}`}>
+                    <Badge status={statusStatus(request.status)}>
                       {statusLabel(request.status)}
-                    </span>
+                    </Badge>
                   </div>
                   <span>
                     <GitPullRequest size={13} /> {request.repository.fullName}
@@ -353,24 +383,24 @@ export function AccountPage({
                     </div>
                   ) : null}
                   {request.status === "pending_validation" || request.status === "validation_failed" ? (
-                    <button
-                      className="smallMutedButton"
-                      type="button"
-                      disabled={workingRequestId === request.id}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      iconStart={<RefreshCw size={14} />}
+                      loading={workingRequestId === request.id}
                       onClick={() => void validatePublishRequest(request.id)}
                     >
-                      <RefreshCw size={14} />
                       {workingRequestId === request.id ? "Validating" : "Validate"}
-                    </button>
+                    </Button>
                   ) : null}
                   {request.statusReason ? <p>{request.statusReason}</p> : null}
                 </article>
               ))}
             </div>
           )}
-        </section>
+        </Card>
       </div>
-    </main>
+    </AppPage>
   );
 }
 
@@ -394,5 +424,17 @@ function statusLabel(status: PublishRequestRow["status"]) {
       return "Approved";
     case "rejected":
       return "Rejected";
+  }
+}
+
+function statusStatus(status: PublishRequestRow["status"]) {
+  switch (status) {
+    case "approved":
+      return "success" as const;
+    case "rejected":
+    case "validation_failed":
+      return "danger" as const;
+    default:
+      return "info" as const;
   }
 }

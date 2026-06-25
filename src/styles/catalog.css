@@ -1,311 +1,145 @@
+/* Catalog home + browse. Layout + the few elements that stay hand-rolled
+   (filter rail, list rows, release rows). Surfaces, stats, chips, badges,
+   fields, segmented controls and empty/error states are @gascity/ui
+   components — styled by @gascity/ui/app.css, not here. */
+
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 520px);
   align-items: center;
-  gap: 40px;
-  padding: 54px 0 36px;
-}
-
-.heroCopy {
-  max-width: 720px;
-}
-
-.eyebrow {
-  margin: 0 0 10px;
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: 0.74rem;
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: uppercase;
-}
-
-h1,
-h2,
-h3,
-p {
-  margin-top: 0;
-}
-
-h1 {
-  margin-bottom: 18px;
-  color: var(--gc-gold-bright);
-  font-family: var(--font-display);
-  font-size: clamp(3rem, 7.25vw, 6rem);
-  font-weight: 700;
-  line-height: 0.86;
-  letter-spacing: 0;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  text-shadow:
-    0 0 22px rgba(207, 165, 72, 0.18),
-    0 0 34px rgba(169, 206, 255, 0.08);
-  text-transform: uppercase;
-}
-
-h2 {
-  color: var(--gc-text-bright);
-  margin-bottom: 0;
-  font-size: 1.5rem;
-  font-weight: 600;
-  line-height: 1.18;
-  letter-spacing: 0;
-}
-
-h3 {
-  color: var(--gc-text-bright);
-  margin-bottom: 0;
-  font-size: 1.04rem;
-  font-weight: 600;
-  line-height: 1.25;
-  letter-spacing: 0;
-}
-
-.heroSummary {
-  max-width: 62ch;
-  margin-bottom: 24px;
-  color: var(--ink-muted);
-  font-size: 1.08rem;
-  line-height: 1.65;
-}
-
-.heroSearch,
-.browse-page-search {
-  display: flex;
-  min-height: 52px;
-  align-items: center;
-  gap: 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  padding: 0 16px;
-  background: rgba(6, 12, 20, 0.82);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-
-.heroSearch svg {
-  color: var(--accent);
-}
-
-.heroSearch input {
-  width: 100%;
-  border: 0;
-  background: transparent;
-  color: var(--ink);
-  outline: none;
-}
-
-.heroSearch input::placeholder {
-  color: rgba(232, 238, 247, 0.42);
-}
-
-.heroImage {
-  display: block;
-  width: 100%;
-  min-height: 260px;
-  aspect-ratio: 16 / 11;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  object-fit: cover;
-  background: var(--gc-dark);
-  box-shadow: var(--shadow-blue);
+  gap: var(--gc-space-10);
+  padding: var(--gc-space-8) 0 var(--gc-space-6);
 }
 
 .compactHero {
   grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
   align-items: stretch;
-  padding-bottom: 28px;
+  padding: var(--gc-space-6) 0 var(--gc-space-5);
 }
 
-.endpointPanel,
-.installCallout,
-.reviewsPanel,
-.reviewComposer,
-.signInPromptInline,
-.accountPanel {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-soft), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+/* The hero search wraps a @gascity/ui <Input>; let the field fill the column. */
+.heroSearch {
+  display: flex;
+  align-items: center;
+}
+
+.heroSearch .gc-field {
+  width: 100%;
 }
 
 .endpointPanel {
   display: grid;
   align-content: center;
-  gap: 12px;
-  padding: 18px;
+  gap: var(--gc-space-3);
 }
 
 .endpointPanel code {
   display: block;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 10px;
-  background: rgba(4, 8, 14, 0.95);
-  color: var(--gc-blue-bright);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: var(--gc-space-2);
+  background: var(--color-bg-inset);
+  color: var(--color-text-bright);
   overflow-wrap: anywhere;
 }
 
 .endpointPanel p:last-child {
-  margin-bottom: 0;
-  color: var(--ink-muted);
-  font-size: 0.86rem;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
   line-height: 1.5;
 }
 
 .statsStrip {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: rgba(5, 9, 18, 0.32);
-}
-
-.statsStrip div {
-  display: grid;
-  gap: 6px;
-  padding: 18px 20px 18px 0;
-}
-
-.statsStrip div + div {
-  border-left: 1px solid var(--line);
-  padding-left: 20px;
-}
-
-.statsStrip strong {
-  color: var(--gc-blue-bright);
-  font-family: var(--font-display);
-  font-size: 1.8rem;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.statsStrip span {
-  color: var(--ink-muted);
-  font-size: 0.84rem;
+  margin: var(--gc-space-6) 0 0;
 }
 
 .featured,
 .browseSection {
-  padding-top: 42px;
+  padding-top: var(--gc-space-10);
 }
 
 .sectionTitle,
 .browseHeader {
-  margin-bottom: 18px;
+  margin-bottom: var(--gc-space-5);
+}
+
+.sectionTitle .gc-eyebrow,
+.browseHeader .gc-eyebrow {
+  margin-bottom: var(--gc-space-1);
+}
+
+h2 {
+  color: var(--color-text-bright);
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--gc-text-xl);
+  font-weight: 600;
+  line-height: 1.18;
+}
+
+h3 {
+  color: var(--color-text-bright);
+  margin: 0;
+  font-size: var(--gc-text-md);
+  font-weight: 600;
+  line-height: 1.25;
 }
 
 .featuredGrid,
 .packGrid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--gc-space-3);
 }
 
-.packCard,
-.packListItem,
-.detailSnapshot,
-.tabCard,
-.emptyState,
-.inlineState {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-soft), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-}
-
-.packCard,
-.packListItem {
-  cursor: pointer;
+/* Card view: the anchor is the routing target; the <Card> inside is the surface. */
+.packCard {
+  display: block;
   text-align: left;
 }
 
-.packCard {
+.packCardInner {
   display: grid;
   min-height: 244px;
   align-content: space-between;
-  gap: 18px;
-  padding: 16px;
-}
-
-.packCard:hover,
-.packListItem:hover,
-.packCard:focus-visible,
-.packListItem:focus-visible {
-  border-color: rgba(242, 217, 149, 0.48);
-  background:
-    linear-gradient(180deg, rgba(255, 244, 210, 0.04), rgba(255, 255, 255, 0) 18%),
-    linear-gradient(135deg, rgba(24, 29, 38, 0.92), rgba(10, 16, 25, 0.98));
-  box-shadow:
-    0 20px 60px rgba(0, 0, 0, 0.28),
-    0 0 44px rgba(207, 165, 72, 0.08);
-  outline: none;
-}
-
-.packCardHeader,
-.packListTitle,
-.detailKicker,
-.releaseFacts,
-.resultsToolbar,
-.browseHeader {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.packCardHeader,
-.resultsToolbar,
-.browseHeader {
-  justify-content: space-between;
+  gap: var(--gc-space-5);
+  padding: var(--gc-space-4);
+  height: 100%;
 }
 
 .packCard p {
-  margin-bottom: 0;
-  color: var(--ink-muted);
+  margin: 0;
+  color: var(--color-text-muted);
   line-height: 1.48;
+}
+
+.packCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gc-space-3);
 }
 
 .packMeta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  color: var(--gc-silver);
-  font-size: 0.8rem;
-}
-
-.packMeta span {
-  display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(169, 206, 255, 0.04);
-  padding: 3px 8px;
+  gap: var(--gc-space-2);
+  min-width: 0;
 }
 
-.statusBadge {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid rgba(169, 206, 255, 0.34);
-  border-radius: 999px;
-  padding: 4px 8px;
-  background: rgba(169, 206, 255, 0.08);
-  color: var(--gc-blue-bright);
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.statusBadge.warning {
-  border-color: rgba(255, 143, 90, 0.38);
-  background: rgba(255, 143, 90, 0.08);
-  color: var(--amber);
+.packMeta .gc-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .browseLayout {
   display: grid;
   grid-template-columns: 232px minmax(0, 1fr);
-  gap: 24px;
+  gap: var(--gc-space-6);
 }
 
 .filterButton {
@@ -323,12 +157,12 @@ h3 {
 .browseSidebar {
   display: grid;
   align-content: start;
-  gap: 24px;
+  gap: var(--gc-space-6);
 }
 
 .browseSidebar fieldset {
   display: grid;
-  gap: 7px;
+  gap: var(--gc-space-2);
   min-width: 0;
   border: 0;
   margin: 0;
@@ -336,11 +170,18 @@ h3 {
 }
 
 .browseSidebar legend {
-  margin-bottom: 4px;
-  color: var(--ink-muted);
-  font-size: 0.78rem;
-  font-weight: 800;
+  margin-bottom: var(--gc-space-1);
+  color: var(--color-text-muted);
+  font-family: var(--font-code);
+  font-size: var(--gc-text-xs);
+  font-weight: 700;
+  letter-spacing: var(--gc-tracking-eyebrow);
   text-transform: uppercase;
+}
+
+/* Sort-by is a @gascity/ui SegmentedControl; let it wrap on the narrow rail. */
+.browseSidebar .gc-segmented {
+  flex-wrap: wrap;
 }
 
 .browseSidebar button {
@@ -349,39 +190,39 @@ h3 {
   min-height: 36px;
   align-items: center;
   border: 1px solid transparent;
-  border-radius: var(--radius);
-  padding: 0 10px;
+  border-radius: var(--radius-control);
+  padding: 0 var(--gc-space-3);
   background: transparent;
-  color: var(--ink-muted);
+  color: var(--color-text-muted);
   cursor: pointer;
   text-align: left;
 }
 
 .browseSidebar button:hover,
 .browseSidebar button.active {
-  border-color: var(--line);
-  background: rgba(169, 206, 255, 0.08);
-  color: var(--ink);
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
 }
 
 .browseSidebar .clearFiltersButton {
-  border-color: rgba(255, 143, 90, 0.28);
-  background: rgba(255, 143, 90, 0.06);
-  color: var(--amber);
+  border-color: var(--color-status-warn);
+  background: var(--color-status-warn-surface);
+  color: var(--color-status-warn);
 }
 
 .checkboxRow {
   display: flex;
   align-items: center;
-  gap: 9px;
-  color: var(--ink-muted);
-  font-size: 0.9rem;
+  gap: var(--gc-space-2);
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
 }
 
 .checkboxRow input {
   width: 16px;
   height: 16px;
-  accent-color: var(--accent-deep);
+  accent-color: var(--color-accent);
 }
 
 .browseResults {
@@ -392,8 +233,8 @@ h3 {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 12px;
+  gap: var(--gc-space-2);
+  margin-bottom: var(--gc-space-3);
 }
 
 .activeFilters span,
@@ -401,85 +242,79 @@ h3 {
   display: inline-flex;
   min-height: 28px;
   align-items: center;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: rgba(169, 206, 255, 0.05);
-  color: var(--ink-muted);
-  padding: 3px 9px;
-  font-size: 0.82rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  padding: var(--gc-space-1) var(--gc-space-3);
+  font-size: var(--gc-text-sm);
 }
 
 .activeFilters button {
-  border-color: rgba(255, 143, 90, 0.32);
-  color: var(--amber);
+  border-color: var(--color-status-warn);
+  color: var(--color-status-warn);
   cursor: pointer;
 }
 
 .resultsToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gc-space-3);
   min-height: 40px;
-  margin-bottom: 12px;
-  color: var(--ink-muted);
-  font-size: 0.9rem;
-}
-
-.viewToggle {
-  display: inline-flex;
-  gap: 4px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 3px;
-  background: rgba(6, 12, 20, 0.82);
-}
-
-.viewToggle button {
-  display: grid;
-  width: 32px;
-  height: 28px;
-  place-items: center;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--ink-muted);
-  cursor: pointer;
-}
-
-.viewToggle button.active {
-  background: linear-gradient(135deg, var(--gc-gold-bright), #d7b35d 55%, #a97e37);
-  color: #08111a;
+  margin-bottom: var(--gc-space-3);
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
 }
 
 .packList {
   display: grid;
-  gap: 10px;
+  gap: var(--gc-space-3);
 }
 
 .packListItem {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 14px;
-  padding: 14px;
+  gap: var(--gc-space-4);
+  padding: var(--gc-space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+  background: var(--color-surface);
+  box-shadow: var(--gc-shadow-soft);
+  cursor: pointer;
+  text-align: left;
+  color: var(--color-text-muted);
+}
+
+.packListItem:hover,
+.packListItem:focus-visible {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-raised);
+  box-shadow: var(--gc-shadow-blue);
+  outline: none;
 }
 
 .packListBody {
   display: grid;
   min-width: 0;
-  gap: 7px;
-  color: var(--ink-muted);
+  gap: var(--gc-space-2);
   line-height: 1.45;
 }
 
 .packListBody strong {
-  color: var(--ink);
+  color: var(--color-text-bright);
 }
 
-/* At very narrow widths (~320px) the list body can be narrower than a long pack
-   name or source pill; truncate the title + meta so they never push past the
-   viewport instead of forcing horizontal scroll. */
 .packListTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--gc-space-3);
   min-width: 0;
 }
 
+/* At very narrow widths the list body can be narrower than a long pack name or
+   source pill; truncate the title so it never forces horizontal scroll. */
 .packListTitle strong {
   min-width: 0;
   overflow: hidden;
@@ -487,44 +322,52 @@ h3 {
   white-space: nowrap;
 }
 
-.packMeta {
-  min-width: 0;
-}
-
-.packMeta span {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .sourceNote {
-  margin-top: 18px;
-  color: var(--ink-muted);
-  font-size: 0.82rem;
+  margin-top: var(--gc-space-5);
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
   line-height: 1.5;
 }
 
 .sourceNote code {
-  color: var(--gc-blue-bright);
+  color: var(--color-text-bright);
 }
 
-.inlineState,
-.emptyState {
-  padding: 18px;
-  color: var(--ink-muted);
-}
-
+/* Inline "reading catalog…" row (Spinner + muted Text). */
 .inlineState {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--gc-space-3);
+  padding: var(--gc-space-4);
+  color: var(--color-text-muted);
 }
 
-.inlineState.error {
-  color: var(--red);
+/* Hand-rolled empty state still used by publish/admin slices (a bare div, not
+   the @gascity/ui <EmptyState>). Catalog's own empty state is now <EmptyState>;
+   this token-styled rule stays until those slices adopt the component too. */
+.emptyState {
+  display: grid;
+  justify-items: start;
+  gap: var(--gc-space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+  background: var(--color-surface);
+  box-shadow: var(--gc-shadow-soft);
+  padding: var(--gc-space-4);
+  color: var(--color-text-muted);
 }
 
+.emptyState strong {
+  color: var(--color-text-bright);
+}
+
+.emptyState p {
+  margin: 0;
+}
+
+/* Shared rotating-icon utility for the hand-rolled lucide <Loader2> spinners in
+   the detail / reviews slices. Catalog's own loading row uses <Spinner> now;
+   this stays until those slices adopt it too. */
 .spin {
   animation: spin 0.9s linear infinite;
 }
@@ -533,18 +376,4 @@ h3 {
   to {
     transform: rotate(360deg);
   }
-}
-
-.emptyState {
-  display: grid;
-  justify-items: start;
-  gap: 9px;
-}
-
-.emptyState strong {
-  color: var(--ink);
-}
-
-.emptyState p {
-  margin-bottom: 0;
 }

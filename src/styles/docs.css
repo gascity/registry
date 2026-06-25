@@ -1,69 +1,72 @@
+/* Docs pages (Publish + Verifier). The page shell is now <AppPage> (.gc-page),
+   which owns the max-width, page padding, and the eyebrow/title/actions head.
+   .docsPage just supplies the vertical rhythm between the page sections, and the
+   classes below layer registry doc layout on top of @gascity/ui primitives
+   (Card / CardHeader). Everything is driven by shared tokens.
+
+   The publish FORM classes (.publishFormPanel, .githubImportPanel, .githubCandidate,
+   .manualPublishDetails, .requestPreview, .requestStatus, .formGridTwo, .spinIcon,
+   .promptActions, .emptyState, .formError, …) are shared with the account / admin
+   pages and live in account-reviews.css — they are intentionally NOT redefined here. */
+
+/* This class lands on @gascity/ui's .gc-page (AppPage root), which is a block flex
+   item of the column-flex .gcs-main with margin-inline:auto. Overriding its display
+   to grid/flex makes the auto cross-margins suppress stretch → the page collapses to
+   min-content (~48px, hiding every child). So DON'T change its display; keep it block
+   (like .detailPage/.accountPage) and give the sections vertical rhythm via margins. */
 .docsPage {
-  display: grid;
-  gap: 34px;
   min-width: 0;
-  padding-top: 42px;
 }
-
-.docsHero {
-  max-width: 900px;
-  min-width: 0;
-  padding-bottom: 10px;
-}
-
-.docsHero p:not(.eyebrow) {
-  max-width: 72ch;
-  color: var(--ink-muted);
-  font-size: 1.06rem;
-  line-height: 1.62;
-}
-
-.docsActions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 22px;
+.docsPage > * + * {
+  margin-top: var(--gc-space-8);
 }
 
 .docsGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--gc-space-3);
 }
 
-.docsPanel,
-.docsCallout {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel-bg);
-  box-shadow: var(--shadow-soft), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-}
-
+/* .docsPanel / .docsCallout sit ON a <Card>, which already supplies the surface,
+   border, radius, and padding. Here we only add the internal layout + accents. */
 .docsPanel {
   display: grid;
   align-content: start;
-  gap: 12px;
-  padding: 16px;
+  gap: var(--gc-space-3);
 }
 
-.docsPanel svg,
+.docsPanel .gc-card__head {
+  padding-bottom: 0;
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+
+.docsPanel .gc-card__icon,
 .docsCallout svg,
 .checkList svg {
-  color: var(--gc-gold-bright);
+  color: var(--color-product-registry);
+}
+
+.docsPanel .gc-card__title h2 {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-weight: var(--gc-weight-semibold);
+  font-size: var(--gc-text-md);
+  color: var(--color-text-bright);
 }
 
 .docsPanel p {
   margin: 0;
-  color: var(--ink-muted);
+  color: var(--color-text-muted);
   line-height: 1.55;
 }
 
 .docsSection {
   display: grid;
-  gap: 16px;
+  gap: var(--gc-space-4);
   min-width: 0;
-  border-top: 1px solid var(--line);
-  padding-top: 24px;
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--gc-space-6);
 }
 
 .docsSection > *,
@@ -71,24 +74,43 @@
   min-width: 0;
 }
 
+.sectionTitle {
+  display: grid;
+  gap: var(--gc-space-1);
+}
+
+.sectionTitle h2,
+.docsSection > div > h2 {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-weight: var(--gc-weight-semibold);
+  font-size: var(--gc-text-xl);
+  color: var(--color-text-bright);
+}
+
 .docsCallout {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 14px;
+  gap: var(--gc-space-4);
   max-width: 920px;
-  padding: 16px;
 }
 
 .docsCallout p {
   margin: 0;
-  color: var(--ink-muted);
+  color: var(--color-text-muted);
   line-height: 1.58;
+}
+
+.mutedText {
+  margin: 0;
+  color: var(--color-text-muted);
+  line-height: 1.6;
 }
 
 .stepList {
   display: grid;
   max-width: 980px;
-  gap: 10px;
+  gap: var(--gc-space-3);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -98,11 +120,11 @@
 .stepList li {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: rgba(169, 206, 255, 0.04);
-  padding: 14px;
+  gap: var(--gc-space-1) var(--gc-space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+  background: var(--color-surface);
+  padding: var(--gc-space-4);
   counter-increment: docs-step;
 }
 
@@ -111,37 +133,37 @@
   width: 30px;
   height: 30px;
   place-items: center;
-  border: 1px solid rgba(242, 217, 149, 0.42);
-  border-radius: var(--radius);
-  background: rgba(242, 217, 149, 0.08);
-  color: var(--gc-gold-bright);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-surface);
+  background: var(--color-bg-inset);
+  color: var(--color-product-registry);
   content: counter(docs-step);
-  font-family: var(--font-mono);
+  font-family: var(--font-code);
   font-size: 0.82rem;
   grid-row: 1 / span 2;
 }
 
 .stepList strong {
-  color: var(--ink);
+  color: var(--color-text-primary);
 }
 
 .stepList span {
-  color: var(--ink-muted);
+  color: var(--color-text-muted);
   line-height: 1.5;
 }
 
 .twoColumnDocs {
   grid-template-columns: minmax(220px, 0.38fr) minmax(0, 1fr);
   align-items: start;
-  gap: 22px;
+  gap: var(--gc-space-6);
 }
 
 .checkList {
   display: grid;
-  gap: 10px;
+  gap: var(--gc-space-3);
   margin: 0;
   padding: 0;
-  color: var(--ink-muted);
+  color: var(--color-text-muted);
   line-height: 1.5;
   list-style: none;
 }
@@ -149,7 +171,7 @@
 .checkList li {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
+  gap: var(--gc-space-2);
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -159,46 +181,48 @@
 }
 
 .checkList code,
-.docsHero code,
 .docsSection code {
-  color: var(--gc-blue-bright);
+  color: var(--color-accent-text);
   overflow-wrap: anywhere;
 }
 
 .docsDefinitionList {
   display: grid;
-  gap: 10px;
+  gap: var(--gc-space-3);
   margin: 0;
 }
 
 .docsDefinitionList div {
   display: grid;
   grid-template-columns: minmax(160px, 0.34fr) minmax(0, 1fr);
-  gap: 12px;
-  border-bottom: 1px solid var(--line);
-  padding-bottom: 10px;
+  gap: var(--gc-space-3);
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: var(--gc-space-3);
 }
 
 .docsDefinitionList dt {
-  color: var(--ink-muted);
+  color: var(--color-text-muted);
 }
 
 .docsDefinitionList dd {
   margin: 0;
-  color: var(--ink);
+  color: var(--color-text-primary);
   overflow-wrap: anywhere;
 }
 
+/* e2e hook: `.docsCode code` is filtered for the literal publish command. Keep
+   the class on the <pre>; the code block is token-styled (mono font + inset bg). */
 .docsCode {
   min-width: 0;
   max-width: 100%;
   overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
   margin: 0;
-  padding: 14px;
-  background: rgba(4, 8, 14, 0.95);
-  color: var(--gc-blue-bright);
+  padding: var(--gc-space-4);
+  background: var(--color-bg-inset);
+  color: var(--color-accent-text);
+  font-family: var(--font-code);
   font-size: 0.84rem;
   line-height: 1.5;
 }
@@ -208,4 +232,17 @@
   width: max-content;
   min-width: 100%;
   white-space: pre;
+  font-family: var(--font-code);
+  color: inherit;
+}
+
+@media (max-width: 720px) {
+  .docsGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .twoColumnDocs {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--gc-space-3);
+  }
 }

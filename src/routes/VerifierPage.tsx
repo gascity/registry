@@ -7,69 +7,73 @@ import {
   RotateCcw,
   ShieldCheck,
 } from "lucide-react";
+import { AppPage, Button, Card, CardHeader, Eyebrow, Text } from "@gascity/ui";
 import { GITHUB_APP_INSTALL_URL } from "../lib/links";
-import { withBase } from "../lib/base";
 
 export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => void }) {
   return (
-    <main className="docsPage">
-      <section className="docsHero">
-        <p className="eyebrow">GitHub App verifier</p>
-        <h1>Pack Ownership Verification</h1>
-        <p>
-          Verification connects a registry pack to the canonical GitHub repository that publishes
-          its source. It is intentionally narrow: prove repository control, store stable IDs, and
-          discard temporary GitHub credentials.
-        </p>
-        <div className="docsActions">
-          <a className="iconTextButton primary" href={GITHUB_APP_INSTALL_URL} rel="noreferrer">
-            <GitBranch size={16} aria-hidden="true" />
-            Install verifier
-            <ExternalLink size={15} aria-hidden="true" />
-          </a>
-          <a
-            className="smallMutedButton"
-            href={withBase("/publish")}
-            onClick={(event) => {
-              event.preventDefault();
-              navigateTo("/publish");
+    <AppPage
+      className="docsPage"
+      eyebrow="Registry · Verification"
+      title="Pack Ownership Verification"
+      subtitle="Verification connects a registry pack to the canonical GitHub repository that publishes its source. It is intentionally narrow: prove repository control, store stable IDs, and discard temporary GitHub credentials."
+      actions={
+        <>
+          <Button
+            accent
+            iconStart={<GitBranch size={16} aria-hidden="true" />}
+            onClick={() => {
+              window.location.href = GITHUB_APP_INSTALL_URL;
             }}
           >
+            Install verifier
+            <ExternalLink size={15} aria-hidden="true" />
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => navigateTo("/publish")}
+          >
             Publish a pack
-          </a>
-        </div>
-      </section>
-
+          </Button>
+        </>
+      }
+    >
       <section className="docsGrid" aria-label="Verification guarantees">
-        <article className="docsPanel">
-          <ShieldCheck size={22} aria-hidden="true" />
-          <h2>What It Proves</h2>
-          <p>
+        <Card variant="surface" className="docsPanel">
+          <CardHeader
+            icon={<ShieldCheck size={22} aria-hidden="true" />}
+            title={<h2>What It Proves</h2>}
+          />
+          <Text tone="muted">
             The signed-in Gas City user can authorize GitHub and has admin access to the source
             repository through the installed Registry Verifier app.
-          </p>
-        </article>
-        <article className="docsPanel">
-          <Database size={22} aria-hidden="true" />
-          <h2>What We Store</h2>
-          <p>
+          </Text>
+        </Card>
+        <Card variant="surface" className="docsPanel">
+          <CardHeader
+            icon={<Database size={22} aria-hidden="true" />}
+            title={<h2>What We Store</h2>}
+          />
+          <Text tone="muted">
             The registry stores immutable GitHub owner and repository IDs, repository display names,
             verification time, and the local publisher mapping. User access tokens are not retained.
-          </p>
-        </article>
-        <article className="docsPanel">
-          <RotateCcw size={22} aria-hidden="true" />
-          <h2>What Revokes It</h2>
-          <p>
+          </Text>
+        </Card>
+        <Card variant="surface" className="docsPanel">
+          <CardHeader
+            icon={<RotateCcw size={22} aria-hidden="true" />}
+            title={<h2>What Revokes It</h2>}
+          />
+          <Text tone="muted">
             GitHub installation webhooks remove ownership records when the app is uninstalled from a
             repository or repository access is removed from the app installation.
-          </p>
-        </article>
+          </Text>
+        </Card>
       </section>
 
       <section className="docsSection">
         <div className="sectionTitle">
-          <p className="eyebrow">Flow</p>
+          <Eyebrow>Flow</Eyebrow>
           <h2>How Verification Works</h2>
         </div>
         <ol className="stepList">
@@ -102,7 +106,7 @@ export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => voi
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Security boundaries</p>
+          <Eyebrow>Security boundaries</Eyebrow>
           <h2>What The Verifier Does Not Do</h2>
         </div>
         <ul className="checkList">
@@ -123,7 +127,7 @@ export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => voi
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Prerequisites</p>
+          <Eyebrow>Prerequisites</Eyebrow>
           <h2>Before You Verify</h2>
         </div>
         <ul className="checkList">
@@ -144,7 +148,7 @@ export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => voi
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <p className="eyebrow">Public metadata</p>
+          <Eyebrow>Public metadata</Eyebrow>
           <h2>Verifier App Values</h2>
         </div>
         <dl className="docsDefinitionList">
@@ -162,6 +166,6 @@ export function VerifierPage({ navigateTo }: { navigateTo: (path: string) => voi
           </div>
         </dl>
       </section>
-    </main>
+    </AppPage>
   );
 }

@@ -1,6 +1,7 @@
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { ProductShell, ShellFrame } from "@gascity/shell";
+import { ProductTheme } from "@gascity/ui";
 import { registryManifest, registrySubNav } from "./lib/manifest";
 import { isEmbedded } from "./lib/embed";
 import { stripBase, withBase } from "./lib/base";
@@ -95,21 +96,17 @@ function App() {
     // Embedded in the apex: render only registry's window (a chromeless
     // ProductShell sub-nav). The apex owns the outer strip + rail, so rendering
     // our own ShellFrame here would nest a second full cockpit inside the apex.
-    if (isEmbedded()) {
-      return (
-        <ProductShell
-          items={registrySubNav(auth.user?.role)}
-          activePath={activePath}
-          onNavigate={navigateTo}
-          ariaLabel="Registry sections"
-        >
-          {children}
-        </ProductShell>
-      );
-    }
-
     // Standalone site: the full cockpit chrome + the public footer.
-    return (
+    const inner = isEmbedded() ? (
+      <ProductShell
+        items={registrySubNav(auth.user?.role)}
+        activePath={activePath}
+        onNavigate={navigateTo}
+        ariaLabel="Registry sections"
+      >
+        {children}
+      </ProductShell>
+    ) : (
       <ShellFrame
         manifest={registryManifest(auth.user?.role)}
         identity={{
@@ -126,6 +123,8 @@ function App() {
         <PrimaryFooter navigateTo={navigateTo} />
       </ShellFrame>
     );
+
+    return <ProductTheme product="registry">{inner}</ProductTheme>;
   };
 
   if (route.kind === "account") {

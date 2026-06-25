@@ -1,4 +1,13 @@
-import { AlertTriangle, Box, CheckCircle2, Loader2 } from "lucide-react";
+import { Box } from "lucide-react";
+import {
+  EmptyState as UIEmptyState,
+  ErrorState,
+  Spinner,
+  StatTile,
+  StatusBadge as UIStatusBadge,
+  Text,
+  type StateStatusMap,
+} from "@gascity/ui";
 import {
   categoryForPack,
   latestActiveRelease,
@@ -13,13 +22,12 @@ export type CatalogStatus =
   | { state: "ready"; catalog: RegistryCatalogState }
   | { state: "error"; message: string };
 
+/** Pack release state → Badge status. Active releases read success; a pack with
+ *  no active release (everything withdrawn) reads warn. */
+const StateStatusMap: StateStatusMap = { active: "success", withdrawn: "warn" };
+
 export function Metric({ value, label }: { value: number | string; label: string }) {
-  return (
-    <div>
-      <strong>{value}</strong>
-      <span>{label}</span>
-    </div>
-  );
+  return <StatTile label={label} value={value} />;
 }
 
 export function PackIcon({ pack }: { pack: CatalogPack }) {
@@ -33,30 +41,21 @@ export function PackIcon({ pack }: { pack: CatalogPack }) {
 }
 
 export function StatusBadge({ pack }: { pack: CatalogPack }) {
-  const latest = latestActiveRelease(pack);
-  if (!latest) {
-    return (
-      <span className="statusBadge warning">
-        <AlertTriangle size={13} aria-hidden="true" />
-        Withdrawn
-      </span>
-    );
-  }
+  const state = latestActiveRelease(pack) ? "active" : "withdrawn";
   return (
-    <span className="statusBadge">
-      <CheckCircle2 size={13} aria-hidden="true" />
-      Active
-    </span>
+    <UIStatusBadge state={state} map={StateStatusMap}>
+      {state === "active" ? "Active" : "Withdrawn"}
+    </UIStatusBadge>
   );
 }
 
-export function EmptyState({ title, body }: { title: string; body: string }) {
+export function EmptyState({ title, description }: { title: string; description: string }) {
   return (
-    <div className="emptyState">
-      <Box size={24} aria-hidden="true" />
-      <strong>{title}</strong>
-      <p>{body}</p>
-    </div>
+    <UIEmptyState
+      icon={<Box size={24} aria-hidden="true" />}
+      title={title}
+      description={description}
+    />
   );
 }
 
@@ -64,17 +63,14 @@ export function CatalogLoadState({ catalogStatus }: { catalogStatus: CatalogStat
   if (catalogStatus.state === "loading") {
     return (
       <div className="inlineState">
-        <Loader2 className="spin" size={18} aria-hidden="true" />
-        <span>Reading Gas City registry catalog...</span>
+        <Spinner size="sm" label={null} />
+        <Text as="span" tone="muted">Reading Gas City registry catalog...</Text>
       </div>
     );
   }
   if (catalogStatus.state === "error") {
     return (
-      <div className="inlineState error">
-        <AlertTriangle size={18} aria-hidden="true" />
-        <span>{catalogStatus.message}</span>
-      </div>
+      <ErrorState compact title="Couldn’t load the catalog" message={catalogStatus.message} />
     );
   }
   return null;

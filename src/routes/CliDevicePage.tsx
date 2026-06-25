@@ -1,5 +1,14 @@
 import { CheckCircle2, Terminal, XCircle } from "lucide-react";
 import { useMemo, useState } from "react";
+import {
+  AppPage,
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  Input,
+  Text,
+} from "@gascity/ui";
 import { apiRequest, type AuthState } from "../lib/api";
 
 export function CliDevicePage({
@@ -19,23 +28,24 @@ export function CliDevicePage({
 
   if (!auth.user) {
     return (
-      <main className="accountPage">
-        <section className="signInPromptInline large">
-          <Terminal size={24} />
-          <strong>Sign in to approve CLI access.</strong>
-          <p>Enter the device code shown in your terminal after signing in.</p>
-          <div className="promptActions">
-            {auth.devAuthEnabled ? (
-              <button className="iconTextButton" type="button" onClick={devSignIn}>
-                Dev sign in
-              </button>
-            ) : null}
-            <button className="iconTextButton primary" type="button" onClick={signIn}>
-              Sign in
-            </button>
-          </div>
-        </section>
-      </main>
+      <div className="accountPage">
+        <EmptyState
+          className="signInPromptInline large"
+          icon={<Terminal size={24} />}
+          title="Sign in to approve CLI access."
+          description="Enter the device code shown in your terminal after signing in."
+          action={
+            <div className="promptActions">
+              {auth.devAuthEnabled ? (
+                <Button variant="secondary" onClick={devSignIn}>
+                  Dev sign in
+                </Button>
+              ) : null}
+              <Button onClick={signIn}>Sign in</Button>
+            </div>
+          }
+        />
+      </div>
     );
   }
 
@@ -62,48 +72,52 @@ export function CliDevicePage({
   };
 
   return (
-    <main className="accountPage">
-      <header className="accountHeader">
-        <p className="eyebrow">CLI device login</p>
-        <h1>Approve CLI access</h1>
-        <p>Signed in as @{auth.user.handle}. Approval creates a revocable registry API token.</p>
-      </header>
-
-      <section className="accountPanel cliAuthPanel">
+    <AppPage
+      className="accountPage"
+      eyebrow="CLI device login"
+      title="Approve CLI access"
+      subtitle={`Signed in as @${auth.user.handle}. Approval creates a revocable registry API token.`}
+    >
+      <Card variant="panel" className="cliAuthPanel">
+        <CardHeader title="Device login" icon={<Terminal size={16} />} />
         <form
           onSubmit={(event) => {
             event.preventDefault();
             void submit("approve");
           }}
         >
-          <label>
-            <span>Device code</span>
-            <input
-              value={userCode}
-              onChange={(event) => setUserCode(event.target.value.toUpperCase())}
-              placeholder="ABCD-2345"
-              autoFocus
-            />
-          </label>
+          <Input
+            label="Device code"
+            value={userCode}
+            onChange={(event) => setUserCode(event.target.value.toUpperCase())}
+            placeholder="ABCD-2345"
+            autoFocus
+          />
           <div className="promptActions">
-            <button className="iconTextButton primary" type="submit" disabled={isWorking}>
-              <CheckCircle2 size={15} />
+            <Button type="submit" iconStart={<CheckCircle2 size={15} />} loading={isWorking}>
               {isWorking ? "Approving" : "Approve"}
-            </button>
-            <button
-              className="iconTextButton"
-              type="button"
+            </Button>
+            <Button
+              variant="secondary"
+              iconStart={<XCircle size={15} />}
               disabled={isWorking}
               onClick={() => void submit("deny")}
             >
-              <XCircle size={15} />
               Deny
-            </button>
+            </Button>
           </div>
         </form>
-        {notice ? <p className="formNotice">{notice}</p> : null}
-        {error ? <p className="formError" role="alert">{error}</p> : null}
-      </section>
-    </main>
+        {notice ? (
+          <Text className="formNotice" tone="muted">
+            {notice}
+          </Text>
+        ) : null}
+        {error ? (
+          <Text className="formError" role="alert">
+            {error}
+          </Text>
+        ) : null}
+      </Card>
+    </AppPage>
   );
 }

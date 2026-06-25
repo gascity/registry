@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { PanelProvider } from "@gascity/panel-sdk";
-import "@gascity/shell/styles.css"; // shared product chrome (pulls in @gascity/tokens)
+import "@gascity/ui/app.css"; // single composed stylesheet: ui + shell chrome + tokens
 import App from "./App";
 import { initOpenPanel } from "./lib/openpanel";
 
