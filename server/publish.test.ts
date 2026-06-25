@@ -81,19 +81,84 @@ describe("file-backed publish requests", () => {
         requestedName: "example-pack",
         requestedVersion: "1.2.3",
       };
-      const first = await store.createPublishRequest(user.id, input);
-      const second = await store.createPublishRequest(user.id, input);
+      const first = await store.createPublishRequest(user.id, input, "web_session");
+      const second = await store.createPublishRequest(user.id, input, "web_session");
 
       expect(second.id).toBe(first.id);
       expect(second.status).toBe("pending_validation");
+      expect(second.submissionMethod).toBe("web_session");
       expect(await store.listAccountPublishRequests(user.id)).toHaveLength(1);
 
       await expect(
-        store.createPublishRequest(user.id, {
-          ...input,
-          commit: "fedcba9876543210fedcba9876543210fedcba98",
-        }),
+        store.createPublishRequest(
+          user.id,
+          {
+            ...input,
+            commit: "fedcba9876543210fedcba9876543210fedcba98",
+          },
+          "web_session",
+        ),
       ).rejects.toBeInstanceOf(StoreConflictError);
+    } finally {
+      await store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("repo ownership escape hatch (file store)", () => {
+  test("binds to the repo the user personally verified, not org-wide publisher membership", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "registry-ownership-"));
+    const store = createStore(undefined, join(dir, "registry.local.json"));
+    try {
+      await store.init();
+      const maintainer = await store.ensureUser({
+        subject: "m",
+        gasCityUserId: "gcu_m",
+        handle: "maintainer",
+        displayName: "Maintainer",
+      });
+      const teammate = await store.ensureUser({
+        subject: "t",
+        gasCityUserId: "gcu_t",
+        handle: "teammate",
+        displayName: "Teammate",
+      });
+
+      // repo-a and repo-b share one GitHub owner (owner_1) => one publisher, so both users
+      // become members of the same publisher. Ownership must still be per-repo, per-user.
+      await store.upsertVerifiedPackOwnership(maintainer.id, {
+        packKey: "org--repo-a",
+        sourceUrl: "https://github.com/org/repo-a/tree/main",
+        githubRepositoryId: "repo_a",
+        githubRepositoryFullName: "org/repo-a",
+        githubRepositoryName: "repo-a",
+        githubOwnerId: "owner_1",
+        githubOwnerLogin: "org",
+        githubOwnerType: "Organization",
+        verificationMethod: "github_app_user_token",
+      });
+      await store.upsertVerifiedPackOwnership(teammate.id, {
+        packKey: "org--repo-b",
+        sourceUrl: "https://github.com/org/repo-b/tree/main",
+        githubRepositoryId: "repo_b",
+        githubRepositoryFullName: "org/repo-b",
+        githubRepositoryName: "repo-b",
+        githubOwnerId: "owner_1",
+        githubOwnerLogin: "org",
+        githubOwnerType: "Organization",
+        verificationMethod: "github_app_user_token",
+      });
+
+      // The maintainer proved repo-a (case-insensitive match)...
+      expect(await store.hasVerifiedRepoOwnership(maintainer.id, "org/repo-a")).toBe(true);
+      expect(await store.hasVerifiedRepoOwnership(maintainer.id, "ORG/REPO-A")).toBe(true);
+      // ...but NOT repo-b, which a teammate onboarded under the same org/publisher. This is
+      // the org-wide-membership escalation the gate must not permit.
+      expect(await store.hasVerifiedRepoOwnership(maintainer.id, "org/repo-b")).toBe(false);
+      expect(await store.hasVerifiedRepoOwnership(teammate.id, "org/repo-b")).toBe(true);
+      // A user who verified nothing is never authorized.
+      expect(await store.hasVerifiedRepoOwnership("usr_nobody", "org/repo-a")).toBe(false);
     } finally {
       await store.close();
       await rm(dir, { recursive: true, force: true });
@@ -111,12 +176,34 @@ describe("postgres publish request queries", () => {
     expect(createPublishRequestBody).toBeTruthy();
     expect(createPublishRequestBody).toContain("WHERE pack_publish_requests.requested_name =");
     expect(createPublishRequestBody).toContain("AND pack_publish_requests.requested_version =");
+    // Dedup must be scoped to the submitter so a user cannot occupy another's slot.
+    expect(createPublishRequestBody).toContain("AND pack_publish_requests.submitter_user_id =");
     expect(createPublishRequestBody).toContain("AND pack_publish_requests.status <> 'rejected'");
     expect(createPublishRequestBody).toContain("ORDER BY pack_publish_requests.created_at DESC");
     expect(createPublishRequestBody).not.toMatch(/\bWHERE requested_name =/);
     expect(createPublishRequestBody).not.toMatch(/\bAND requested_version =/);
     expect(createPublishRequestBody).not.toMatch(/\bAND status <> 'rejected'/);
     expect(createPublishRequestBody).not.toMatch(/\bORDER BY created_at DESC/);
+  });
+
+  test("persists submission_method and audits the ownership override on approve", async () => {
+    const source = await readFile(new URL("./store.ts", import.meta.url), "utf8");
+
+    const createBody = source.match(
+      /async createPublishRequest\([\s\S]*?\n  async getPublishRequest/,
+    )?.[0];
+    expect(createBody).toBeTruthy();
+    // submission_method is persisted from the server-derived param, never the body.
+    expect(createBody).toContain("submission_method");
+    expect(createBody).toContain("${submissionMethod}");
+
+    const approveBody = source.match(
+      /async approvePublishRequest\([\s\S]*?\n  async rejectPublishRequest/,
+    )?.[0];
+    expect(approveBody).toBeTruthy();
+    expect(approveBody).toContain('"publish_request.approve"');
+    // The audited justification for a claim-only override is folded into the approve audit.
+    expect(approveBody).toContain("ownershipOverrideReason: options?.ownershipOverrideReason");
   });
 });
 
@@ -233,13 +320,17 @@ describe("dynamic aggregate rendering", () => {
         displayName: "Admin",
       });
       admin.role = "admin";
-      const request = await store.createPublishRequest(user.id, {
-        repoUrl: "https://github.com/gastownhall/gascity-packs",
-        commit,
-        packPath: "packs/example",
-        requestedName: "example-pack",
-        requestedVersion: "1.2.3",
-      });
+      const request = await store.createPublishRequest(
+        user.id,
+        {
+          repoUrl: "https://github.com/gastownhall/gascity-packs",
+          commit,
+          packPath: "packs/example",
+          requestedName: "example-pack",
+          requestedVersion: "1.2.3",
+        },
+        "web_session",
+      );
       await store.markPublishRequestValidated(request.id, {
         name: "example-pack",
         description: "Example direct pack.",
