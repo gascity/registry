@@ -1,10 +1,12 @@
 name: image
-# Build + push the registry server image to GHCR. registry.gascity.com runs on the
-# identity-v0 product cluster; its Deployment (gascity/infra:
-# identity-v0/flux/apps/registry/registry.yaml) pins ghcr.io/gascity/gascity-registry
-# by @sha256. This is HUMAN-GATED (like accounts): on push to main CI publishes the
-# image, then a human bumps the pinned digest in a deploy(...) PR and Flux rolls it.
-# PRs build-only to validate the Dockerfile; pushes to main publish.
+# Build + push the registry server image to GHCR — TWO variants from one Dockerfile:
+#   * standalone (REGISTRY_WEB_BASE=/)        -> :main/:sha/:latest  -> registry.gascity.com
+#   * apex panel (REGISTRY_WEB_BASE=/registry/) -> :apex-* tags      -> works.gascity.com/registry/
+# Both push to the SAME (repo-linked) ghcr.io/gascity/gascity-registry package. The apex
+# dist emits /registry/assets/* and the server derives mountBase=/registry from it.
+# identity-v0 Deployments (gascity/infra: flux/apps/registry/registry.yaml) pin each by
+# @sha256. HUMAN-GATED (like accounts): on push to main CI publishes; a human bumps the
+# pinned digests in a deploy(...) PR and Flux rolls them. PRs build-only to validate.
 on:
   push:
     branches: [main]
@@ -65,9 +67,45 @@ jobs:
 
       # Surface the immutable digest so a human can pin it in the infra deploy PR.
       - if: github.event_name != 'pull_request'
-        name: Pinnable digest
+        name: Pinnable digest (standalone)
         run: |
-          echo "Pin this in gascity/infra identity-v0/flux/apps/registry/registry.yaml:" >> "$GITHUB_STEP_SUMMARY"
+          echo "STANDALONE (registry.gascity.com) — pin in registry.yaml (registry):" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "image: ghcr.io/gascity/gascity-registry@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # --- Apex panel variant: same Dockerfile, REGISTRY_WEB_BASE=/registry/ so the dist
+      # emits /registry/assets/* and the server derives mountBase=/registry (cookie Path,
+      # OIDC redirect_uri, GH callback all become /registry-prefixed). Framed same-origin at
+      # works.gascity.com/registry/. The Dockerfile's grep guard fails the build if the apex
+      # assets weren't actually prefixed (catches a dropped build-arg = the asset-escape bug).
+      - id: apex-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/gascity/gascity-registry
+          tags: |
+            type=raw,value=apex-main,enable={{is_default_branch}}
+            type=sha,prefix=apex-sha-,format=long
+            type=raw,value=apex-latest,enable={{is_default_branch}}
+
+      - id: apex-build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            REGISTRY_WEB_BASE=/registry/
+          tags: ${{ steps.apex-meta.outputs.tags }}
+          labels: ${{ steps.apex-meta.outputs.labels }}
+          secrets: |
+            gh_token=${{ secrets.GITHUB_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - if: github.event_name != 'pull_request'
+        name: Pinnable digest (apex)
+        run: |
+          echo "APEX (works.gascity.com/registry/) — pin in registry.yaml (registry-apex):" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "image: ghcr.io/gascity/gascity-registry@${{ steps.apex-build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
