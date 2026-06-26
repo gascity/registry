@@ -108,6 +108,10 @@ export function createRegistryFetchHandler(dependencies: RegistryAppDependencies
         response = await serveRuntimeRegistryToml();
       } else if (request.method === "GET" && url.pathname === "/catalog.json") {
         response = await serveRuntimeCatalogJson();
+      } else if (request.method === "GET" && url.pathname === "/staff") {
+        // Internal staff entry: straight to Gas City SSO (kc_idp_hint=staff IdP). Not linked
+        // from the product UI — staff bookmark it; the customer login stays GitHub-only.
+        response = await startLogin(request, config, { staff: true });
       } else if (url.pathname.startsWith("/api/")) {
         response = await handleApi(request);
       } else {

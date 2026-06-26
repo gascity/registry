@@ -15,6 +15,10 @@ export type ServerConfig = {
     clientSecret: string;
     gasCityUserIdClaim: string;
     gasCityAccountIdClaim?: string;
+    // kc_idp_hint pinned for the default product login (customers skip the IdP chooser and go
+    // straight to this IdP) and for the /staff entry. Unset = show the chooser (legacy behavior).
+    idpHint?: string;
+    staffIdpHint?: string;
   };
   workos?: {
     apiBaseUrl: string;
@@ -64,6 +68,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const clientSecret = env.OIDC_CLIENT_SECRET?.trim();
   const gasCityUserIdClaim = env.OIDC_GASCITY_USER_ID_CLAIM?.trim() || "sub";
   const gasCityAccountIdClaim = env.OIDC_GASCITY_ACCOUNT_ID_CLAIM?.trim() || undefined;
+  const idpHint = env.OIDC_IDP_HINT?.trim() || undefined;
+  const staffIdpHint = env.OIDC_STAFF_IDP_HINT?.trim() || undefined;
   const workosApiKey = env.WORKOS_API_KEY?.trim();
   const workosClientId = env.WORKOS_CLIENT_ID?.trim();
   const workosApiBaseUrl = trimTrailingSlash(env.WORKOS_API_BASE_URL?.trim() || "https://api.workos.com");
@@ -84,6 +90,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
           clientSecret,
           gasCityUserIdClaim,
           gasCityAccountIdClaim,
+          idpHint,
+          staffIdpHint,
         }
       : undefined;
   const workos =

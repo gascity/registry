@@ -60,20 +60,26 @@ export function requireCsrf(request: Request, session: SessionRecord | null) {
   }
 }
 
-export async function startLogin(request: Request, config: ServerConfig) {
+export type LoginOptions = { staff?: boolean };
+
+export async function startLogin(request: Request, config: ServerConfig, opts: LoginOptions = {}) {
   if (!config.authProvider) {
     throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
   }
   if (config.authProvider === "workos") return startWorkosLogin(request, config);
-  return startOidcLogin(request, config);
+  return startOidcLogin(request, config, opts);
 }
 
-async function startOidcLogin(request: Request, config: ServerConfig) {
+async function startOidcLogin(request: Request, config: ServerConfig, opts: LoginOptions = {}) {
   if (!config.oidc) {
     throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Registry sign-in is not configured.");
   }
   const url = new URL(request.url);
   const redirectTo = safeRedirectPath(config, url.searchParams.get("redirect"));
+  // Pin the IdP so the customer login skips Keycloak's chooser entirely (straight to GitHub),
+  // and /staff (or ?idp=staff) goes straight to Gas City SSO. Unset hints = legacy chooser.
+  const wantStaff = opts.staff || url.searchParams.get("idp") === "staff";
+  const idpHint = wantStaff ? config.oidc.staffIdpHint : config.oidc.idpHint;
   const state: OAuthState = {
     state: randomToken(18),
     nonce: randomToken(18),
@@ -91,6 +97,7 @@ async function startOidcLogin(request: Request, config: ServerConfig) {
   authorizationUrl.searchParams.set("nonce", state.nonce);
   authorizationUrl.searchParams.set("code_challenge", pkceChallenge(state.codeVerifier));
   authorizationUrl.searchParams.set("code_challenge_method", "S256");
+  if (idpHint) authorizationUrl.searchParams.set("kc_idp_hint", idpHint);
 
   const headers = new Headers();
   appendCookie(headers, oauthCookie, signValue(JSON.stringify(state), config.sessionSecret), {
