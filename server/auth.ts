@@ -213,7 +213,13 @@ async function finishOidcLogin(config: ServerConfig, code: string, oauthState: O
   const userInfo = tokenPayload.access_token
     ? await fetchUserInfo(discovery, tokenPayload.access_token)
     : {};
-  return identityFromClaims({ ...claims, ...userInfo }, config);
+  const identity = identityFromClaims({ ...claims, ...userInfo }, config);
+  // realm_access is privilege-bearing (-> registry admin). userInfo is merged in for richer
+  // profile fields, but it must NOT be able to assert authorization: recompute assertedAdmin
+  // from the cryptographically VERIFIED id token alone, so only a signed, issuer/audience-pinned
+  // token can grant staff — never a userinfo response.
+  identity.assertedAdmin = realmRoles(claims).includes(STAFF_REALM_ROLE);
+  return identity;
 }
 
 async function finishWorkosLogin(request: Request, config: ServerConfig, code: string) {
