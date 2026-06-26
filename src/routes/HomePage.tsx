@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import {
   AppPage,
   Card,
-  CardHeader,
   Eyebrow,
   Input,
   SegmentedControl,
@@ -204,10 +203,9 @@ export function HomePage({
             className="endpointPanel"
             aria-label="CLI registry endpoint"
           >
-            <CardHeader eyebrow="CLI endpoint" title="Registry endpoint" />
+            <Eyebrow>CLI endpoint</Eyebrow>
             <code>{registryEndpoint}</code>
             <CopyButton text={registryEndpoint} ariaLabel="Copy registry TOML endpoint" />
-            <p>Use this URL anywhere `gc` expects a pack registry.</p>
           </Card>
         </section>
 
