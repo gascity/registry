@@ -96,7 +96,9 @@ async function startOidcLogin(request: Request, config: ServerConfig) {
   appendCookie(headers, oauthCookie, signValue(JSON.stringify(state), config.sessionSecret), {
     httpOnly: true,
     secure: config.isProduction,
-    sameSite: "Lax",
+    // SameSite=None (prod) so the cookie survives the cross-site OAuth callback when the
+    // registry is framed in the apex shell (works.gascity.com/registry). Requires Secure.
+    sameSite: config.isProduction ? "None" : "Lax",
     maxAge: oauthMaxAgeSeconds,
     path: cookiePath(config),
   });
@@ -127,7 +129,9 @@ async function startWorkosLogin(request: Request, config: ServerConfig) {
   appendCookie(headers, oauthCookie, signValue(JSON.stringify(state), config.sessionSecret), {
     httpOnly: true,
     secure: config.isProduction,
-    sameSite: "Lax",
+    // SameSite=None (prod) so the cookie survives the cross-site OAuth callback when the
+    // registry is framed in the apex shell (works.gascity.com/registry). Requires Secure.
+    sameSite: config.isProduction ? "None" : "Lax",
     maxAge: oauthMaxAgeSeconds,
     path: cookiePath(config),
   });
