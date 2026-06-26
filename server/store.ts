@@ -22,6 +22,7 @@ import type {
   PublishRegistryEntry,
   PublishRequestInput,
   PublishRequestRow,
+  PublishSubmissionMethod,
   PublicUser,
   RegistryStore,
   ReviewInput,
@@ -264,6 +265,7 @@ function ownershipFromRows(row: any): PackOwnership {
     verificationStatus: "verified",
     verificationMethod: row.verification_method,
     verifiedAt: row.verified_at ? toIso(row.verified_at) : undefined,
+    verifiedByUserId: row.verified_by_user_id ?? undefined,
     publisher: row.publisher_id
       ? publicPublisher({
           id: row.publisher_id,
@@ -315,6 +317,7 @@ function publishRequestFromRows(row: any, user: PublicUser): PublishRequestRow {
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
     submittedBy: user,
+    submissionMethod: publishSubmissionMethod(row.submission_method),
   };
 }
 
@@ -326,6 +329,17 @@ function publishRequestStatus(value: unknown): PublishRequestRow["status"] {
     value === "pending_validation"
     ? value
     : "pending_validation";
+}
+
+// Coerce a stored submission method; unknown/legacy/NULL values map to undefined,
+// which the merge gate treats as claim-only (fail-closed — never repo-proven).
+function publishSubmissionMethod(value: unknown): PublishSubmissionMethod | undefined {
+  return value === "web_session" ||
+    value === "api_token" ||
+    value === "github_actions_oidc" ||
+    value === "github_import"
+    ? value
+    : undefined;
 }
 
 function normalizeRegistryEntry(value: unknown): PublishRegistryEntry | undefined {
@@ -648,8 +662,13 @@ export class PostgresRegistryStore implements RegistryStore {
         updated_at timestamptz NOT NULL DEFAULT now()
       )
     `;
+    // Defensive retrofit: the publish-ownership merge gate reads verified_by_user_id, so
+    // guarantee the column exists even on databases whose pack_ownerships predates it.
+    await this.sql`ALTER TABLE pack_ownerships ADD COLUMN IF NOT EXISTS verified_by_user_id text REFERENCES users(id) ON DELETE SET NULL`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_publisher_idx ON pack_ownerships (publisher_id)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_github_repository_idx ON pack_ownerships (github_repository_id)`;
+    // Index the gate's lookup (repo full name + verifier).
+    await this.sql`CREATE INDEX IF NOT EXISTS pack_ownerships_repo_verifier_idx ON pack_ownerships (lower(github_repository_full_name), verified_by_user_id)`;
     await this.sql`
       CREATE TABLE IF NOT EXISTS github_publish_imports (
         id text PRIMARY KEY,
@@ -703,6 +722,9 @@ export class PostgresRegistryStore implements RegistryStore {
     await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS validated_at timestamptz`;
     await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS reviewed_by_user_id text REFERENCES users(id) ON DELETE SET NULL`;
     await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS reviewed_at timestamptz`;
+    // Repo-proof provenance for the publish-approval merge gate. Nullable: rows that
+    // predate this column read back as undefined and are treated as claim-only.
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS submission_method text`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_submitter_idx ON pack_publish_requests (submitter_user_id, created_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_review_idx ON pack_publish_requests (status, created_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_pack_version_idx ON pack_publish_requests (requested_name, requested_version)`;
@@ -1221,6 +1243,20 @@ export class PostgresRegistryStore implements RegistryStore {
     return rows[0] ? ownershipFromRows(rows[0]) : null;
   }
 
+  async hasVerifiedRepoOwnership(userId: string, repoFullName: string): Promise<boolean> {
+    // Bind to the repo THIS user personally verified (verified_by_user_id), not org-wide
+    // publisher membership — proving admin on one repo must not authorize publishing a
+    // sibling repo of the same org that a teammate onboarded.
+    const rows = await this.sql`
+      SELECT 1
+      FROM pack_ownerships
+      WHERE lower(github_repository_full_name) = lower(${repoFullName})
+        AND verified_by_user_id = ${userId}
+      LIMIT 1
+    `;
+    return rows.length > 0;
+  }
+
   async upsertVerifiedPackOwnership(
     userId: string,
     input: VerifiedPackOwnershipInput,
@@ -1339,8 +1375,13 @@ export class PostgresRegistryStore implements RegistryStore {
   async createPublishRequest(
     userId: string,
     input: PublishRequestInput,
+    submissionMethod: PublishSubmissionMethod,
   ): Promise<PublishRequestRow> {
     const normalized = normalizePublishRequestInput(input);
+    // Dedup is scoped to the submitter: a user's own re-submit is idempotent, but two
+    // different users requesting the same name+version get distinct rows (cross-submitter
+    // collisions are arbitrated by the registry.toml aggregate render at approval time).
+    // This stops one user pre-occupying another's slot and lending their stamp/identity.
     const existing = await this.sql`
       SELECT
         pack_publish_requests.*,
@@ -1354,6 +1395,7 @@ export class PostgresRegistryStore implements RegistryStore {
       JOIN users ON users.id = pack_publish_requests.submitter_user_id
       WHERE pack_publish_requests.requested_name = ${normalized.requestedName}
         AND pack_publish_requests.requested_version = ${normalized.requestedVersion}
+        AND pack_publish_requests.submitter_user_id = ${userId}
         AND pack_publish_requests.status <> 'rejected'
       ORDER BY pack_publish_requests.created_at DESC
       LIMIT 1
@@ -1381,14 +1423,14 @@ export class PostgresRegistryStore implements RegistryStore {
       INSERT INTO pack_publish_requests (
         id, submitter_user_id, status, repo_host, repo_owner, repo_name, repo_full_name,
         repo_url, source_url, pack_path, commit_sha, requested_name, requested_version,
-        requested_ref, requested_description, created_at, updated_at
+        requested_ref, requested_description, submission_method, created_at, updated_at
       )
       VALUES (
         ${newId("publishRequest")}, ${userId}, 'pending_validation', 'github.com',
         ${normalized.repository.owner}, ${normalized.repository.name}, ${normalized.repository.fullName},
         ${normalized.repoUrl}, ${normalized.sourceUrl}, ${normalized.packPath}, ${normalized.commit},
         ${normalized.requestedName}, ${normalized.requestedVersion}, ${normalized.requestedRef ?? null},
-        ${normalized.requestedDescription ?? null}, ${now}, ${now}
+        ${normalized.requestedDescription ?? null}, ${submissionMethod}, ${now}, ${now}
       )
       RETURNING *
     `;
@@ -1398,6 +1440,7 @@ export class PostgresRegistryStore implements RegistryStore {
       repoFullName: normalized.repository.fullName,
       commit: normalized.commit,
       packPath: normalized.packPath,
+      submissionMethod,
     });
     const [user] = await this.sql`SELECT * FROM users WHERE id = ${userId}`;
     return publishRequestFromRows(row, publicUser(user as any));
@@ -1549,7 +1592,11 @@ export class PostgresRegistryStore implements RegistryStore {
     return request;
   }
 
-  async approvePublishRequest(actorUserId: string, id: string): Promise<PublishRequestRow> {
+  async approvePublishRequest(
+    actorUserId: string,
+    id: string,
+    options?: { ownershipOverrideReason?: string },
+  ): Promise<PublishRequestRow> {
     const current = await this.getPublishRequest(id);
     if (!current) throw new StoreValidationError("Publish request not found.");
     if (!current.registryEntry || current.status !== "pending_review") {
@@ -1567,6 +1614,10 @@ export class PostgresRegistryStore implements RegistryStore {
     await this.audit(actorUserId, "publish_request.approve", "publish_request", id, {
       requestedName: current.requestedName,
       requestedVersion: current.requestedVersion,
+      submissionMethod: current.submissionMethod,
+      // Present only when staff approved a claim-only request without repo proof —
+      // the audited justification for the ownership override.
+      ownershipOverrideReason: options?.ownershipOverrideReason,
     });
     const request = await this.getPublishRequest(id);
     if (!request) throw new Error("Publish request not found after approval.");
@@ -2143,6 +2194,17 @@ class FileRegistryStore implements RegistryStore {
     return ownership;
   }
 
+  async hasVerifiedRepoOwnership(userId: string, repoFullName: string): Promise<boolean> {
+    // Mirror of the Postgres check: bind to the repo THIS user personally verified, not
+    // org-wide publisher membership.
+    const target = repoFullName.toLowerCase();
+    for (const ownership of this.ownerships.values()) {
+      if (ownership.sourceRepository?.fullName?.toLowerCase() !== target) continue;
+      if (ownership.verifiedByUserId === userId) return true;
+    }
+    return false;
+  }
+
   async upsertVerifiedPackOwnership(userId: string, input: VerifiedPackOwnershipInput) {
     const existing = this.ownerships.get(input.packKey);
     if (existing && existing.sourceUrl !== input.sourceUrl) {
@@ -2172,6 +2234,7 @@ class FileRegistryStore implements RegistryStore {
       verificationStatus: "verified",
       verificationMethod: input.verificationMethod,
       verifiedAt: new Date().toISOString(),
+      verifiedByUserId: userId,
       publisher,
     };
     this.ownerships.set(input.packKey, ownership);
@@ -2223,7 +2286,11 @@ class FileRegistryStore implements RegistryStore {
     return imported;
   }
 
-  async createPublishRequest(userId: string, input: PublishRequestInput): Promise<PublishRequestRow> {
+  async createPublishRequest(
+    userId: string,
+    input: PublishRequestInput,
+    submissionMethod: PublishSubmissionMethod,
+  ): Promise<PublishRequestRow> {
     const normalized = normalizePublishRequestInput(input);
     const user = this.users.get(userId);
     if (!user) throw new Error("User not found.");
@@ -2232,6 +2299,7 @@ class FileRegistryStore implements RegistryStore {
         (request) =>
           request.requestedName === normalized.requestedName &&
           request.requestedVersion === normalized.requestedVersion &&
+          request.submittedBy.id === userId &&
           request.status !== "rejected",
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
@@ -2258,6 +2326,7 @@ class FileRegistryStore implements RegistryStore {
       createdAt: now,
       updatedAt: now,
       submittedBy: user,
+      submissionMethod,
     };
     this.publishRequests.set(request.id, request);
     await this.save();
@@ -2321,7 +2390,14 @@ class FileRegistryStore implements RegistryStore {
     return next;
   }
 
-  async approvePublishRequest(actorUserId: string, id: string) {
+  // The file store keeps no audit_logs (dev/test backend), so the ownership-override
+  // reason is accepted for interface parity but not persisted — the Postgres backend
+  // is the auditable system of record.
+  async approvePublishRequest(
+    actorUserId: string,
+    id: string,
+    _options?: { ownershipOverrideReason?: string },
+  ) {
     const request = this.requirePublishRequest(id);
     if (!request.registryEntry || request.status !== "pending_review") {
       throw new StoreValidationError("Publish request must be validated before approval.");

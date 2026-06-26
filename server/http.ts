@@ -74,6 +74,23 @@ export async function readJsonBody<T>(request: Request, maxBytes = 64 * 1024): P
   }
 }
 
+// Like readJsonBody, but tolerates a missing/empty body (returns {}). Used by
+// endpoints whose body is optional — e.g. approve, where a JSON body is only sent
+// when staff supply an ownership override reason.
+export async function readOptionalJsonBody<T>(request: Request, maxBytes = 64 * 1024): Promise<T> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
+    throw new RequestError(413, "PAYLOAD_TOO_LARGE", "Request body is too large.");
+  }
+  const raw = await request.text();
+  if (!raw.trim()) return {} as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new RequestError(400, "INVALID_JSON", "Request body must be valid JSON.");
+  }
+}
+
 export function assertOrigin(request: Request, config: ServerConfig) {
   if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return;
   const origin = request.headers.get("origin");

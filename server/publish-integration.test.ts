@@ -31,47 +31,62 @@ describe("local registry publish integration", () => {
       const submitter = await harness.signIn("publisher");
       const admin = await harness.signIn("admin", "admin");
 
-      const submitted: PublishRequestRow[] = [];
-      submitted.push(
-        await harness.publishWithSession(
-          submitter,
-          await harness.createPack("web-session", "0.1.0"),
-        ),
-      );
-      submitted.push(
-        await harness.publishWithPersonalToken(
-          submitter,
-          await harness.createPack("personal-token", "0.1.0"),
-        ),
-      );
-      submitted.push(
-        await harness.publishWithCliBrowserToken(
-          submitter,
-          await harness.createPack("cli-browser", "0.1.0"),
-        ),
-      );
-      submitted.push(
-        await harness.publishWithCliDeviceToken(
-          submitter,
-          await harness.createPack("cli-device", "0.1.0"),
-        ),
-      );
-      submitted.push(
+      // Repo-proven paths: the submitter demonstrated control of the source repo at
+      // submit time (GitHub Actions OIDC / GitHub import) — the merge gate approves
+      // them with no override.
+      const repoProven: PublishRequestRow[] = [
         await harness.publishWithGitHubActionsToken(
           await harness.createPack("github-actions", "0.1.0"),
         ),
-      );
-      submitted.push(
         await harness.publishWithGitHubImport(
           submitter,
           await harness.createPack("github-import", "0.1.0"),
         ),
-      );
+      ];
+      expect(repoProven.map((request) => request.submissionMethod)).toEqual([
+        "github_actions_oidc",
+        "github_import",
+      ]);
 
-      for (const request of submitted) {
+      // Claim-only paths: the submitter merely asserts a repo URL + pack name with no
+      // proof of ownership — the merge gate blocks approval unless overridden.
+      const claimOnly: PublishRequestRow[] = [
+        await harness.publishWithSession(submitter, await harness.createPack("web-session", "0.1.0")),
+        await harness.publishWithPersonalToken(
+          submitter,
+          await harness.createPack("personal-token", "0.1.0"),
+        ),
+        await harness.publishWithCliBrowserToken(
+          submitter,
+          await harness.createPack("cli-browser", "0.1.0"),
+        ),
+        await harness.publishWithCliDeviceToken(
+          submitter,
+          await harness.createPack("cli-device", "0.1.0"),
+        ),
+      ];
+      expect(claimOnly.map((request) => request.submissionMethod)).toEqual([
+        "web_session",
+        "api_token",
+        "api_token",
+        "api_token",
+      ]);
+
+      const allSubmitted = [...repoProven, ...claimOnly];
+      for (const request of allSubmitted) {
         expect(request.status).toBe("pending_review");
         expect(request.registryEntry?.release.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
+      }
+
+      // Repo-proven approve straight through.
+      for (const request of repoProven) {
         await harness.approve(admin, request.id);
+      }
+
+      // Claim-only is rejected without an override, then approved with an audited reason.
+      for (const request of claimOnly) {
+        await harness.approveExpectingOwnershipError(admin, request.id);
+        await harness.approve(admin, request.id, `Verified ${request.requestedName} ownership out of band.`);
       }
 
       const registryToml = await harness.publicClient.text("/registry.toml");
@@ -80,8 +95,8 @@ describe("local registry publish integration", () => {
         packs: Array<{ name: string; latest: string; registry: string }>;
       }>("/catalog.json");
 
-      expect(catalog.pack_count).toBe(submitted.length);
-      for (const request of submitted) {
+      expect(catalog.pack_count).toBe(allSubmitted.length);
+      for (const request of allSubmitted) {
         expect(registryToml).toContain(`name = "${request.requestedName}"`);
         expect(catalog.packs).toContainEqual(
           expect.objectContaining({
@@ -95,6 +110,105 @@ describe("local registry publish integration", () => {
       await harness.close();
     }
   });
+
+  test("approves a claim-only publish when the submitter has verified repo ownership", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const submitter = await harness.signIn("repo-owner");
+      const admin = await harness.signIn("admin", "admin");
+
+      // Seed a verified pack-ownership record binding the submitter (as a publisher
+      // member) to the source repo — exactly what the GitHub App ownership-claim flow
+      // writes. The pack key + claim sourceUrl differ from the publish's commit-bearing
+      // sourceUrl on purpose: the gate matches on repo identity, not the release URL.
+      await harness.store.upsertVerifiedPackOwnership(submitter.userId, {
+        packKey: "acme--registry-fixtures-claimed",
+        sourceUrl: `${repoUrl}/tree/main`,
+        githubRepositoryId: "repo_123",
+        githubRepositoryFullName: `${owner}/${repo}`,
+        githubRepositoryName: repo,
+        githubOwnerId: "owner_123",
+        githubOwnerLogin: owner,
+        githubOwnerType: "Organization",
+        verificationMethod: "github_app_user_token",
+      });
+
+      const request = await harness.publishWithPersonalToken(
+        submitter,
+        await harness.createPack("verified-owner-cli", "0.1.0"),
+      );
+      expect(request.submissionMethod).toBe("api_token");
+
+      // No override needed: verified repo ownership authorizes the claim-only publish.
+      const approved = await harness.approve(admin, request.id);
+      expect(approved.status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("a foreign claim-only submission does not capture the repo owner's publish slot", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const attacker = await harness.signIn("squatter");
+      const repoOwner = await harness.signIn("publisher");
+      const admin = await harness.signIn("admin", "admin");
+
+      const pack = await harness.createPack("contested", "0.1.0");
+
+      // Attacker plants a validated claim-only request for the same name+version at the
+      // real repo+commit (validation only reads the public pack.toml, so this succeeds).
+      const planted = await harness.publishWithPersonalToken(attacker, pack);
+      expect(planted.submissionMethod).toBe("api_token");
+
+      // The owner publishes the identical artifact via GitHub import. Submitter-scoped
+      // dedup gives them their OWN repo-proven row instead of collapsing onto the
+      // attacker's claim-only row (which would downgrade the method + poison attribution).
+      const owned = await harness.publishWithGitHubImport(repoOwner, pack);
+      expect(owned.id).not.toBe(planted.id);
+      expect(owned.submissionMethod).toBe("github_import");
+      expect(owned.submittedBy.id).toBe(repoOwner.userId);
+
+      // The owner's repo-proven publish approves with no override; the attacker's planted
+      // claim-only row is still gated.
+      await harness.approve(admin, owned.id);
+      await harness.approveExpectingOwnershipError(admin, planted.id);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("does not let a non-member borrow another publisher's verified ownership", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const repoOwner = await harness.signIn("real-owner");
+      const stranger = await harness.signIn("stranger");
+      const admin = await harness.signIn("admin", "admin");
+
+      // real-owner proves ownership of the repo...
+      await harness.store.upsertVerifiedPackOwnership(repoOwner.userId, {
+        packKey: "acme--registry-fixtures-owned",
+        sourceUrl: `${repoUrl}/tree/main`,
+        githubRepositoryId: "repo_123",
+        githubRepositoryFullName: `${owner}/${repo}`,
+        githubRepositoryName: repo,
+        githubOwnerId: "owner_123",
+        githubOwnerLogin: owner,
+        githubOwnerType: "Organization",
+        verificationMethod: "github_app_user_token",
+      });
+
+      // ...but a stranger who merely points at the same public repo URL is NOT a member
+      // of that publisher, so the ownership escape hatch must not apply.
+      const request = await harness.publishWithPersonalToken(
+        stranger,
+        await harness.createPack("stranger-cli", "0.1.0"),
+      );
+      await harness.approveExpectingOwnershipError(admin, request.id);
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 type TestPack = PublishRequestInput & {
@@ -103,6 +217,7 @@ type TestPack = PublishRequestInput & {
 
 type SignedInClient = TestHttpClient & {
   csrfToken: string;
+  userId: string;
 };
 
 async function createPublishHarness() {
@@ -196,9 +311,9 @@ async function createPublishHarness() {
       redirect: "manual",
     });
     expect(response.status).toBe(302);
-    const me = await client.json<{ csrfToken: string; user: { handle: string } }>("/api/me");
+    const me = await client.json<{ csrfToken: string; user: { id: string; handle: string } }>("/api/me");
     expect(me.user.handle).toBe(handle);
-    return Object.assign(client, { csrfToken: me.csrfToken });
+    return Object.assign(client, { csrfToken: me.csrfToken, userId: me.user.id });
   }
 
   async function publishWithSession(client: SignedInClient, pack: TestPack) {
@@ -309,19 +424,32 @@ async function createPublishHarness() {
     );
   }
 
-  async function approve(client: SignedInClient, requestId: string) {
+  async function approve(client: SignedInClient, requestId: string, ownershipOverrideReason?: string) {
     const approved = await client.json<{ publishRequest: PublishRequestRow }>(
       `/api/publish-requests/${encodeURIComponent(requestId)}/approve`,
       {
         method: "POST",
         csrfToken: client.csrfToken,
-        body: {},
+        body: ownershipOverrideReason ? { ownershipOverrideReason } : {},
       },
     );
     expect(approved.publishRequest.status).toBe("approved");
+    return approved.publishRequest;
+  }
+
+  async function approveExpectingOwnershipError(client: SignedInClient, requestId: string) {
+    const response = await client.request(
+      `/api/publish-requests/${encodeURIComponent(requestId)}/approve`,
+      { method: "POST", csrfToken: client.csrfToken, body: {} },
+    );
+    const text = await response.text();
+    expect(response.status, text).toBe(403);
+    const payload = JSON.parse(text) as { error: { code: string } };
+    expect(payload.error.code).toBe("OWNERSHIP_NOT_VERIFIED");
   }
 
   return {
+    store,
     publicClient,
     createPack,
     signIn,
@@ -332,6 +460,7 @@ async function createPublishHarness() {
     publishWithGitHubActionsToken,
     publishWithGitHubImport,
     approve,
+    approveExpectingOwnershipError,
     async close() {
       server.stop(true);
       await store.close();

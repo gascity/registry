@@ -142,6 +142,10 @@ export type PackOwnership = {
   verificationMethod?: "github_app_user_token" | "manual";
   publisher?: PublisherSummary;
   verifiedAt?: string;
+  // The user who proved control of the source repo for this row. The merge gate's
+  // ownership escape hatch binds to this (per-repo, per-user), NOT org-wide publisher
+  // membership, so proving one repo never authorizes publishing a sibling repo.
+  verifiedByUserId?: string;
 };
 
 export type VerifiedPackOwnershipInput = {
@@ -162,6 +166,17 @@ export type PublishRequestStatus =
   | "pending_review"
   | "approved"
   | "rejected";
+
+// How a publish request was authenticated, derived server-side at submission time
+// (never read from the request body). `github_actions_oidc` and `github_import` are
+// repo-proven — the submitter demonstrated control of the source repo (a verified
+// GitHub Actions OIDC token, or a GitHub App push/admin candidate). `web_session` and
+// `api_token` are claim-only: the submitter merely asserts a repo URL + pack name.
+export type PublishSubmissionMethod =
+  | "web_session"
+  | "api_token"
+  | "github_actions_oidc"
+  | "github_import";
 
 export type GitHubRepositoryRef = {
   host: "github.com";
@@ -263,6 +278,7 @@ export type PublishRequestRow = {
   createdAt: string;
   updatedAt: string;
   submittedBy: PublicUser;
+  submissionMethod?: PublishSubmissionMethod;
 };
 
 export interface RegistryStore {
@@ -307,6 +323,12 @@ export interface RegistryStore {
   listAccountReviews(userId: string): Promise<AccountReview[]>;
   setStar(userId: string, packKey: string, starred: boolean): Promise<{ starred: boolean }>;
   getPackOwnership(packKey: string, sourceUrl: string): Promise<PackOwnership | null>;
+  // True when `userId` personally proved control of `repoFullName` — i.e. a verified
+  // pack-ownership row exists for that repo whose verified_by_user_id is this user.
+  // Binds per-repo + per-user (NOT org-wide publisher membership), and matches on repo
+  // identity rather than the commit-bearing publish sourceUrl, so it authorizes new
+  // releases from a repo the submitter themselves onboarded.
+  hasVerifiedRepoOwnership(userId: string, repoFullName: string): Promise<boolean>;
   upsertVerifiedPackOwnership(
     userId: string,
     input: VerifiedPackOwnershipInput,
@@ -320,7 +342,11 @@ export interface RegistryStore {
     input: GitHubPublishImportCreateInput,
   ): Promise<GitHubPublishImportRow>;
   getGitHubPublishImport(userId: string, id: string): Promise<GitHubPublishImportRow | null>;
-  createPublishRequest(userId: string, input: PublishRequestInput): Promise<PublishRequestRow>;
+  createPublishRequest(
+    userId: string,
+    input: PublishRequestInput,
+    submissionMethod: PublishSubmissionMethod,
+  ): Promise<PublishRequestRow>;
   getPublishRequest(id: string): Promise<PublishRequestRow | null>;
   listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]>;
   listPublishRequests(): Promise<PublishRequestRow[]>;
@@ -330,7 +356,11 @@ export interface RegistryStore {
     entry: PublishRegistryEntry,
   ): Promise<PublishRequestRow>;
   markPublishRequestValidationFailed(id: string, error: string): Promise<PublishRequestRow>;
-  approvePublishRequest(actorUserId: string, id: string): Promise<PublishRequestRow>;
+  approvePublishRequest(
+    actorUserId: string,
+    id: string,
+    options?: { ownershipOverrideReason?: string },
+  ): Promise<PublishRequestRow>;
   rejectPublishRequest(
     actorUserId: string,
     id: string,

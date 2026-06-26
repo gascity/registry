@@ -25,7 +25,7 @@ import { requireCatalogPackSource } from "./catalog";
 import { PublishRequestValidationError, normalizePublishRequestInput } from "./publish";
 import { validatePublishRequestForRegistry } from "./publish-validation";
 import { StoreConflictError, StoreValidationError } from "./store";
-import { RequestError, assertOrigin, errorJson, json, readJsonBody } from "./http";
+import { RequestError, assertOrigin, errorJson, json, readJsonBody, readOptionalJsonBody } from "./http";
 import { enforceRateLimit, withSecurityHeaders } from "./security";
 import {
   githubAppConfigured,
@@ -59,6 +59,7 @@ import type {
   PublishRegistryEntry,
   PublishRequestInput,
   PublishRequestRow,
+  PublishSubmissionMethod,
   ReviewInput,
   SourceRepository,
   SessionRecord,
@@ -456,9 +457,13 @@ async function handleApi(request: Request) {
     }>(request, 8 * 1024);
     const candidate = imported.candidates.find((item) => item.id === body.candidateId);
     if (!candidate) throw new RequestError(422, "VALIDATION_ERROR", "GitHub publish candidate not found.");
+    // Repo-proven: the candidate was discovered from a GitHub App installation where
+    // the authed user holds push/maintain/admin on the source repo, and its repo/commit
+    // come from that verified candidate, not free-form body input.
     const publishRequest = await store.createPublishRequest(
       session!.user.id,
       publishInputFromGitHubCandidate(candidate, body),
+      "github_import",
     );
     return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
   }
@@ -470,7 +475,11 @@ async function handleApi(request: Request) {
     if (actor.kind === "api_token" && actor.token.constraints) {
       assertPublishTokenAllows(actor.token.constraints, body);
     }
-    const publishRequest = await store.createPublishRequest(actor.user.id, body);
+    const publishRequest = await store.createPublishRequest(
+      actor.user.id,
+      body,
+      publishSubmissionMethodForActor(actor),
+    );
     if (url.searchParams.get("validate") === "1" || url.searchParams.get("validate") === "true") {
       return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
     }
@@ -499,8 +508,21 @@ async function handleApi(request: Request) {
     }
     requireRegistryStaff(session);
     if (action === "approve") {
-      await assertPublishRequestCanMerge(publishRequest);
-      return json({ publishRequest: await store.approvePublishRequest(session!.user.id, id) });
+      const approveBody = await readOptionalJsonBody<{ ownershipOverrideReason?: string }>(
+        request,
+        4 * 1024,
+      );
+      const overrideReason =
+        typeof approveBody.ownershipOverrideReason === "string"
+          ? approveBody.ownershipOverrideReason.trim()
+          : "";
+      if (overrideReason.length > 500) {
+        throw new RequestError(422, "VALIDATION_ERROR", "Ownership override reason is too long.");
+      }
+      const decision = await assertPublishRequestCanMerge(publishRequest, overrideReason || undefined);
+      return json({
+        publishRequest: await store.approvePublishRequest(session!.user.id, id, decision),
+      });
     }
     const body = await readJsonBody<{ reason?: string }>(request);
     return json({
@@ -593,6 +615,24 @@ function requirePublishRequestActor(
   throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
 }
 
+// Derive the repo-proof provenance of a /api/publish-requests submission from its
+// trusted auth context (NOT the request body). A github_actions_publish token is minted
+// only after OIDC repo+commit verification; personal tokens and browser sessions are
+// claim-only.
+function publishSubmissionMethodForActor(
+  actor: ReturnType<typeof requirePublishRequestActor>,
+): PublishSubmissionMethod {
+  if (actor.kind === "session") return "web_session";
+  // Only treat a CI token as repo-proven when it carries the OIDC-minted repo+commit
+  // constraints (enforced at submit by assertPublishTokenAllows). A github_actions_publish
+  // token is always minted with constraints; the guard fails closed to claim-only if one
+  // ever isn't, so the repo-proven stamp can never outrun its repo binding.
+  if (actor.token.kind === "github_actions_publish" && actor.token.constraints) {
+    return "github_actions_oidc";
+  }
+  return "api_token";
+}
+
 function assertPublishTokenAllows(
   constraints: ApiTokenPublishConstraints,
   input: PublishRequestInput,
@@ -653,10 +693,41 @@ async function validateAndStorePublishRequest(id: string) {
   }
 }
 
-async function assertPublishRequestCanMerge(publishRequest: Awaited<ReturnType<typeof store.getPublishRequest>>) {
+// The publish-approval merge gate. Returns the audit decision (the consumed ownership
+// override reason, if any) for the caller to thread into approvePublishRequest.
+async function assertPublishRequestCanMerge(
+  publishRequest: Awaited<ReturnType<typeof store.getPublishRequest>>,
+  overrideReason: string | undefined,
+): Promise<{ ownershipOverrideReason?: string }> {
   if (!publishRequest?.registryEntry) {
     throw new RequestError(422, "PUBLISH_NOT_VALIDATED", "Publish request must be validated before approval.");
   }
+
+  // Path-aware ownership gate. Open self-registration turns the approval queue into a
+  // security boundary, so approve requires proof that the submitter controls the source
+  // repo: a repo-proven submission path (GitHub Actions OIDC / GitHub import), a verified
+  // pack-ownership record for the repo, or an explicit audited staff override. An unknown
+  // submission method is treated as claim-only (fail-closed).
+  const method = publishRequest.submissionMethod;
+  const repoProven = method === "github_actions_oidc" || method === "github_import";
+  let ownershipDecision: { ownershipOverrideReason?: string } = {};
+  if (!repoProven) {
+    const ownsRepo = await store.hasVerifiedRepoOwnership(
+      publishRequest.submittedBy.id,
+      publishRequest.repository.fullName,
+    );
+    if (!ownsRepo) {
+      if (!overrideReason) {
+        throw new RequestError(
+          403,
+          "OWNERSHIP_NOT_VERIFIED",
+          "Publish request lacks proof of source-repository ownership. Submit via GitHub Actions or GitHub import, verify pack ownership, or supply an ownershipOverrideReason to override.",
+        );
+      }
+      ownershipDecision = { ownershipOverrideReason: overrideReason };
+    }
+  }
+
   const baseToml = await readRuntimeText("registry.toml");
   const approved = await store.listApprovedPublishRequests();
   try {
@@ -668,6 +739,7 @@ async function assertPublishRequestCanMerge(publishRequest: Awaited<ReturnType<t
     const message = error instanceof Error ? error.message : "Publish request conflicts with the aggregate.";
     throw new RequestError(409, "PUBLISH_CONFLICT", message);
   }
+  return ownershipDecision;
 }
 
 async function serveRuntimeRegistryToml() {
