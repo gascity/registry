@@ -766,6 +766,13 @@ export class PostgresRegistryStore implements RegistryStore {
             handle = COALESCE(NULLIF(handle, ''), ${handle}),
             display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
             avatar_url = ${identity.avatarUrl ?? null},
+            -- Staff entitlement: an SSO-asserted registry-staff role promotes to admin.
+            -- Promote-only and re-checked at the row (race-safe): never downgrades, and never
+            -- overrides a deliberate moderator/admin grant (preserves manual roles + de-escalations).
+            role = CASE
+                     WHEN ${!!identity.assertedAdmin} AND role NOT IN ('admin', 'moderator')
+                     THEN 'admin' ELSE role
+                   END,
             updated_at = ${now}
         WHERE id = ${existing[0].id}
         RETURNING *
@@ -782,7 +789,7 @@ export class PostgresRegistryStore implements RegistryStore {
       VALUES (
         ${id}, ${identity.gasCityUserId}, ${identity.gasCityAccountId ?? null}, ${identity.subject},
         ${identity.email ?? null}, ${uniqueHandle}, ${displayName}, ${identity.avatarUrl ?? null},
-        'user', 'active', ${now}, ${now}
+        ${identity.assertedAdmin ? "admin" : "user"}, 'active', ${now}, ${now}
       )
       RETURNING *
     `;
@@ -1871,6 +1878,12 @@ class FileRegistryStore implements RegistryStore {
         user.gascityUserId = identity.gasCityUserId;
         user.gascityAccountId = identity.gasCityAccountId;
         user.oidcSubject = identity.subject;
+        // Promote-only staff elevation (mirrors the Postgres store): a registry-staff SSO
+        // assertion raises the default user role to admin, but never downgrades or overrides
+        // a deliberate moderator/admin grant.
+        if (identity.assertedAdmin && user.role !== "admin" && user.role !== "moderator") {
+          user.role = "admin";
+        }
         await this.save();
         return user;
       }
@@ -1885,7 +1898,7 @@ class FileRegistryStore implements RegistryStore {
       handle,
       displayName: identity.displayName?.trim() || handle,
       avatarUrl: identity.avatarUrl,
-      role: "user",
+      role: identity.assertedAdmin ? "admin" : "user",
       status: "active",
     };
     this.users.set(user.id, user);

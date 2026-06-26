@@ -213,7 +213,13 @@ async function finishOidcLogin(config: ServerConfig, code: string, oauthState: O
   const userInfo = tokenPayload.access_token
     ? await fetchUserInfo(discovery, tokenPayload.access_token)
     : {};
-  return identityFromClaims({ ...claims, ...userInfo }, config);
+  const identity = identityFromClaims({ ...claims, ...userInfo }, config);
+  // realm_access is privilege-bearing (-> registry admin). userInfo is merged in for richer
+  // profile fields, but it must NOT be able to assert authorization: recompute assertedAdmin
+  // from the cryptographically VERIFIED id token alone, so only a signed, issuer/audience-pinned
+  // token can grant staff — never a userinfo response.
+  identity.assertedAdmin = realmRoles(claims).includes(STAFF_REALM_ROLE);
+  return identity;
 }
 
 async function finishWorkosLogin(request: Request, config: ServerConfig, code: string) {
@@ -332,7 +338,23 @@ async function fetchUserInfo(discovery: Discovery, accessToken: string): Promise
   return (await response.json()) as JWTPayload;
 }
 
-function identityFromClaims(claims: JWTPayload, config: ServerConfig): IdentityClaims {
+// The realm role that marks an SSO-brokered Gas City staff member as registry staff.
+// Granted ONLY by the gascity-sso IdP's hardcoded-role mapper (see the gasworks-customers
+// realm-as-code) — never to external GitHub self-registrations — so its presence in a
+// verified token provably means "authenticated via Gas City SSO".
+const STAFF_REALM_ROLE = "registry-staff";
+
+// Keycloak emits realm roles as { realm_access: { roles: string[] } }. Read it defensively:
+// the claim is attacker-influenced shape-wise (it arrives in a token), so narrow every level.
+function realmRoles(claims: JWTPayload): string[] {
+  const realmAccess = claims.realm_access;
+  if (!realmAccess || typeof realmAccess !== "object") return [];
+  const roles = (realmAccess as { roles?: unknown }).roles;
+  if (!Array.isArray(roles)) return [];
+  return roles.filter((role): role is string => typeof role === "string");
+}
+
+export function identityFromClaims(claims: JWTPayload, config: ServerConfig): IdentityClaims {
   if (!config.oidc) throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Auth is not configured.");
   if (!claims.sub) throw new AuthError(401, "BAD_ID_TOKEN", "Sign-in verification failed.");
   const gasCityUserId = stringClaim(claims[config.oidc.gasCityUserIdClaim]);
@@ -351,6 +373,7 @@ function identityFromClaims(claims: JWTPayload, config: ServerConfig): IdentityC
     handle: preferredUsername ?? email?.split("@")[0],
     displayName: stringClaim(claims.name) ?? preferredUsername,
     avatarUrl: stringClaim(claims.picture),
+    assertedAdmin: realmRoles(claims).includes(STAFF_REALM_ROLE),
   };
 }
 

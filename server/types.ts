@@ -76,6 +76,10 @@ export type IdentityClaims = {
   handle?: string;
   displayName?: string;
   avatarUrl?: string;
+  // True when the sign-in token carries the SSO-asserted `registry-staff` realm role
+  // (Gas City staff brokered through gascity-sso). Drives a promote-only elevation to
+  // admin in ensureUser. Absent/false for external GitHub users and machine identities.
+  assertedAdmin?: boolean;
 };
 
 export type ReviewInput = {
