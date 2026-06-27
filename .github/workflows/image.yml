@@ -39,6 +39,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Sortable, immutable per-build tags (main-<epoch> + apex-main-<epoch>) so the Flux
+      # ImagePolicies can auto-pin the newest build by numerical order, like the rest of the fleet.
+      - id: epoch
+        if: github.event_name != 'pull_request'
+        run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@v5
         with:
@@ -47,6 +52,7 @@ jobs:
             type=raw,value=main,enable={{is_default_branch}}
             type=sha,format=long
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=main-${{ steps.epoch.outputs.epoch }},enable={{is_default_branch}}
 
       - id: build
         uses: docker/build-push-action@v6
@@ -87,6 +93,7 @@ jobs:
             type=raw,value=apex-main,enable={{is_default_branch}}
             type=sha,prefix=apex-sha-,format=long
             type=raw,value=apex-latest,enable={{is_default_branch}}
+            type=raw,value=apex-main-${{ steps.epoch.outputs.epoch }},enable={{is_default_branch}}
 
       - id: apex-build
         uses: docker/build-push-action@v6
