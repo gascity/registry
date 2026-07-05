@@ -43,8 +43,8 @@ Local development needs no external services:
   behavior.
 
 Copy `.env.example` to a local untracked env file if you need to test a
-non-default configuration. Keep real production values in OpenBao, Railway, or
-GitHub secrets; do not commit them.
+non-default configuration. Keep real production values in OpenBao or GitHub
+secrets; do not commit them.
 
 To exercise the publish and moderation flows by hand (web form and the `gc` CLI,
 including pointing `gc` at a local registry), see
@@ -61,33 +61,37 @@ bun run build
 bun run test:e2e
 ```
 
-## Railway
+## Deployment
 
-Railway builds this repository from `Dockerfile` via `railway.toml`.
-The runtime image starts the Bun server, serves the built Vite assets, exposes
-`/registry.toml` for the CLI, and listens on Railway's `PORT` environment
-variable.
-
-Deployment follows the Wasteland pattern:
+The registry runs as a container on the Gas City product Kubernetes cluster,
+deployed via GitOps — there is no Railway. `.github/workflows/image.yml` publishes
+GHCR images on every push to `main`:
+`ghcr.io/gascity/gascity-registry:main-<epoch>` for the standalone site
+(`registry.gascity.com`) and `:apex-main-<epoch>` for the panel mounted at
+`works.gascity.com/registry/` (the same image built with
+`REGISTRY_WEB_BASE=/registry/`). The cluster's Flux image automation rolls out the
+newest tag. Postgres runs in-cluster and the app self-migrates on boot. The
+Deployments, routing, secrets, and rollout policy live in the infra repo — this
+repository carries no Kubernetes manifests.
 
 - `main` is the tested integration branch. CI runs on pushes to `main` and on
   pull requests.
-- The scheduled aggregate refresh commits generated catalog updates back to
-  `main`.
-- Railway auto-deploys from the `production` branch. Merging `main` into
-  `production` is the release action, and the production smoke workflow polls
-  `https://registry.gascity.com` until the Postgres-backed app is live.
+- The scheduled aggregate refresh (`update-registry.yml`) commits generated catalog
+  updates back to `main`.
 
-Production review/account state requires:
+Production runtime configuration and secrets are delivered from OpenBao (via
+External Secrets), never committed here. The runtime expects roughly:
 
 ```text
 APP_URL=https://registry.gascity.com
 DATABASE_URL=postgres://...
 SESSION_SECRET=<random secret>
-REGISTRY_AUTH_PROVIDER=workos
-WORKOS_API_KEY=<WorkOS API key>
-WORKOS_CLIENT_ID=<WorkOS client id>
-WORKOS_API_BASE_URL=https://api.workos.com
+REGISTRY_AUTH_PROVIDER=oidc
+OIDC_ISSUER=https://auth.gascity.com/realms/<realm>
+OIDC_CLIENT_ID=<registry client id>
+OIDC_CLIENT_SECRET=<registry client secret>
+OIDC_GASCITY_USER_ID_CLAIM=gascity_user_id
+OIDC_GASCITY_ACCOUNT_ID_CLAIM=gascity_account_id
 GITHUB_APP_SLUG=<registry GitHub App slug>
 GITHUB_APP_CLIENT_ID=<registry GitHub App client id>
 GITHUB_APP_CLIENT_SECRET=<registry GitHub App client secret>
@@ -95,30 +99,16 @@ GITHUB_APP_WEBHOOK_SECRET=<registry GitHub App webhook secret>
 REGISTRY_GC_BIN=/usr/local/bin/gc
 ```
 
-The production login path uses the same WorkOS/AuthKit application family as
-Gasworks, so users see the configured Google Workspace and GitHub sign-in
-options. The WorkOS redirect URI must include:
+Production auth is OIDC/Keycloak (`auth.gascity.com`); the `registry-staff` (admin)
+and `registry-member` (org publisher) roles ride the id_token. A legacy WorkOS
+provider still exists in the code (`REGISTRY_AUTH_PROVIDER=workos`) but is not the
+deployed path.
 
-```text
-https://registry.gascity.com/api/auth/callback
-```
+When `DATABASE_URL` is absent the server intentionally falls back to the local JSON
+store, which is suitable for development but not for production.
 
-OIDC is still supported for future `auth.gascity.com`/Keycloak federation:
-
-```text
-OIDC_ISSUER=https://auth.gascity.com/realms/<realm>
-OIDC_CLIENT_ID=<registry client id>
-OIDC_CLIENT_SECRET=<registry client secret>
-OIDC_GASCITY_USER_ID_CLAIM=gascity_user_id
-OIDC_GASCITY_ACCOUNT_ID_CLAIM=gascity_account_id
-```
-
-When `DATABASE_URL` is absent the server intentionally falls back to the local
-JSON store, which is suitable for development but not for production.
-
-The registry stores reviews against `gascity_user_id`. With WorkOS auth this is
-the stable WorkOS user id. With OIDC auth, the app defaults to the OIDC `sub`
-claim until `auth.gascity.com` emits a dedicated `gascity_user_id` claim.
+The registry stores reviews against `gascity_user_id` — the OIDC `gascity_user_id`
+claim when present, otherwise the OIDC `sub`.
 
 Pack ownership uses a GitHub App verification flow. The app should be configured
 with:
@@ -133,7 +123,7 @@ Request user authorization during installation: enabled
 ```
 
 The source code is safe to publish as long as environment values stay out of
-git. `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_WEBHOOK_SECRET`, `WORKOS_API_KEY`,
+git. `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_WEBHOOK_SECRET`, `OIDC_CLIENT_SECRET`,
 `DATABASE_URL`, and `SESSION_SECRET` are secrets. The GitHub App slug and client
 id are identifiers, but they still live in environment configuration so the same
 code can run in local, staging, and production. The registry discards GitHub user

@@ -4,9 +4,9 @@ name: image
 #   * apex panel (REGISTRY_WEB_BASE=/registry/) -> :apex-* tags      -> works.gascity.com/registry/
 # Both push to the SAME (repo-linked) ghcr.io/gascity/gascity-registry package. The apex
 # dist emits /registry/assets/* and the server derives mountBase=/registry from it.
-# identity-v0 Deployments (gascity/infra: flux/apps/registry/registry.yaml) pin each by
-# @sha256. HUMAN-GATED (like accounts): on push to main CI publishes; a human bumps the
-# pinned digests in a deploy(...) PR and Flux rolls them. PRs build-only to validate.
+# The Gas City product cluster deploys these images via GitOps (Flux image automation
+# rolls out the newest sortable tag); the Deployments, routing, and rollout policy live
+# in the infra repo, not here. On push to main this workflow publishes; PRs build-only.
 on:
   push:
     branches: [main]

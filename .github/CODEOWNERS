@@ -2,7 +2,6 @@
 /.github/ @julianknutsen
 /SECURITY.md @julianknutsen
 /Dockerfile @julianknutsen
-/railway.toml @julianknutsen
 /server/ @julianknutsen
 /scripts/ @julianknutsen
 /package.json @julianknutsen
