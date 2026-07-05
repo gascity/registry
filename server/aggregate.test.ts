@@ -1,0 +1,204 @@
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { describe, expect, test } from "bun:test";
+import {
+  type CatalogRenderIssue,
+  renderCatalogJsonWithApprovedPublishes,
+  renderRegistryTomlWithApprovedPublishes,
+} from "./aggregate";
+import { createRegistryFetchHandler } from "./app";
+import { createStore } from "./store";
+import type { ServerConfig } from "./config";
+import type { PublishRegistryEntry, PublishRequestRow } from "./types";
+
+const commitA = "a".repeat(40);
+const commitB = "b".repeat(40);
+const hash = `sha256:${"c".repeat(64)}`;
+
+function entry(name: string, version: string, over: Partial<PublishRegistryEntry["release"]> = {}): PublishRegistryEntry {
+  return {
+    name,
+    description: `${name} pack`,
+    source: `https://github.com/x/${name}/tree/main`,
+    sourceKind: "git",
+    release: {
+      version,
+      ref: "refs/heads/main",
+      commit: commitA,
+      hash,
+      description: `Release ${name} ${version}`,
+      ...over,
+    },
+  };
+}
+
+function approvedRow(id: string, registryEntry: PublishRegistryEntry): PublishRequestRow {
+  return { id, status: "approved", registryEntry } as unknown as PublishRequestRow;
+}
+
+const baseToml = `schema = 1
+
+[[pack]]
+  name = "alpha"
+  description = "Alpha pack"
+  source = "https://github.com/x/alpha"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "1.0.0"
+    ref = "refs/heads/main"
+    commit = "${commitA}"
+    hash = "${hash}"
+    description = "alpha 1.0.0"
+`;
+
+const baseJson = JSON.stringify({
+  schema: 1,
+  source_count: 1,
+  pack_count: 1,
+  sources: [{ name: "gascity-packs", url: "https://example.com/registry.toml", pack_count: 1 }],
+  packs: [
+    {
+      registry: "gascity-packs",
+      name: "alpha",
+      description: "Alpha pack",
+      source: "https://github.com/x/alpha",
+      source_kind: "git",
+      releases: [
+        { version: "1.0.0", ref: "refs/heads/main", commit: commitA, hash, description: "alpha 1.0.0" },
+      ],
+    },
+  ],
+});
+
+function collectIssues() {
+  const issues: CatalogRenderIssue[] = [];
+  return { issues, onIssue: (issue: CatalogRenderIssue) => issues.push(issue) };
+}
+
+describe("fail-soft catalog render", () => {
+  test("skips a conflicting approved entry but still serves the base + the good entries (TOML)", () => {
+    const { issues, onIssue } = collectIssues();
+    const approved = [
+      approvedRow("prq_good", entry("beta", "1.0.0")),
+      // conflicts with base alpha@1.0.0 (different commit)
+      approvedRow("prq_bad", entry("alpha", "1.0.0", { commit: commitB })),
+    ];
+    const toml = renderRegistryTomlWithApprovedPublishes(baseToml, approved, { mode: "fail-soft", onIssue });
+    expect(toml).toContain('name = "alpha"');
+    expect(toml).toContain('name = "beta"');
+    expect(toml).toContain(commitA); // base alpha release kept
+    expect(toml).not.toContain(commitB); // conflicting release skipped
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ kind: "entry", requestId: "prq_bad", name: "alpha", version: "1.0.0" });
+  });
+
+  test("skips a junk approved entry without emitting an `undefined` literal (JSON)", () => {
+    const { issues, onIssue } = collectIssues();
+    const junk = { ...entry("junk", "1.0.0"), release: { ...entry("junk", "1.0.0").release, version: undefined } };
+    const approved = [
+      approvedRow("prq_good", entry("beta", "1.0.0")),
+      approvedRow("prq_junk", junk as unknown as PublishRegistryEntry),
+    ];
+    const json = renderCatalogJsonWithApprovedPublishes(baseJson, approved, { mode: "fail-soft", onIssue });
+    expect(json).not.toContain("undefined");
+    const parsed = JSON.parse(json) as { packs: Array<{ name: string }> };
+    expect(parsed.packs.map((p) => p.name).sort()).toEqual(["alpha", "beta"]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ kind: "entry", requestId: "prq_junk" });
+  });
+
+  test("strict mode (the approve-time dry run) still THROWS on a conflict", () => {
+    const approved = [approvedRow("prq_bad", entry("alpha", "1.0.0", { commit: commitB }))];
+    expect(() => renderRegistryTomlWithApprovedPublishes(baseToml, approved)).toThrow(/conflicts with existing alpha/);
+    expect(() => renderCatalogJsonWithApprovedPublishes(baseJson, approved)).toThrow(/conflicts with existing alpha/);
+  });
+
+  test("falls back to the raw base artifact when the base itself can't parse (fail-soft)", () => {
+    const { issues, onIssue } = collectIssues();
+    const approved = [approvedRow("prq_good", entry("beta", "1.0.0"))];
+    const badBase = "schema = 1\n[[[[ not valid toml";
+    const out = renderRegistryTomlWithApprovedPublishes(badBase, approved, { mode: "fail-soft", onIssue });
+    expect(out).toBe(badBase); // served unmerged rather than 500
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.kind).toBe("base");
+  });
+});
+
+describe("handler serves a 200 catalog even with a poisoned approved entry", () => {
+  test("GET /catalog.json omits the un-renderable approved publish, base + good pack still serve", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "registry-aggregate-"));
+    const distRoot = join(dir, "dist");
+    await mkdir(distRoot, { recursive: true });
+    await writeFile(join(distRoot, "registry.toml"), baseToml);
+    await writeFile(join(distRoot, "catalog.json"), baseJson);
+
+    const store = createStore(undefined, join(dir, "registry.local.json"));
+    await store.init();
+    try {
+      const admin = await store.ensureUser({
+        subject: "dev:admin",
+        gasCityUserId: "dev:admin",
+        handle: "admin",
+        displayName: "Admin",
+        assertedAdmin: true,
+      });
+      const submitter = await store.ensureUser({
+        subject: "dev:pub",
+        gasCityUserId: "dev:pub",
+        handle: "pub",
+        displayName: "Pub",
+      });
+
+      async function approveWith(name: string, e: PublishRegistryEntry) {
+        const req = await store.createPublishRequest(
+          submitter.id,
+          {
+            repoUrl: `https://github.com/x/${name}`,
+            commit: e.release.commit,
+            packPath: `packs/${name}`,
+            requestedName: name,
+            requestedVersion: e.release.version,
+          },
+          "web_session",
+        );
+        await store.markPublishRequestValidated(req.id, e);
+        await store.approvePublishRequest(admin.id, req.id); // store-level approve does no dry run
+      }
+
+      // A good new direct-publish, and a poisoned one that conflicts with the BASE alpha@1.0.0
+      // (different commit) — the kind of un-renderable row a base change could introduce.
+      await approveWith("good-pack", entry("good-pack", "1.0.0"));
+      await approveWith("alpha", entry("alpha", "1.0.0", { commit: commitB }));
+
+      const handler = createRegistryFetchHandler({
+        config: {
+          port: 0,
+          appUrl: "http://127.0.0.1:0",
+          mountBase: "",
+          sessionSecret: "x".repeat(32),
+          localDataPath: "",
+          publishValidation: { gcBin: "gc", timeoutMs: 1000 },
+          isProduction: false,
+          devAuthEnabled: false,
+        } as ServerConfig,
+        store,
+        distRoot: pathToFileURL(`${distRoot}/`),
+      });
+
+      const res = await handler(new Request("http://127.0.0.1/catalog.json"));
+      expect(res.status).toBe(200);
+      const parsed = (await res.json()) as { packs: Array<{ name: string; releases: Array<{ commit: string }> }> };
+      const names = parsed.packs.map((p) => p.name).sort();
+      expect(names).toContain("alpha");
+      expect(names).toContain("good-pack");
+      const alpha = parsed.packs.find((p) => p.name === "alpha")!;
+      expect(alpha.releases.every((r) => r.commit === commitA)).toBe(true); // base kept, poison skipped
+    } finally {
+      await store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -46,6 +46,10 @@ Copy `.env.example` to a local untracked env file if you need to test a
 non-default configuration. Keep real production values in OpenBao, Railway, or
 GitHub secrets; do not commit them.
 
+To exercise the publish and moderation flows by hand (web form and the `gc` CLI,
+including pointing `gc` at a local registry), see
+[`docs/manual-testing.md`](docs/manual-testing.md).
+
 ## Quality Gates
 
 ```bash

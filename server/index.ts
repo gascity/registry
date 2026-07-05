@@ -19,7 +19,9 @@ await store.init();
 const server = createRegistryServer({ config, store });
 
 console.log(
-  `[registry] listening on :${server.port} with ${store.kind} store (${config.devAuthEnabled ? "dev auth on" : "dev auth off"})`,
+  `[registry] listening on :${server.port} with ${store.kind} store, auth ${
+    config.authProvider ?? "unconfigured"
+  } (${config.devAuthEnabled ? "dev auth ON" : "dev auth off"})`,
 );
 
 process.on("SIGTERM", () => {

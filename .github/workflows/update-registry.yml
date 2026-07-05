@@ -31,6 +31,11 @@ jobs:
       - name: Regenerate aggregate catalog
         run: bun run generate
 
+      - name: Verify aggregate outputs are self-consistent
+        # Offline round-trip: proves `generate` emitted canonical, mutually consistent
+        # registry.toml + catalog.json + og before we commit them. No network.
+        run: bun run generate:check
+
       - name: Commit aggregate updates
         run: |
           if git diff --quiet -- public/registry.toml public/catalog.json public/og; then

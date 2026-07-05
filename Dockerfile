@@ -2,7 +2,9 @@
 # Stage 1: build the gc binary used for publish request validation.
 FROM golang:1.26.4-alpine AS gc-build
 WORKDIR /src/gascity
-ARG GASCITY_REF=5e9e27f3d4400f808adbc28c7987c1c4900646b7
+# gascity v1.3.3 — includes `gc … --dev-auth` (#3343), which the CLI e2e + manual-testing
+# doc rely on. The previous pin predated that flag. Bump in lockstep with the CLI contract.
+ARG GASCITY_REF=55acb481229103485ba995bae6cbf283d9618af8
 RUN apk add --no-cache ca-certificates git
 RUN set -eux; \
   git clone --filter=blob:none https://github.com/gastownhall/gascity.git /src/gascity; \

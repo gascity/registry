@@ -1,5 +1,8 @@
 schema = 1
 
+# Sources are polled in listed order. On a cross-source pack-name collision the FIRST source
+# listed here wins; the later source's duplicate pack is skipped with a warning. Order matters.
+
 [[source]]
 name = "gascity-packs"
 url = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"

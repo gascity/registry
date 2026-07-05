@@ -220,12 +220,23 @@ async function finishOidcLogin(config: ServerConfig, code: string, oauthState: O
   const userInfo = tokenPayload.access_token
     ? await fetchUserInfo(discovery, tokenPayload.access_token)
     : {};
+  return identityFromOidcTokenResponse(claims, userInfo, config);
+}
+
+// Build the identity from an OIDC token response. userInfo is merged for richer PROFILE fields
+// only; the privilege-bearing realm roles (-> registry admin / org publisher rights) are
+// recomputed from the cryptographically VERIFIED id_token CLAIMS alone, so an unsigned userinfo
+// response can never assert authorization. This is the userinfo-spoof defense — kept pure and
+// directly tested (see staff-sso.test.ts).
+export function identityFromOidcTokenResponse(
+  claims: JWTPayload,
+  userInfo: JWTPayload,
+  config: ServerConfig,
+): IdentityClaims {
   const identity = identityFromClaims({ ...claims, ...userInfo }, config);
-  // realm_access is privilege-bearing (-> registry admin). userInfo is merged in for richer
-  // profile fields, but it must NOT be able to assert authorization: recompute assertedAdmin
-  // from the cryptographically VERIFIED id token alone, so only a signed, issuer/audience-pinned
-  // token can grant staff — never a userinfo response.
-  identity.assertedAdmin = realmRoles(claims).includes(STAFF_REALM_ROLE);
+  const verifiedRoles = realmRoles(claims);
+  identity.assertedAdmin = verifiedRoles.includes(STAFF_REALM_ROLE);
+  identity.assertedOrgMember = verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE);
   return identity;
 }
 
@@ -272,6 +283,8 @@ export async function createDevSession(request: Request, config: ServerConfig, s
     handle,
     displayName: handle === "local" ? "Local Developer" : handle,
     email: `${handle}@dev.registry.local`,
+    // Dev mirror of the OIDC registry-member realm-role assertion; live-synced like prod.
+    assertedOrgMember: url.searchParams.get("orgMember") === "1",
   });
   const requestedRole = url.searchParams.get("role")?.trim().toLowerCase();
   if (requestedRole === "admin" || requestedRole === "moderator" || requestedRole === "user") {
@@ -351,6 +364,13 @@ async function fetchUserInfo(discovery: Discovery, accessToken: string): Promise
 // verified token provably means "authenticated via Gas City SSO".
 const STAFF_REALM_ROLE = "registry-staff";
 
+// The realm role that marks a verified @gascity org member. Granted ONLY by the
+// gasworks-customers realm-as-code to verified Gas City org members (mirroring how
+// registry-staff is minted) — never a default or self-assignable role — so its presence in
+// a verified id_token provably means "current @gascity member". Live-synced in ensureUser
+// (unlike the promote-only staff role): losing the role de-provisions on the next login.
+const REGISTRY_MEMBER_REALM_ROLE = "registry-member";
+
 // Keycloak emits realm roles as { realm_access: { roles: string[] } }. Read it defensively:
 // the claim is attacker-influenced shape-wise (it arrives in a token), so narrow every level.
 function realmRoles(claims: JWTPayload): string[] {
@@ -381,6 +401,7 @@ export function identityFromClaims(claims: JWTPayload, config: ServerConfig): Id
     displayName: stringClaim(claims.name) ?? preferredUsername,
     avatarUrl: stringClaim(claims.picture),
     assertedAdmin: realmRoles(claims).includes(STAFF_REALM_ROLE),
+    assertedOrgMember: realmRoles(claims).includes(REGISTRY_MEMBER_REALM_ROLE),
   };
 }
 

@@ -101,6 +101,12 @@ export type PublishRequestStatus =
   | "approved"
   | "rejected";
 
+export type PublishSubmissionMethod =
+  | "web_session"
+  | "api_token"
+  | "github_actions_oidc"
+  | "github_import";
+
 export type PublishRegistryEntry = {
   name: string;
   description: string;
@@ -141,6 +147,7 @@ export type PublishRequestRow = {
   createdAt: string;
   updatedAt: string;
   submittedBy: PublicUser;
+  submissionMethod?: PublishSubmissionMethod;
 };
 
 export type GitHubPublishCandidate = {

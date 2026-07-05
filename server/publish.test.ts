@@ -299,6 +299,38 @@ describe("publish request validation", () => {
       },
     });
   });
+
+  test("rejects a publish whose upstream pack.toml name does not match the request (squatter guard)", async () => {
+    const request = {
+      id: "prq_mismatch",
+      status: "pending_validation" as const,
+      repository: {
+        host: "github.com" as const,
+        owner: "attacker",
+        name: "lookalike",
+        fullName: "attacker/lookalike",
+      },
+      repoUrl: "https://github.com/attacker/lookalike",
+      sourceUrl: `https://github.com/attacker/lookalike/tree/${commit}/packs/example`,
+      packPath: "packs/example",
+      commit,
+      requestedName: "gascity", // squatting a trusted name...
+      requestedVersion: "1.0.0",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      submittedBy: { id: "usr_attacker", handle: "attacker", displayName: "Attacker", role: "user" as const },
+    };
+    const promise = validatePublishRequestForRegistry(request, testConfig(), {
+      // ...but the upstream pack.toml declares a different name.
+      fetchFn: async (url) => {
+        const path = new URL(String(url)).pathname;
+        if (path.endsWith("/pack.toml")) return new Response('[pack]\nname = "attacker-pack"\n');
+        return new Response("# other");
+      },
+      computeHash: async () => hash,
+    });
+    await expect(promise).rejects.toThrow(/pack\.toml declares/i);
+  });
 });
 
 describe("dynamic aggregate rendering", () => {
