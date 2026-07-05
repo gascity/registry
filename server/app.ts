@@ -788,8 +788,8 @@ async function assertPublishRequestCanMerge(
 }
 
 // Readiness probe: /health resolves only if the backing store can serve queries, so a
-// DB-degraded instance fails its healthcheck (Railway can't deploy/keep it). Cached 5s and
-// bounded by a 2s ping timeout so it stays cheap and never hangs past the platform timeout.
+// DB-degraded instance fails its healthcheck (the orchestrator won't route to / keep it).
+// Cached 5s and bounded by a 2s ping timeout so it stays cheap and never hangs past the probe timeout.
 async function serveHealth() {
   const now = Date.now();
   if (!healthCache || now - healthCache.at > 5_000) {

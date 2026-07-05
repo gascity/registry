@@ -78,7 +78,7 @@ Do not open public issues or PRs for vulnerabilities. Follow
 [SECURITY.md](SECURITY.md).
 
 Do not commit secrets. The `.env.example` file documents names only; actual
-values belong in OpenBao, Railway, GitHub secrets, or local untracked env files.
+values belong in OpenBao, GitHub secrets, or local untracked env files.
 
 ## Commit Messages
 

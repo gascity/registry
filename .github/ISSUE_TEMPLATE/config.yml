@@ -2,7 +2,7 @@ blank_issues_enabled: false
 contact_links:
   - name: Documentation
     url: https://github.com/gascity/registry#readme
-    about: Start with local development, Railway, auth, ownership, and source pointer guidance.
+    about: Start with local development, deployment, auth, ownership, and source pointer guidance.
   - name: Support Policy
     url: https://github.com/gascity/registry/blob/main/SUPPORT.md
     about: Read how to route bugs, docs issues, feature requests, and security reports.

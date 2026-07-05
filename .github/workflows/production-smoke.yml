@@ -1,8 +1,11 @@
 name: Production Smoke
 
+# Manual prod health check against registry.gascity.com. The old `push: [production]`
+# trigger was a Railway artifact — the registry now deploys via Flux image automation on
+# the product cluster, so there is no production-branch release action to hook. Wiring this
+# into an automated post-deploy gate is the P3.4 promotion work.
 on:
-  push:
-    branches: [production]
+  workflow_dispatch: {}
 
 permissions:
   contents: read

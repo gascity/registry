@@ -46,7 +46,7 @@ availability in normal supported use, including:
   revocation behavior.
 - Aggregate registry generation, source pointer validation, and CLI-facing
   `registry.toml` output.
-- Secrets handling, logs, generated artifacts, and GitHub/Railway automation.
+- Secrets handling, logs, generated artifacts, and GitHub Actions/GitOps automation.
 
 Expected behavior in trusted local development environments, documented
 administrative actions, and vulnerabilities in third-party tools should be
@@ -56,6 +56,6 @@ or materially worse exposure.
 ## Secret Handling
 
 Never commit production values for `DATABASE_URL`, `SESSION_SECRET`,
-`WORKOS_API_KEY`, `OIDC_CLIENT_SECRET`, `GITHUB_APP_CLIENT_SECRET`, or
-`GITHUB_APP_WEBHOOK_SECRET`. Use GitHub, Railway, and OpenBao secret storage.
+`OIDC_CLIENT_SECRET`, `GITHUB_APP_CLIENT_SECRET`, or
+`GITHUB_APP_WEBHOOK_SECRET`. Use GitHub and OpenBao secret storage.
 The checked-in `.env.example` file must remain placeholder-only.
