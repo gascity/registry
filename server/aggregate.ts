@@ -65,24 +65,58 @@ type RawJsonPack = {
   releases?: unknown;
 };
 
+export type CatalogRenderIssue =
+  | { kind: "base"; error: Error }
+  | { kind: "entry"; requestId: string; name: string; version: string; error: Error };
+
+export type RenderOptions = {
+  // "strict" (default): any un-mergeable approved entry throws — the approve-time dry run
+  // (assertPublishRequestCanMerge) relies on this to REJECT conflicts at approve time.
+  // "fail-soft": skip the bad entry / fall back to the base artifact and report via onIssue.
+  // Only the public serve path opts into fail-soft, so one poisoned approved publish can never
+  // 500 /registry.toml + /catalog.json for everyone.
+  mode?: "strict" | "fail-soft";
+  onIssue?: (issue: CatalogRenderIssue) => void;
+};
+
+type ApprovedEntry = { requestId: string; entry: PublishRegistryEntry };
+
 export function renderRegistryTomlWithApprovedPublishes(
   baseToml: string,
   requests: PublishRequestRow[],
+  options: RenderOptions = {},
 ) {
   const entries = approvedEntries(requests);
   if (entries.length === 0) return baseToml;
-  const packs = mergeApprovedEntries(readTomlPacks(baseToml), entries);
-  return renderRegistryToml(packs);
+  let basePacks: RuntimePack[];
+  try {
+    basePacks = readTomlPacks(baseToml);
+  } catch (error) {
+    if (options.mode !== "fail-soft") throw error;
+    options.onIssue?.({ kind: "base", error: asError(error) });
+    return baseToml; // serve the committed artifact unmerged rather than 500
+  }
+  return renderRegistryToml(mergeApprovedEntries(basePacks, entries, options));
 }
 
 export function renderCatalogJsonWithApprovedPublishes(
   baseJson: string,
   requests: PublishRequestRow[],
+  options: RenderOptions = {},
 ) {
   const entries = approvedEntries(requests);
   if (entries.length === 0) return baseJson;
-  const raw = JSON.parse(baseJson) as RawJsonCatalog;
-  const packs = mergeApprovedEntries(readJsonPacks(raw), entries);
+  let raw: RawJsonCatalog;
+  let basePacks: RuntimePack[];
+  try {
+    raw = JSON.parse(baseJson) as RawJsonCatalog;
+    basePacks = readJsonPacks(raw);
+  } catch (error) {
+    if (options.mode !== "fail-soft") throw error;
+    options.onIssue?.({ kind: "base", error: asError(error) });
+    return baseJson;
+  }
+  const packs = mergeApprovedEntries(basePacks, entries, options);
   const directPackCount = packs.filter((pack) => pack.registry === "direct").length;
   const baseSources = Array.isArray(raw.sources) ? raw.sources : [];
   const sources =
@@ -111,47 +145,83 @@ export function renderCatalogJsonWithApprovedPublishes(
   )}\n`;
 }
 
-function approvedEntries(requests: PublishRequestRow[]) {
+function approvedEntries(requests: PublishRequestRow[]): ApprovedEntry[] {
   return requests
     .filter((request) => request.status === "approved" && request.registryEntry)
-    .map((request) => request.registryEntry as PublishRegistryEntry);
+    .map((request) => ({ requestId: request.id, entry: request.registryEntry as PublishRegistryEntry }));
 }
 
-function mergeApprovedEntries(basePacks: RuntimePack[], entries: PublishRegistryEntry[]) {
+function mergeApprovedEntries(basePacks: RuntimePack[], entries: ApprovedEntry[], options: RenderOptions) {
   const packs = basePacks.map((pack) => ({ ...pack, releases: [...pack.releases] }));
-  for (const entry of entries) {
-    const release = entry.release;
-    let pack = packs.find((candidate) => candidate.name === entry.name);
-    if (!pack) {
-      pack = {
-        registry: "direct",
-        name: entry.name,
-        description: entry.description,
-        source: entry.source,
-        sourceKind: entry.sourceKind,
-        ogImage: "/og/registry.svg",
-        releases: [],
-      };
-      packs.push(pack);
+  for (const { requestId, entry } of entries) {
+    try {
+      mergeApprovedEntry(packs, entry);
+    } catch (error) {
+      if (options.mode !== "fail-soft") throw error;
+      options.onIssue?.({
+        kind: "entry",
+        requestId,
+        name: typeof entry?.name === "string" ? entry.name : "(unknown)",
+        version: typeof entry?.release?.version === "string" ? entry.release.version : "(unknown)",
+        error: asError(error),
+      });
     }
-    const existingRelease = pack.releases.find((candidate) => candidate.version === release.version);
-    if (existingRelease) {
-      if (
-        existingRelease.commit === release.commit &&
-        existingRelease.hash === release.hash &&
-        existingRelease.ref === release.ref
-      ) {
-        continue;
-      }
-      throw new Error(`approved publish conflicts with existing ${entry.name} ${release.version}`);
-    }
-    pack.releases.push({ ...release });
   }
   packs.sort((left, right) => left.name.localeCompare(right.name));
   for (const pack of packs) {
     pack.releases.sort((left, right) => compareVersions(left.version, right.version));
   }
   return packs;
+}
+
+// Merge one approved direct-publish entry. Re-validates the stored registry_entry BEFORE any
+// mutation (a junk row must not reach the renderer — quote(undefined) would emit a literal
+// `undefined`), so a skipped entry in fail-soft mode leaves zero partial state.
+function mergeApprovedEntry(packs: RuntimePack[], entry: PublishRegistryEntry) {
+  const name = requireString(entry?.name, "approved entry name");
+  const release = entry?.release ?? ({} as PublishRegistryEntry["release"]);
+  const version = requireString(release?.version, `${name} release version`);
+  requireString(entry.description, `${name} description`);
+  requireString(entry.source, `${name} source`);
+  requireString(entry.sourceKind, `${name} sourceKind`);
+  requireString(release.ref, `${name}@${version} ref`);
+  requireString(release.commit, `${name}@${version} commit`);
+  requireString(release.hash, `${name}@${version} hash`);
+  requireString(release.description, `${name}@${version} description`);
+
+  const pack = packs.find((candidate) => candidate.name === name);
+  const existingRelease = pack?.releases.find((candidate) => candidate.version === version);
+  if (existingRelease) {
+    if (
+      existingRelease.commit === release.commit &&
+      existingRelease.hash === release.hash &&
+      existingRelease.ref === release.ref
+    ) {
+      return;
+    }
+    throw new Error(`approved publish conflicts with existing ${name} ${version}`);
+  }
+  // Validation passed — only now mutate.
+  const target =
+    pack ??
+    (() => {
+      const created: RuntimePack = {
+        registry: "direct",
+        name,
+        description: entry.description,
+        source: entry.source,
+        sourceKind: entry.sourceKind,
+        ogImage: "/og/registry.svg",
+        releases: [],
+      };
+      packs.push(created);
+      return created;
+    })();
+  target.releases.push({ ...release });
+}
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }
 
 function readTomlPacks(baseToml: string): RuntimePack[] {

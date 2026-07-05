@@ -12,6 +12,23 @@ permissions:
 jobs:
   verify:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    services:
+      # Real Postgres for the store-conformance + publish-integration tier. The store
+      # tests mint a fresh database per suite from this admin connection (see test-db.ts),
+      # so init()'s migrate-on-boot DDL runs against a real server on every CI run.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: registry
+          POSTGRES_PASSWORD: registry
+          POSTGRES_DB: registry_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U registry -d registry_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
@@ -41,7 +58,25 @@ jobs:
       - name: OpenAPI spec gate (drift + bijection floor)
         run: bun run openapi:check
       - name: Server and integration tests
-        run: bun run test:unit
+        # bun test exits 0 on a no-match glob, which would silently drop a lane if a test file
+        # is renamed out of the test:unit globs. Fail loudly if the generator tests disappear.
+        run: |
+          test -f scripts/generate-registry.test.ts
+          test -f scripts/generate-registry.parity.test.ts
+          bun run test:unit
+
+      - name: Store conformance and publish integration (real Postgres)
+        # REQUIRE_POSTGRES makes an absent DB a hard failure, not a silent skip
+        # (TESTING.md §6.7). Step-scoped env so the file-store lanes above stay unchanged.
+        env:
+          REGISTRY_TEST_DATABASE_URL: postgres://registry:registry@127.0.0.1:5432/registry_ci
+          REGISTRY_TEST_REQUIRE_POSTGRES: "1"
+        # Fail loudly if either file is renamed/moved (bun test exits 0 on a no-match filter,
+        # which would silently drop the Postgres tier).
+        run: |
+          test -f server/store-conformance.test.ts
+          test -f server/publish-integration.test.ts
+          bun test server/store-conformance.test.ts server/publish-integration.test.ts
 
       - name: Production image smoke
         # The image's bun install also needs the GitHub Packages token; pass it as
@@ -51,6 +86,18 @@ jobs:
         run: |
           DOCKER_BUILDKIT=1 docker build --secret id=gh_token,env=NODE_AUTH_TOKEN -t registry-ci .
           docker run --rm --entrypoint /usr/local/bin/gc registry-ci pack release hash --help >/dev/null
+
+      - name: Extract pinned gc from the production image
+        # The runner has no gc; pull the exact GASCITY_REF binary the production image built
+        # so the CLI e2e exercises the same gc<->registry contract that ships.
+        run: |
+          cid=$(docker create registry-ci)
+          sudo docker cp "$cid":/usr/local/bin/gc /usr/local/bin/gc
+          docker rm "$cid" >/dev/null
+          gc pack release hash --help >/dev/null
+
+      - name: CLI publish e2e (real gc)
+        run: bun run test:cli
 
       - name: Install Playwright browsers
         run: bunx playwright install --with-deps chromium

@@ -1,5 +1,6 @@
 import { extname, normalize } from "node:path";
 import {
+  type CatalogRenderIssue,
   renderCatalogJsonWithApprovedPublishes,
   renderRegistryTomlWithApprovedPublishes,
 } from "./aggregate";
@@ -22,7 +23,11 @@ import {
   validateCliLoopbackRedirectUri,
 } from "./cli-auth";
 import { requireCatalogPackSource } from "./catalog";
-import { PublishRequestValidationError, normalizePublishRequestInput } from "./publish";
+import {
+  PublishRequestValidationError,
+  normalizePublishRequestInput,
+  parseGitHubRepositoryUrl,
+} from "./publish";
 import { validatePublishRequestForRegistry } from "./publish-validation";
 import { StoreConflictError, StoreValidationError } from "./store";
 import { RequestError, assertOrigin, errorJson, json, readJsonBody, readOptionalJsonBody } from "./http";
@@ -56,6 +61,7 @@ import type {
   ApiTokenAuthResult,
   ApiTokenPublishConstraints,
   GitHubPublishImportCreateInput,
+  PublishApprovalDecision,
   PublishRegistryEntry,
   PublishRequestInput,
   PublishRequestRow,
@@ -97,13 +103,18 @@ export function createRegistryFetchHandler(dependencies: RegistryAppDependencies
     dependencies.discoverGitHubPublishCandidates ?? defaultDiscoverGitHubPublishCandidates;
   const verifyGitHubPackOwnership =
     dependencies.verifyGitHubPackOwnership ?? defaultVerifyGitHubPackOwnership;
+  // Per-handler tracker: one poisoned approved entry logs once (render runs every request) and
+  // surfaces a count for /health, instead of flooding logs or 500-ing the public catalog.
+  // Declared here (before the return) because the helpers below are hoisted declarations.
+  const reportedCatalogIssues = new Set<string>();
+  let healthCache: { at: number; ok: boolean } | null = null;
 
   async function fetch(request: Request) {
     let response: Response;
     try {
       const url = new URL(request.url);
       if (url.pathname === "/health") {
-        response = new Response("ok\n");
+        response = await serveHealth();
       } else if (request.method === "GET" && url.pathname === "/registry.toml") {
         response = await serveRuntimeRegistryToml();
       } else if (request.method === "GET" && url.pathname === "/catalog.json") {
@@ -166,8 +177,31 @@ async function handleApi(request: Request) {
   // So in prod the route is absent (falls through to 404) AND createDevSession's
   // own guard 404s — defense in depth. See server/dev-session.test.ts.
   if (config.devAuthEnabled && request.method === "GET" && url.pathname === "/api/dev/sign-in") {
-    enforceRateLimit(request, "dev-sign-in", { windowMs: 10 * 60 * 1000, max: 20 });
+    // Dev-only route (unreachable off a loopback dev box), so a generous cap: parallel e2e
+    // runs share one loopback bucket and would otherwise 429 under retries.
+    enforceRateLimit(request, "dev-sign-in", { windowMs: 10 * 60 * 1000, max: 500 });
     return await createDevSession(request, config, store);
+  }
+  // Dev-only ownership seed: binds the signed-in dev user to a source repo the way the
+  // GitHub App claim flow would (upsertVerifiedPackOwnership), so out-of-process e2e can
+  // set up an approvable claim-only publish without a real GitHub App. Same devAuthEnabled
+  // gating as /api/dev/sign-in (absent -> 404 in prod).
+  if (config.devAuthEnabled && request.method === "POST" && url.pathname === "/api/dev/seed-ownership") {
+    requireCsrf(request, session);
+    const body = await readJsonBody<{ repoUrl?: string; packKey?: string }>(request, 4 * 1024);
+    const repository = parseGitHubRepositoryUrl(body.repoUrl ?? "");
+    const ownership = await store.upsertVerifiedPackOwnership(session!.user.id, {
+      packKey: body.packKey?.trim() || `${repository.owner}--${repository.name}`,
+      sourceUrl: `https://github.com/${repository.fullName}/tree/main`,
+      githubRepositoryId: `dev-repo-${repository.fullName}`,
+      githubRepositoryFullName: repository.fullName,
+      githubRepositoryName: repository.name,
+      githubOwnerId: `dev-owner-${repository.owner}`,
+      githubOwnerLogin: repository.owner,
+      githubOwnerType: "User",
+      verificationMethod: "manual",
+    });
+    return json({ ownership }, { status: 201 });
   }
   if (request.method === "POST" && url.pathname === "/api/auth/logout") {
     if (session) requireCsrf(request, session);
@@ -702,7 +736,7 @@ async function validateAndStorePublishRequest(id: string) {
 async function assertPublishRequestCanMerge(
   publishRequest: Awaited<ReturnType<typeof store.getPublishRequest>>,
   overrideReason: string | undefined,
-): Promise<{ ownershipOverrideReason?: string }> {
+): Promise<PublishApprovalDecision> {
   if (!publishRequest?.registryEntry) {
     throw new RequestError(422, "PUBLISH_NOT_VALIDATED", "Publish request must be validated before approval.");
   }
@@ -714,21 +748,28 @@ async function assertPublishRequestCanMerge(
   // submission method is treated as claim-only (fail-closed).
   const method = publishRequest.submissionMethod;
   const repoProven = method === "github_actions_oidc" || method === "github_import";
-  let ownershipDecision: { ownershipOverrideReason?: string } = {};
+  let ownershipDecision: PublishApprovalDecision = { ownershipBasis: "repo_proven" };
   if (!repoProven) {
     const ownsRepo = await store.hasVerifiedRepoOwnership(
       publishRequest.submittedBy.id,
       publishRequest.repository.fullName,
     );
-    if (!ownsRepo) {
-      if (!overrideReason) {
-        throw new RequestError(
-          403,
-          "OWNERSHIP_NOT_VERIFIED",
-          "Publish request lacks proof of source-repository ownership. Submit via GitHub Actions or GitHub import, verify pack ownership, or supply an ownershipOverrideReason to override.",
-        );
-      }
-      ownershipDecision = { ownershipOverrideReason: overrideReason };
+    if (ownsRepo) {
+      ownershipDecision = { ownershipBasis: "verified_repo_ownership" };
+    } else if (await store.isOrgMember(publishRequest.submittedBy.id)) {
+      // Verified @gascity org members (registry-member realm role, live-synced at login)
+      // publish their own claim-only submissions without a per-repo ownership record or an
+      // override. PUBLISHER-only: grants nothing on the staff/moderation surface, and staff
+      // approval remains in the loop (D2a).
+      ownershipDecision = { ownershipBasis: "org_member" };
+    } else if (overrideReason) {
+      ownershipDecision = { ownershipBasis: "override", ownershipOverrideReason: overrideReason };
+    } else {
+      throw new RequestError(
+        403,
+        "OWNERSHIP_NOT_VERIFIED",
+        "Publish request lacks proof of source-repository ownership. Submit via GitHub Actions or GitHub import, verify pack ownership, or supply an ownershipOverrideReason to override.",
+      );
     }
   }
 
@@ -746,20 +787,82 @@ async function assertPublishRequestCanMerge(
   return ownershipDecision;
 }
 
+// Readiness probe: /health resolves only if the backing store can serve queries, so a
+// DB-degraded instance fails its healthcheck (Railway can't deploy/keep it). Cached 5s and
+// bounded by a 2s ping timeout so it stays cheap and never hangs past the platform timeout.
+async function serveHealth() {
+  const now = Date.now();
+  if (!healthCache || now - healthCache.at > 5_000) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        store.ping(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("store ping timed out")), 2_000);
+        }),
+      ]);
+      healthCache = { at: now, ok: true };
+    } catch (error) {
+      healthCache = { at: now, ok: false };
+      console.error("[registry] health store ping failed", error);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  return new Response(
+    `${JSON.stringify({
+      status: healthCache.ok ? "ok" : "degraded",
+      store: store.kind,
+      catalogRenderIssues: reportedCatalogIssues.size,
+    })}\n`,
+    {
+      status: healthCache.ok ? 200 : 503,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+    },
+  );
+}
+
+function reportCatalogIssue(surface: "registry.toml" | "catalog.json") {
+  return (issue: CatalogRenderIssue) => {
+    const key =
+      issue.kind === "base"
+        ? `${surface}:base:${issue.error.message}`
+        : `${surface}:${issue.requestId}:${issue.error.message}`;
+    if (reportedCatalogIssues.has(key)) return;
+    reportedCatalogIssues.add(key);
+    if (issue.kind === "base") {
+      console.error(`[registry] ${surface} fail-soft: serving base artifact unmerged`, issue.error);
+    } else {
+      console.error(
+        `[registry] ${surface} fail-soft: skipped approved publish ${issue.name}@${issue.version} (request ${issue.requestId})`,
+        issue.error,
+      );
+    }
+  };
+}
+
 async function serveRuntimeRegistryToml() {
   const baseToml = await readRuntimeText("registry.toml");
   const approved = await store.listApprovedPublishRequests();
-  return new Response(renderRegistryTomlWithApprovedPublishes(baseToml, approved), {
-    headers: runtimeCatalogHeaders("text/plain; charset=utf-8"),
-  });
+  return new Response(
+    renderRegistryTomlWithApprovedPublishes(baseToml, approved, {
+      mode: "fail-soft",
+      onIssue: reportCatalogIssue("registry.toml"),
+    }),
+    { headers: runtimeCatalogHeaders("text/plain; charset=utf-8") },
+  );
 }
 
 async function serveRuntimeCatalogJson() {
   const baseJson = await readRuntimeText("catalog.json");
   const approved = await store.listApprovedPublishRequests();
-  return new Response(renderCatalogJsonWithApprovedPublishes(baseJson, approved), {
-    headers: runtimeCatalogHeaders("application/json; charset=utf-8"),
-  });
+  return new Response(
+    renderCatalogJsonWithApprovedPublishes(baseJson, approved, {
+      mode: "fail-soft",
+      onIssue: reportCatalogIssue("catalog.json"),
+    }),
+    { headers: runtimeCatalogHeaders("application/json; charset=utf-8") },
+  );
 }
 
 async function readRuntimeText(fileName: "registry.toml" | "catalog.json") {

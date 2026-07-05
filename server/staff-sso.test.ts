@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JWTPayload } from "jose";
-import { identityFromClaims } from "./auth";
+import { identityFromClaims, identityFromOidcTokenResponse } from "./auth";
 import { createStore } from "./store";
 import type { ServerConfig } from "./config";
 import type { IdentityClaims } from "./types";
@@ -75,6 +75,73 @@ describe("identityFromClaims derives assertedAdmin from realm_access.roles", () 
       const claims = { sub: "atk", realm_access } as unknown as JWTPayload;
       expect(identityFromClaims(claims, oidcConfig).assertedAdmin).toBe(false);
     }
+  });
+});
+
+describe("identityFromClaims derives assertedOrgMember from the registry-member realm role", () => {
+  test("registry-member role present -> assertedOrgMember true", () => {
+    const claims = {
+      sub: "member-1",
+      email: "dev@gascity.com",
+      realm_access: { roles: ["default-roles", "registry-member"] },
+    } as unknown as JWTPayload;
+    expect(identityFromClaims(claims, oidcConfig).assertedOrgMember).toBe(true);
+  });
+
+  test("no registry-member role -> assertedOrgMember false", () => {
+    const claims = { sub: "ext-1", realm_access: { roles: ["default-roles"] } } as unknown as JWTPayload;
+    expect(identityFromClaims(claims, oidcConfig).assertedOrgMember).toBe(false);
+  });
+
+  test("no realm_access at all -> assertedOrgMember false", () => {
+    const claims = { sub: "ext-2" } as unknown as JWTPayload;
+    expect(identityFromClaims(claims, oidcConfig).assertedOrgMember).toBe(false);
+  });
+
+  test("registry-member and registry-staff are independent rails", () => {
+    const member = { sub: "m", realm_access: { roles: ["registry-member"] } } as unknown as JWTPayload;
+    expect(identityFromClaims(member, oidcConfig)).toMatchObject({
+      assertedOrgMember: true,
+      assertedAdmin: false,
+    });
+    const staff = { sub: "s", realm_access: { roles: ["registry-staff"] } } as unknown as JWTPayload;
+    expect(identityFromClaims(staff, oidcConfig)).toMatchObject({
+      assertedOrgMember: false,
+      assertedAdmin: true,
+    });
+  });
+
+  test("malformed realm_access shapes are not trusted (defensive)", () => {
+    for (const realm_access of [{ roles: "registry-member" }, "registry-member", null]) {
+      const claims = { sub: "atk", realm_access } as unknown as JWTPayload;
+      expect(identityFromClaims(claims, oidcConfig).assertedOrgMember).toBe(false);
+    }
+  });
+});
+
+describe("identityFromOidcTokenResponse recomputes authz from the VERIFIED id_token only", () => {
+  test("an unsigned userinfo response cannot assert staff or org membership (spoof defense)", () => {
+    // The verified id_token carries NEITHER privileged role; the (unsigned) userinfo tries to
+    // inject BOTH. Authorization must be recomputed from the id_token alone -> both false.
+    const claims = { sub: "victim", realm_access: { roles: ["default-roles"] } } as unknown as JWTPayload;
+    const userInfo = {
+      realm_access: { roles: ["registry-staff", "registry-member"] },
+    } as unknown as JWTPayload;
+    const identity = identityFromOidcTokenResponse(claims, userInfo, oidcConfig);
+    expect(identity.assertedAdmin).toBe(false);
+    expect(identity.assertedOrgMember).toBe(false);
+  });
+
+  test("roles in the verified id_token DO grant, while userinfo still enriches profile fields", () => {
+    const claims = {
+      sub: "staffer",
+      realm_access: { roles: ["registry-staff", "registry-member"] },
+    } as unknown as JWTPayload;
+    const userInfo = { name: "Display From Userinfo" } as unknown as JWTPayload;
+    const identity = identityFromOidcTokenResponse(claims, userInfo, oidcConfig);
+    expect(identity.assertedAdmin).toBe(true);
+    expect(identity.assertedOrgMember).toBe(true);
+    expect(identity.displayName).toBe("Display From Userinfo"); // profile merge still works
   });
 });
 

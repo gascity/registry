@@ -28,6 +28,7 @@ import type {
   ReviewInput,
   ReviewListResult,
   ReviewRow,
+  PublishApprovalDecision,
   SessionRecord,
   SessionUser,
   VerifiedPackOwnershipInput,
@@ -476,7 +477,14 @@ export class PostgresRegistryStore implements RegistryStore {
       max: 4,
       idle_timeout: 20,
       max_lifetime: 60 * 30,
+      // The idempotent migrate-on-boot DDL (ALTER TABLE ... IF NOT EXISTS) emits a NOTICE per
+      // already-present column; silence them so real errors aren't buried in boot/CI logs.
+      onnotice: () => {},
     });
+  }
+
+  async ping() {
+    await this.sql`SELECT 1`;
   }
 
   async init() {
@@ -492,11 +500,13 @@ export class PostgresRegistryStore implements RegistryStore {
         avatar_url text,
         role text NOT NULL DEFAULT 'user',
         status text NOT NULL DEFAULT 'active',
+        org_member boolean NOT NULL DEFAULT false,
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       )
     `;
     await this.sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS gascity_user_id text`;
+    await this.sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS org_member boolean NOT NULL DEFAULT false`;
     await this.sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS gascity_account_id text`;
     await this.sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_subject text`;
     await this.sql`ALTER TABLE users ALTER COLUMN gascity_account_id DROP NOT NULL`;
@@ -773,6 +783,11 @@ export class PostgresRegistryStore implements RegistryStore {
                      WHEN ${!!identity.assertedAdmin} AND role NOT IN ('admin', 'moderator')
                      THEN 'admin' ELSE role
                    END,
+            -- Org-publisher entitlement: LIVE-synced from the verified registry-member realm
+            -- role on every login (contrast the promote-only role above: role protects manual
+            -- grants; org_member's only source of truth is the IdP, so losing the role must
+            -- de-provision on next login).
+            org_member = ${!!identity.assertedOrgMember},
             updated_at = ${now}
         WHERE id = ${existing[0].id}
         RETURNING *
@@ -784,12 +799,12 @@ export class PostgresRegistryStore implements RegistryStore {
     const [created] = await this.sql`
       INSERT INTO users (
         id, gascity_user_id, gascity_account_id, oidc_subject, email, handle, display_name,
-        avatar_url, role, status, created_at, updated_at
+        avatar_url, role, status, org_member, created_at, updated_at
       )
       VALUES (
         ${id}, ${identity.gasCityUserId}, ${identity.gasCityAccountId ?? null}, ${identity.subject},
         ${identity.email ?? null}, ${uniqueHandle}, ${displayName}, ${identity.avatarUrl ?? null},
-        ${identity.assertedAdmin ? "admin" : "user"}, 'active', ${now}, ${now}
+        ${identity.assertedAdmin ? "admin" : "user"}, 'active', ${!!identity.assertedOrgMember}, ${now}, ${now}
       )
       RETURNING *
     `;
@@ -1264,6 +1279,11 @@ export class PostgresRegistryStore implements RegistryStore {
     return rows.length > 0;
   }
 
+  async isOrgMember(userId: string): Promise<boolean> {
+    const rows = await this.sql`SELECT org_member FROM users WHERE id = ${userId} LIMIT 1`;
+    return rows[0]?.org_member === true;
+  }
+
   async upsertVerifiedPackOwnership(
     userId: string,
     input: VerifiedPackOwnershipInput,
@@ -1602,7 +1622,7 @@ export class PostgresRegistryStore implements RegistryStore {
   async approvePublishRequest(
     actorUserId: string,
     id: string,
-    options?: { ownershipOverrideReason?: string },
+    options?: PublishApprovalDecision,
   ): Promise<PublishRequestRow> {
     const current = await this.getPublishRequest(id);
     if (!current) throw new StoreValidationError("Publish request not found.");
@@ -1625,6 +1645,9 @@ export class PostgresRegistryStore implements RegistryStore {
       // Present only when staff approved a claim-only request without repo proof —
       // the audited justification for the ownership override.
       ownershipOverrideReason: options?.ownershipOverrideReason,
+      // How the merge gate was satisfied (repo_proven / verified_repo_ownership / org_member /
+      // override) — recorded because org_member is live-synced and can change post-approval.
+      ownershipBasis: options?.ownershipBasis,
     });
     const request = await this.getPublishRequest(id);
     if (!request) throw new Error("Publish request not found after approval.");
@@ -1746,7 +1769,9 @@ export class PostgresRegistryStore implements RegistryStore {
 }
 
 type FileState = {
-  users: Array<SessionUser & { gascityUserId?: string; gascityAccountId?: string; oidcSubject?: string }>;
+  users: Array<
+    SessionUser & { gascityUserId?: string; gascityAccountId?: string; oidcSubject?: string; orgMember?: boolean }
+  >;
   sessions: Array<{ hash: string; record: Omit<SessionRecord, "expiresAt"> & { expiresAt: string } }>;
   apiTokens?: StoredApiToken[];
   cliDeviceCodes?: StoredCliDeviceCode[];
@@ -1794,7 +1819,7 @@ class FileRegistryStore implements RegistryStore {
   readonly kind = "file" as const;
   private users = new Map<
     string,
-    SessionUser & { gascityUserId: string; gascityAccountId?: string; oidcSubject?: string }
+    SessionUser & { gascityUserId: string; gascityAccountId?: string; oidcSubject?: string; orgMember?: boolean }
   >();
   private sessions = new Map<string, { record: SessionRecord; hash: string }>();
   private apiTokens = new Map<string, StoredApiToken>();
@@ -1872,6 +1897,8 @@ class FileRegistryStore implements RegistryStore {
 
   async close() {}
 
+  async ping() {} // file store is always ready
+
   async ensureUser(identity: IdentityClaims): Promise<SessionUser> {
     for (const user of this.users.values()) {
       if (user.gascityUserId === identity.gasCityUserId || user.oidcSubject === identity.subject) {
@@ -1884,12 +1911,20 @@ class FileRegistryStore implements RegistryStore {
         if (identity.assertedAdmin && user.role !== "admin" && user.role !== "moderator") {
           user.role = "admin";
         }
+        // Live-synced (contrast the promote-only role above): the IdP is the sole source of
+        // truth for org membership, so losing the realm role de-provisions on next login.
+        user.orgMember = !!identity.assertedOrgMember;
         await this.save();
         return user;
       }
     }
     const handle = normalizeHandle(identity.handle ?? identity.email?.split("@")[0]) ?? "local";
-    const user: SessionUser & { gascityUserId: string; gascityAccountId?: string; oidcSubject?: string } = {
+    const user: SessionUser & {
+      gascityUserId: string;
+      gascityAccountId?: string;
+      oidcSubject?: string;
+      orgMember?: boolean;
+    } = {
       id: newId("user"),
       gascityUserId: identity.gasCityUserId,
       gascityAccountId: identity.gasCityAccountId,
@@ -1900,6 +1935,7 @@ class FileRegistryStore implements RegistryStore {
       avatarUrl: identity.avatarUrl,
       role: identity.assertedAdmin ? "admin" : "user",
       status: "active",
+      orgMember: !!identity.assertedOrgMember,
     };
     this.users.set(user.id, user);
     await this.save();
@@ -2218,6 +2254,10 @@ class FileRegistryStore implements RegistryStore {
     return false;
   }
 
+  async isOrgMember(userId: string): Promise<boolean> {
+    return this.users.get(userId)?.orgMember === true;
+  }
+
   async upsertVerifiedPackOwnership(userId: string, input: VerifiedPackOwnershipInput) {
     const existing = this.ownerships.get(input.packKey);
     if (existing && existing.sourceUrl !== input.sourceUrl) {
@@ -2409,7 +2449,7 @@ class FileRegistryStore implements RegistryStore {
   async approvePublishRequest(
     actorUserId: string,
     id: string,
-    _options?: { ownershipOverrideReason?: string },
+    _options?: PublishApprovalDecision,
   ) {
     const request = this.requirePublishRequest(id);
     if (!request.registryEntry || request.status !== "pending_review") {

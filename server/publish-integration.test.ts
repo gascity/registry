@@ -6,7 +6,9 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { createRegistryFetchHandler } from "./app";
 import { validatePublishRequestForRegistry } from "./publish-validation";
+import postgres from "postgres";
 import { createStore } from "./store";
+import { createTestDatabase } from "./test-db";
 import type { ServerConfig } from "./config";
 import type { GitHubActionsIdentity } from "./github-actions";
 import type {
@@ -15,6 +17,14 @@ import type {
   PublishRequestInput,
   PublishRequestRow,
 } from "./types";
+
+// Mirror the conformance suite's no-silent-skip gate so this file also fails loudly if the CI
+// step keeps REQUIRE_POSTGRES=1 but loses the URL (which would revert every harness to file).
+if (process.env.REGISTRY_TEST_REQUIRE_POSTGRES === "1" && !process.env.REGISTRY_TEST_DATABASE_URL) {
+  throw new Error(
+    "publish-integration: REGISTRY_TEST_REQUIRE_POSTGRES=1 but REGISTRY_TEST_DATABASE_URL is unset.",
+  );
+}
 
 const owner = "acme";
 const repo = "registry-fixtures";
@@ -209,6 +219,62 @@ describe("local registry publish integration", () => {
       await harness.close();
     }
   });
+
+  test("approves an org member's claim-only publish without ownership or override, until de-provisioned", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const member = await harness.signIn("gascity-dev", undefined, { orgMember: true });
+      const admin = await harness.signIn("admin", "admin");
+
+      // Claim-only (personal token), no pack_ownerships row, no override -> approvable purely
+      // because the submitter is a verified org member.
+      const request = await harness.publishWithPersonalToken(member, await harness.createPack("org-member-cli", "0.1.0"));
+      expect(request.submissionMethod).toBe("api_token");
+      expect((await harness.approve(admin, request.id)).status).toBe("approved");
+
+      // On the real-Postgres lane, prove the gate -> decision -> approve -> audit thread: the
+      // approval basis is attributed to org membership (not dropped or mislabeled).
+      if (harness.dbUrl) {
+        const sql = postgres(harness.dbUrl, { max: 1, onnotice: () => {} });
+        try {
+          const rows = await sql`
+            SELECT metadata FROM audit_logs
+            WHERE target_id = ${request.id} AND action = 'publish_request.approve'`;
+          expect(rows[0]?.metadata.ownershipBasis).toBe("org_member");
+        } finally {
+          await sql.end();
+        }
+      }
+
+      // De-provision: the same user re-logs in WITHOUT the realm role (live-synced to false),
+      // and a fresh claim-only publish is gated again (approve reads the submitter's live flag).
+      await harness.signIn("gascity-dev");
+      const afterLeaving = await harness.publishWithPersonalToken(
+        member,
+        await harness.createPack("org-member-left", "0.1.0"),
+      );
+      await harness.approveExpectingOwnershipError(admin, afterLeaving.id);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("org membership grants publishing only: staff routes still 403 for a plain user and an org member", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const plain = await harness.signIn("plain-user");
+      const orgOnly = await harness.signIn("org-only", undefined, { orgMember: true });
+      for (const client of [plain, orgOnly]) {
+        const res = await client.request("/api/admin/publish-requests", { csrfToken: client.csrfToken });
+        expect(res.status).toBe(403);
+        // FORBIDDEN (from requireRegistryStaff), not BAD_CSRF — proves the deny is the staff
+        // boundary, so this can't pass green if an org member started reaching admin routes.
+        expect(((await res.json()) as { error: { code: string } }).error.code).toBe("FORBIDDEN");
+      }
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 type TestPack = PublishRequestInput & {
@@ -233,8 +299,16 @@ async function createPublishHarness() {
     `${JSON.stringify({ schema: 1, source_count: 0, pack_count: 0, sources: [], packs: [] })}\n`,
   );
 
-  const store = createStore(undefined, join(dir, "registry.local.json"));
+  // With REGISTRY_TEST_DATABASE_URL set (CI), run the whole publish flow against a fresh
+  // real Postgres database; unset (local default) keeps the fast file store.
+  const testDb = process.env.REGISTRY_TEST_DATABASE_URL
+    ? await createTestDatabase(process.env.REGISTRY_TEST_DATABASE_URL)
+    : null;
+  const store = createStore(testDb?.url, join(dir, "registry.local.json"));
   await store.init();
+  if (testDb && store.kind !== "postgres") {
+    throw new Error("publish-integration: expected the postgres store when REGISTRY_TEST_DATABASE_URL is set.");
+  }
 
   const config = testConfig();
   let importCandidate: GitHubPublishCandidate | null = null;
@@ -304,12 +378,18 @@ async function createPublishHarness() {
     };
   }
 
-  async function signIn(handle: string, role?: "admin" | "moderator" | "user"): Promise<SignedInClient> {
+  async function signIn(
+    handle: string,
+    role?: "admin" | "moderator" | "user",
+    opts: { orgMember?: boolean } = {},
+  ): Promise<SignedInClient> {
     const client = new TestHttpClient(config.appUrl);
     const roleParam = role ? `&role=${role}` : "";
-    const response = await client.request(`/api/dev/sign-in?handle=${encodeURIComponent(handle)}${roleParam}`, {
-      redirect: "manual",
-    });
+    const orgParam = opts.orgMember ? "&orgMember=1" : "";
+    const response = await client.request(
+      `/api/dev/sign-in?handle=${encodeURIComponent(handle)}${roleParam}${orgParam}`,
+      { redirect: "manual" },
+    );
     expect(response.status).toBe(302);
     const me = await client.json<{ csrfToken: string; user: { id: string; handle: string } }>("/api/me");
     expect(me.user.handle).toBe(handle);
@@ -450,6 +530,7 @@ async function createPublishHarness() {
 
   return {
     store,
+    dbUrl: testDb?.url,
     publicClient,
     createPack,
     signIn,
@@ -464,6 +545,7 @@ async function createPublishHarness() {
     async close() {
       server.stop(true);
       await store.close();
+      await testDb?.drop();
       await rm(dir, { recursive: true, force: true });
     },
   };

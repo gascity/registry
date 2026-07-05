@@ -123,6 +123,36 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         }
       : undefined;
 
+  if (isProduction && !authProvider) {
+    throw new Error(
+      "An auth provider must be configured in production. Set REGISTRY_AUTH_PROVIDER=oidc (or workos) with its credentials.",
+    );
+  }
+
+  // The dev sign-in backdoor (/api/dev/sign-in) mints arbitrary roles, so it FAILS CLOSED:
+  // treat the environment as deployed unless it positively looks local — an EXPLICITLY set
+  // loopback APP_URL and no deploy signal. A bare/misconfigured deploy (APP_URL unset so it
+  // defaults to loopback, a platform env var, or an all-interfaces/public origin) is treated
+  // as deployed and the backdoor stays off, even if REGISTRY_DEV_AUTH=1 was copied over.
+  // (.env.example ships REGISTRY_DEV_AUTH=0; the local dev scripts set it + a loopback APP_URL.)
+  const devAuthRequested = env.REGISTRY_DEV_AUTH === "1";
+  const appUrlProvided = Boolean(env.APP_URL?.trim());
+  const looksDeployed =
+    isProduction ||
+    Boolean(env.RAILWAY_ENVIRONMENT) ||
+    Boolean(env.RAILWAY_PUBLIC_DOMAIN) ||
+    Boolean(env.KUBERNETES_SERVICE_HOST) ||
+    Boolean(env.FLY_APP_NAME) ||
+    Boolean(env.RENDER) ||
+    Boolean(env.DYNO) ||
+    !appUrlProvided ||
+    !isLoopbackUrl(appUrl);
+  if (devAuthRequested && looksDeployed) {
+    console.warn(
+      "[registry] REGISTRY_DEV_AUTH=1 ignored: the dev sign-in backdoor arms only for a local run with an explicitly loopback APP_URL.",
+    );
+  }
+
   return {
     port: Number.isFinite(port) && port > 0 ? port : 8080,
     appUrl,
@@ -142,8 +172,20 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
           : 120_000,
     },
     isProduction,
-    devAuthEnabled: env.REGISTRY_DEV_AUTH === "1" && !isProduction,
+    devAuthEnabled: devAuthRequested && !looksDeployed,
   };
+}
+
+function isLoopbackUrl(value: string) {
+  try {
+    const host = new URL(value).hostname.replace(/^\[|\]$/g, "");
+    // 0.0.0.0 and :: are all-interfaces BIND addresses, not loopback — a host reachable
+    // there is reachable publicly, so they must never count as local. Only 127.0.0.0/8,
+    // ::1, and localhost are genuine loopback.
+    return host === "localhost" || host === "::1" || host.startsWith("127.");
+  } catch {
+    return false;
+  }
 }
 
 function parseAuthProvider(value: string | undefined) {

@@ -80,6 +80,19 @@ export type IdentityClaims = {
   // (Gas City staff brokered through gascity-sso). Drives a promote-only elevation to
   // admin in ensureUser. Absent/false for external GitHub users and machine identities.
   assertedAdmin?: boolean;
+  // True when the sign-in token carries the SSO-asserted `registry-member` realm role
+  // (a verified @gascity org member). Live-synced onto users.org_member in ensureUser on
+  // EVERY login (absent => false => de-provision) — unlike assertedAdmin's promote-only
+  // elevation — so the IdP stays the single source of truth for the publish entitlement.
+  assertedOrgMember?: boolean;
+};
+
+// The reason the publish merge gate was satisfied, threaded from the gate into the approve
+// audit record. org_member is stamped here because users.org_member is live-synced and the
+// stored value at investigation time can differ from the value at approval time.
+export type PublishApprovalDecision = {
+  ownershipOverrideReason?: string;
+  ownershipBasis?: "repo_proven" | "verified_repo_ownership" | "org_member" | "override";
 };
 
 export type ReviewInput = {
@@ -289,6 +302,8 @@ export interface RegistryStore {
   readonly kind: "file" | "postgres";
   init(): Promise<void>;
   close(): Promise<void>;
+  // Cheap readiness probe: resolves iff the backing store can currently serve queries.
+  ping(): Promise<void>;
   ensureUser(identity: IdentityClaims): Promise<SessionUser>;
   getSession(token: string): Promise<SessionRecord | null>;
   createSession(userId: string): Promise<{ token: string; csrfToken: string; expiresAt: Date }>;
@@ -333,6 +348,9 @@ export interface RegistryStore {
   // identity rather than the commit-bearing publish sourceUrl, so it authorizes new
   // releases from a repo the submitter themselves onboarded.
   hasVerifiedRepoOwnership(userId: string, repoFullName: string): Promise<boolean>;
+  // True when the user's last login carried the verified registry-member realm role
+  // (users.org_member, live-synced by ensureUser). Read by the publish merge gate.
+  isOrgMember(userId: string): Promise<boolean>;
   upsertVerifiedPackOwnership(
     userId: string,
     input: VerifiedPackOwnershipInput,
@@ -363,7 +381,7 @@ export interface RegistryStore {
   approvePublishRequest(
     actorUserId: string,
     id: string,
-    options?: { ownershipOverrideReason?: string },
+    options?: PublishApprovalDecision,
   ): Promise<PublishRequestRow>;
   rejectPublishRequest(
     actorUserId: string,

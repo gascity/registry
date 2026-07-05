@@ -29,6 +29,7 @@ export function AdminPublishPage({
 }) {
   const [publishRequests, setPublishRequests] = useState<PublishRequestRow[]>([]);
   const [rejectReasons, setRejectReasons] = useState<Record<string, string>>({});
+  const [overrideReasons, setOverrideReasons] = useState<Record<string, string>>({});
   const [workingRequestId, setWorkingRequestId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -99,15 +100,16 @@ export function AdminPublishPage({
     setWorkingRequestId(request.id);
     setError(null);
     try {
+      const overrideReason = overrideReasons[request.id]?.trim();
+      const body =
+        action === "reject"
+          ? JSON.stringify({ reason: rejectReasons[request.id] ?? "" })
+          : action === "approve" && overrideReason
+            ? JSON.stringify({ ownershipOverrideReason: overrideReason })
+            : undefined;
       const result = await apiRequest<{ publishRequest: PublishRequestRow }>(
         `/api/publish-requests/${encodeURIComponent(request.id)}/${action}`,
-        {
-          method: "POST",
-          body:
-            action === "reject"
-              ? JSON.stringify({ reason: rejectReasons[request.id] ?? "" })
-              : undefined,
-        },
+        { method: "POST", body },
         auth.csrfToken,
       );
       setPublishRequests((requests) =>
@@ -116,8 +118,12 @@ export function AdminPublishPage({
         ),
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Unable to ${action} request.`);
+      const message = err instanceof Error ? err.message : `Unable to ${action} request.`;
+      // Resync the queue, THEN surface the error: refreshQueue() clears the error on a
+      // successful reload, so setting it afterwards keeps the actionable message (e.g. the
+      // ownership gate's 403) visible instead of letting it flash and vanish.
       await refreshQueue();
+      setError(message);
     } finally {
       setWorkingRequestId(null);
     }
@@ -184,15 +190,31 @@ export function AdminPublishPage({
                     </Button>
                   ) : null}
                   {request.status === "pending_review" ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      iconStart={<CheckCircle2 size={14} />}
-                      disabled={workingRequestId === request.id}
-                      onClick={() => void runAction(request, "approve")}
-                    >
-                      Approve
-                    </Button>
+                    <>
+                      {needsOwnershipOverride(request) ? (
+                        <input
+                          className="gc-input"
+                          aria-label={`Ownership override reason for ${request.requestedName}`}
+                          placeholder="Ownership override reason"
+                          value={overrideReasons[request.id] ?? ""}
+                          onChange={(event) =>
+                            setOverrideReasons((reasons) => ({
+                              ...reasons,
+                              [request.id]: event.target.value,
+                            }))
+                          }
+                        />
+                      ) : null}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        iconStart={<CheckCircle2 size={14} />}
+                        disabled={workingRequestId === request.id}
+                        onClick={() => void runAction(request, "approve")}
+                      >
+                        Approve
+                      </Button>
+                    </>
                   ) : null}
                   {request.status !== "approved" && request.status !== "rejected" ? (
                     <>
@@ -230,6 +252,17 @@ export function AdminPublishPage({
         )}
       </Card>
     </AppPage>
+  );
+}
+
+function needsOwnershipOverride(request: PublishRequestRow) {
+  // Repo-proven submissions (GitHub Actions OIDC / GitHub import) clear the source-repo
+  // ownership gate on their own. Claim-only submissions (web form / API token) need a
+  // verified ownership record or an audited staff override to be approvable, so offer the
+  // override field. Unknown methods are treated as claim-only, matching the server gate.
+  return (
+    request.submissionMethod !== "github_actions_oidc" &&
+    request.submissionMethod !== "github_import"
   );
 }
 
