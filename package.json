@@ -16,7 +16,9 @@
     "preview": "vite preview",
     "test:unit": "bun test server/*.test.ts",
     "test:e2e": "playwright test",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "openapi:gen": "openapi-typescript docs/reference/schema/registry.openapi.json -o server/openapi.gen.ts",
+    "openapi:check": "bun run openapi:gen && git diff --exit-code -- server/openapi.gen.ts docs/reference/schema/registry.openapi.json"
   },
   "dependencies": {
     "@openpanel/web": "1.4.1",
@@ -40,6 +42,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.2",
+    "openapi-typescript": "^7.13.0",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"
   }

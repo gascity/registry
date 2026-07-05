@@ -1,0 +1,1550 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Gas City Registry (Pack/Skill Registry) API",
+    "version": "0.1.0",
+    "description": "Hand-authored (spec-first) OpenAPI for the Gas City pack/skill registry (service: registry): the public CLI supply-chain surface (registry.toml, catalog.json), account + API-token management, the publish-request flow (gcr_ bearer / GitHub-Actions OIDC / session), device-grant CLI auth, and reviews. Grounded verbatim in server/app.ts + server/types.ts origin/main. Fully public product; spec-first with openapi-typescript. Wave-4 product spec.",
+    "x-gc-source": {
+      "repo": "gascity/registry",
+      "commit": "f412c83",
+      "generator": "hand-authored",
+      "direction": "spec-first"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://registry.gascity.com",
+      "description": "registry origin; root-relative paths (the works.gascity.com/registry/* apex mirror is prose)"
+    }
+  ],
+  "security": [
+    {
+      "gcrToken": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Health",
+        "description": "Liveness.",
+        "x-gc-enforcement": "public",
+        "x-gc-plane": "both",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/registry.toml": {
+      "get": {
+        "operationId": "getRegistryToml",
+        "summary": "Registry manifest (public)",
+        "description": "The auth-free CLI registry manifest.",
+        "x-gc-enforcement": "public",
+        "x-gc-plane": "both",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "TOML",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/catalog.json": {
+      "get": {
+        "operationId": "getCatalog",
+        "summary": "Catalog (public)",
+        "description": "The auth-free pack catalog.",
+        "x-gc-enforcement": "public",
+        "x-gc-plane": "both",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "operationId": "getMe",
+        "summary": "Current session/token identity",
+        "description": "Session or gcr_ bearer.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          },
+          {
+            "gcrToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli/device/code": {
+      "post": {
+        "operationId": "deviceCode",
+        "summary": "Start device grant (public)",
+        "description": "RFC 8628.",
+        "x-gc-enforcement": "public",
+        "x-gc-plane": "both",
+        "security": [],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceCodeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli/device/token": {
+      "post": {
+        "operationId": "deviceToken",
+        "summary": "Poll device grant (public)",
+        "description": "Returns a gcr_ token when approved, else an OAuth pending/denied error.",
+        "x-gc-enforcement": "public",
+        "x-gc-plane": "both",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Pending/denied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli/device/approve": {
+      "post": {
+        "operationId": "deviceApprove",
+        "summary": "Approve a device code",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli/device/deny": {
+      "post": {
+        "operationId": "deviceDeny",
+        "summary": "Deny a device code",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli/auth/token": {
+      "post": {
+        "operationId": "mintCliToken",
+        "summary": "Mint a CLI token",
+        "description": "Session + CSRF \u2192 gcr_ personal token.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTokenCreateResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/publish-tokens/github-actions/mint": {
+      "post": {
+        "operationId": "mintGithubActionsToken",
+        "summary": "Mint a GitHub-Actions publish token",
+        "description": "GitHub OIDC (audience gascity-registry) \u2192 short-lived gcr_ token.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "githubActionsOidc": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/account/api-tokens": {
+      "get": {
+        "operationId": "listApiTokens",
+        "summary": "List API tokens",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiTokenRow"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createApiToken",
+        "summary": "Create an API token",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTokenCreateResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/account/api-tokens/{id}": {
+      "delete": {
+        "operationId": "revokeApiToken",
+        "summary": "Revoke an API token",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ownership": {
+      "get": {
+        "operationId": "getOwnership",
+        "summary": "Pack ownership (public)",
+        "description": "Query packKey/sourceUrl.",
+        "x-gc-enforcement": "public",
+        "x-gc-plane": "both",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/github/webhook": {
+      "post": {
+        "operationId": "githubWebhook",
+        "summary": "GitHub webhook (HMAC)",
+        "description": "x-hub-signature-256 verified.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "githubWebhook": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Bad signature.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/publish-requests": {
+      "post": {
+        "operationId": "createPublishRequest",
+        "summary": "Submit a publish request",
+        "description": "gcr_ bearer OR session+CSRF. ?validate=1 for dry-run.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          },
+          {
+            "gcrToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishRequestInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/account/publish-requests": {
+      "get": {
+        "operationId": "listMyPublishRequests",
+        "summary": "My publish requests",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PublishRequest"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/publish-requests/{id}/approve": {
+      "post": {
+        "operationId": "approvePublishRequest",
+        "summary": "Approve a publish request",
+        "description": "Session + CSRF + staff.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/publish-requests/{id}/reject": {
+      "post": {
+        "operationId": "rejectPublishRequest",
+        "summary": "Reject a publish request",
+        "description": "Session + CSRF + staff.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/reviews": {
+      "get": {
+        "operationId": "listReviews",
+        "summary": "List reviews (public)",
+        "description": "Query packKey.",
+        "x-gc-enforcement": "public",
+        "x-gc-plane": "both",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewListResult"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "upsertReview",
+        "summary": "Create/update a review",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewRow"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteReview",
+        "summary": "Delete a review",
+        "description": "Session + CSRF; query packKey.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/account/reviews": {
+      "get": {
+        "operationId": "listMyReviews",
+        "summary": "My reviews",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReviewRow"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stars": {
+      "put": {
+        "operationId": "toggleStar",
+        "summary": "Toggle a star",
+        "description": "Session + CSRF.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "gcrToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "gcr_",
+        "description": "Registry API key (prefix gcr_)."
+      },
+      "cookieSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "registry_session",
+        "description": "First-party browser session."
+      },
+      "csrfToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-csrf-token",
+        "description": "CSRF token (AND-composed with cookieSession + same-origin on mutations)."
+      },
+      "githubActionsOidc": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "GitHub Actions OIDC JWT (audience gascity-registry) in the request body; mints a short-lived gcr_ publish token."
+      },
+      "githubWebhook": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-hub-signature-256",
+        "description": "GitHub webhook HMAC signature."
+      }
+    },
+    "schemas": {
+      "PublicUser": {
+        "type": "object",
+        "required": [
+          "id",
+          "handle",
+          "displayName",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "moderator",
+              "user"
+            ]
+          }
+        }
+      },
+      "Me": {
+        "type": "object",
+        "required": [
+          "authConfigured",
+          "devAuthEnabled",
+          "store"
+        ],
+        "properties": {
+          "user": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PublicUser"
+              }
+            ],
+            "nullable": true
+          },
+          "csrfToken": {
+            "type": "string",
+            "nullable": true
+          },
+          "authConfigured": {
+            "type": "boolean"
+          },
+          "authProvider": {
+            "type": "string",
+            "nullable": true
+          },
+          "devAuthEnabled": {
+            "type": "boolean"
+          },
+          "store": {
+            "type": "string",
+            "enum": [
+              "file",
+              "postgres"
+            ]
+          }
+        }
+      },
+      "PublishRegistryRelease": {
+        "type": "object",
+        "required": [
+          "version",
+          "ref",
+          "commit",
+          "hash",
+          "description"
+        ],
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "commit": {
+            "type": "string"
+          },
+          "hash": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "PublishRegistryEntry": {
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "source",
+          "sourceKind",
+          "release"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "sourceKind": {
+            "type": "string",
+            "enum": [
+              "git"
+            ]
+          },
+          "release": {
+            "$ref": "#/components/schemas/PublishRegistryRelease"
+          }
+        }
+      },
+      "PublishRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "requestedName",
+          "requestedVersion",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending_validation",
+              "validation_failed",
+              "pending_review",
+              "approved",
+              "rejected"
+            ]
+          },
+          "repoUrl": {
+            "type": "string"
+          },
+          "sourceUrl": {
+            "type": "string"
+          },
+          "packPath": {
+            "type": "string"
+          },
+          "commit": {
+            "type": "string"
+          },
+          "requestedName": {
+            "type": "string"
+          },
+          "requestedVersion": {
+            "type": "string"
+          },
+          "requestedDescription": {
+            "type": "string"
+          },
+          "registryEntry": {
+            "$ref": "#/components/schemas/PublishRegistryEntry"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "PublishRequestInput": {
+        "type": "object",
+        "required": [
+          "repoUrl",
+          "commit",
+          "requestedName",
+          "requestedVersion"
+        ],
+        "properties": {
+          "repoUrl": {
+            "type": "string"
+          },
+          "commit": {
+            "type": "string"
+          },
+          "packPath": {
+            "type": "string"
+          },
+          "requestedName": {
+            "type": "string"
+          },
+          "requestedVersion": {
+            "type": "string"
+          },
+          "requestedRef": {
+            "type": "string"
+          },
+          "requestedDescription": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiTokenRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "prefix",
+          "kind",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "personal",
+              "github_actions_publish"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          },
+          "lastUsedAt": {
+            "type": "string"
+          },
+          "revokedAt": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiTokenCreateResult": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ApiTokenRow"
+          },
+          {
+            "type": "object",
+            "required": [
+              "token"
+            ],
+            "properties": {
+              "token": {
+                "type": "string",
+                "description": "shown once"
+              }
+            }
+          }
+        ]
+      },
+      "ReviewRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "packKey",
+          "rating",
+          "body",
+          "recommend",
+          "createdAt",
+          "updatedAt",
+          "user",
+          "viewerCanDelete"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "packKey": {
+            "type": "string"
+          },
+          "rating": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "recommend": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/PublicUser"
+          },
+          "viewerCanDelete": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ReviewListResult": {
+        "type": "object",
+        "required": [
+          "summary",
+          "reviews",
+          "viewerHasStarred"
+        ],
+        "properties": {
+          "summary": {
+            "type": "object",
+            "required": [
+              "count",
+              "recommendCount"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer"
+              },
+              "averageRating": {
+                "type": "number",
+                "nullable": true
+              },
+              "recommendCount": {
+                "type": "integer"
+              }
+            }
+          },
+          "reviews": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewRow"
+            }
+          },
+          "viewerReview": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReviewRow"
+              }
+            ],
+            "nullable": true
+          },
+          "viewerHasStarred": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DeviceCodeResponse": {
+        "type": "object",
+        "required": [
+          "device_code",
+          "user_code",
+          "verification_uri",
+          "verification_uri_complete",
+          "expires_in",
+          "interval"
+        ],
+        "properties": {
+          "device_code": {
+            "type": "string"
+          },
+          "user_code": {
+            "type": "string"
+          },
+          "verification_uri": {
+            "type": "string"
+          },
+          "verification_uri_complete": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer"
+          },
+          "interval": {
+            "type": "integer"
+          }
+        }
+      },
+      "TokenResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "scope"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string",
+            "enum": [
+              "bearer"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          },
+          "registry_url": {
+            "type": "string"
+          },
+          "audience": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          }
+        }
+      },
+      "OAuthError": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "authorization_pending",
+              "access_denied",
+              "expired_token",
+              "slow_down"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
