@@ -1,0 +1,136 @@
+name: Promote to production
+
+# Gated promotion. The registry deploys via Flux image automation on the product cluster; once the
+# cluster's ImagePolicies track `prod-*` / `apex-prod-*` (the infra flip), ONLY tags minted here reach
+# production. This re-tags an already-built, CI-green image to a sortable `prod-<epoch>` tag when four
+# signals hold: (1) CI green for the SHA, (2) image build green for the SHA, (3) the SHA is the live
+# main tip, (4) the most recent Production Smoke is green. Re-tag only (same digest, no rebuild).
+# Kill switch: repo variable PROMOTE_PAUSED=true.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+  packages: write
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/gascity/gascity-registry
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    # workflow_run's branches filter matches head_branch, which a fork PR can spoof (a fork branch
+    # named "main"). Trust only a push, from THIS repo, on main, that succeeded — never a PR/fork.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.conclusion == 'success')
+    steps:
+      - name: Kill switch
+        run: |
+          if [ "${{ vars.PROMOTE_PAUSED }}" = "true" ]; then
+            echo "## Promotion paused (PROMOTE_PAUSED=true) — skipping" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::PROMOTE_PAUSED=true — skipping promotion"
+            exit 0
+          fi
+
+      - name: Resolve target, pin to the live main tip
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.workflow_run.head_sha || github.sha }}"
+          # Only ever promote the CURRENT main tip. Rejects stale re-runs of old CI runs (which would
+          # roll prod backward) and a dispatch pointed at a non-main / arbitrary SHA.
+          tip=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')
+          if [ "$sha" != "$tip" ]; then
+            echo "::error::target ${sha} is not the live main tip ${tip} — refusing to promote"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Gate — CI succeeded for this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          conclusion=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')
+          [ "$conclusion" = "success" ] || { echo "::error::CI for ${SHA} concluded '${conclusion}'"; exit 1; }
+          echo "CI for ${SHA} is green"
+
+      - name: Gate — image build succeeded for this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # CI and image build run concurrently; the image may still be building at CI-complete.
+          for attempt in $(seq 1 40); do
+            run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/image.yml/runs?head_sha=${SHA}&per_page=1" \
+              --jq '.workflow_runs[0] | {status: (.status // "none"), conclusion: (.conclusion // "none")}')
+            status=$(echo "$run" | jq -r '.status')
+            if [ "$status" = "completed" ]; then
+              conclusion=$(echo "$run" | jq -r '.conclusion')
+              [ "$conclusion" = "success" ] || { echo "::error::image build for ${SHA} concluded ${conclusion}"; exit 1; }
+              echo "image build for ${SHA} is green"; exit 0
+            fi
+            echo "image build status=${status} (attempt ${attempt}/40); waiting..."
+            sleep 30
+          done
+          echo "::error::timed out waiting for the image build for ${SHA}"; exit 1
+
+      - name: Gate — most recent Production Smoke is green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          conclusion=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/production-smoke.yml/runs?status=completed&per_page=1" \
+            --jq '.workflow_runs[0].conclusion // "none"')
+          if [ "$conclusion" = "none" ]; then
+            echo "::warning::no Production Smoke history yet — allowing this promotion (bootstrap)"
+          elif [ "$conclusion" != "success" ]; then
+            echo "::error::last Production Smoke concluded '${conclusion}' — refusing to promote. Fix prod, re-run Production Smoke, then retry."
+            exit 1
+          fi
+          echo "smoke gate: ${conclusion}"
+
+      - name: Promote image (re-tag SHA build -> prod-<commit-epoch>)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Sortable suffix from the commit's committer time, NOT wall-clock at re-tag: guarantees
+          # prod-tag order == commit order even if an older commit is (re-)promoted later.
+          committed=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq '.commit.committer.date')
+          epoch=$(date -u -d "$committed" +%s)
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Same digest, promoted to the sortable prod tags the cluster's ImagePolicies track.
+          docker buildx imagetools create -t "${IMAGE}:prod-${epoch}" "${IMAGE}:sha-${SHA}"
+          docker buildx imagetools create -t "${IMAGE}:apex-prod-${epoch}" "${IMAGE}:apex-sha-${SHA}"
+          # Both surfaces must move together (they differ in mountBase/cookie Path/OIDC prefix); verify
+          # both tags resolved so a partial re-tag fails loudly instead of skewing the two surfaces.
+          docker buildx imagetools inspect "${IMAGE}:prod-${epoch}" >/dev/null
+          docker buildx imagetools inspect "${IMAGE}:apex-prod-${epoch}" >/dev/null
+          {
+            echo "## Promoted ${SHA} to production"
+            echo ""
+            echo "- \`${IMAGE}:prod-${epoch}\` (standalone → registry.gascity.com)"
+            echo "- \`${IMAGE}:apex-prod-${epoch}\` (apex → works.gascity.com/registry/)"
+            echo ""
+            echo "Flux rolls these out on the product cluster. Verify via the next Production Smoke."
+          } >> "$GITHUB_STEP_SUMMARY"
