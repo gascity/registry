@@ -50,7 +50,7 @@ jobs:
           images: ghcr.io/gascity/gascity-registry
           tags: |
             type=raw,value=main,enable={{is_default_branch}}
-            type=sha,format=long
+            type=sha,format=long,enable={{is_default_branch}}
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=main-${{ steps.epoch.outputs.epoch }},enable={{is_default_branch}}
 
@@ -91,7 +91,7 @@ jobs:
           images: ghcr.io/gascity/gascity-registry
           tags: |
             type=raw,value=apex-main,enable={{is_default_branch}}
-            type=sha,prefix=apex-sha-,format=long
+            type=sha,prefix=apex-sha-,format=long,enable={{is_default_branch}}
             type=raw,value=apex-latest,enable={{is_default_branch}}
             type=raw,value=apex-main-${{ steps.epoch.outputs.epoch }},enable={{is_default_branch}}
 
