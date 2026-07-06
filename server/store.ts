@@ -326,10 +326,21 @@ function publishRequestStatus(value: unknown): PublishRequestRow["status"] {
   return value === "pending_review" ||
     value === "approved" ||
     value === "rejected" ||
+    value === "withdrawn" ||
     value === "validation_failed" ||
     value === "pending_validation"
     ? value
     : "pending_validation";
+}
+
+// States from which validate/reject may still act. approved/withdrawn are post-serving and
+// terminal to these actions (an approved publish is taken down via withdrawPublishRequest).
+function isPreApprovalStatus(status: PublishRequestRow["status"]): boolean {
+  return (
+    status === "pending_validation" ||
+    status === "validation_failed" ||
+    status === "pending_review"
+  );
 }
 
 // Coerce a stored submission method; unknown/legacy/NULL values map to undefined,
@@ -725,7 +736,7 @@ export class PostgresRegistryStore implements RegistryStore {
     await this.sql`
       ALTER TABLE pack_publish_requests
       ADD CONSTRAINT pack_publish_requests_status_check
-      CHECK (status IN ('pending_validation', 'validation_failed', 'pending_review', 'approved', 'rejected'))
+      CHECK (status IN ('pending_validation', 'validation_failed', 'pending_review', 'approved', 'rejected', 'withdrawn'))
     `;
     await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS registry_entry jsonb`;
     await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS validation_error text`;
@@ -1423,7 +1434,7 @@ export class PostgresRegistryStore implements RegistryStore {
       WHERE pack_publish_requests.requested_name = ${normalized.requestedName}
         AND pack_publish_requests.requested_version = ${normalized.requestedVersion}
         AND pack_publish_requests.submitter_user_id = ${userId}
-        AND pack_publish_requests.status <> 'rejected'
+        AND pack_publish_requests.status NOT IN ('rejected', 'withdrawn')
       ORDER BY pack_publish_requests.created_at DESC
       LIMIT 1
     `;
@@ -1580,21 +1591,34 @@ export class PostgresRegistryStore implements RegistryStore {
     );
   }
 
+  // 0-row UPDATEs on a status-guarded action are ambiguous (missing row vs wrong state);
+  // disambiguate for a correct, non-misleading error.
+  private async publishRequestActionError(id: string, action: string): Promise<StoreValidationError> {
+    const exists = await this.getPublishRequest(id);
+    return new StoreValidationError(
+      exists ? `This publish request can no longer be ${action}.` : "Publish request not found.",
+    );
+  }
+
   async markPublishRequestValidated(
     id: string,
     entry: PublishRegistryEntry,
   ): Promise<PublishRequestRow> {
+    // Only a pre-approval request may (re)validate — otherwise `validate` (submitter-accessible,
+    // runs before the staff gate) could resurrect a withdrawn takedown or unpublish an approved release.
     const [row] = await this.sql`
       UPDATE pack_publish_requests
       SET status = 'pending_review',
           registry_entry = ${this.sql.json(entry as any)},
           validation_error = NULL,
+          status_reason = NULL,
           validated_at = now(),
           updated_at = now()
       WHERE id = ${id}
+        AND status IN ('pending_validation', 'validation_failed', 'pending_review')
       RETURNING id
     `;
-    if (!row) throw new StoreValidationError("Publish request not found.");
+    if (!row) throw await this.publishRequestActionError(id, "validated");
     const request = await this.getPublishRequest(id);
     if (!request) throw new Error("Publish request not found after validation.");
     return request;
@@ -1611,9 +1635,10 @@ export class PostgresRegistryStore implements RegistryStore {
           status_reason = ${reason},
           updated_at = now()
       WHERE id = ${id}
+        AND status IN ('pending_validation', 'validation_failed', 'pending_review')
       RETURNING id
     `;
-    if (!row) throw new StoreValidationError("Publish request not found.");
+    if (!row) throw await this.publishRequestActionError(id, "validated");
     const request = await this.getPublishRequest(id);
     if (!request) throw new Error("Publish request not found after validation failure.");
     return request;
@@ -1629,7 +1654,9 @@ export class PostgresRegistryStore implements RegistryStore {
     if (!current.registryEntry || current.status !== "pending_review") {
       throw new StoreValidationError("Publish request must be validated before approval.");
     }
-    await this.sql`
+    // Atomic on the validated state — closes the approve/approve (and approve/withdraw) TOCTOU
+    // between the precheck above and this write.
+    const [approvedRow] = await this.sql`
       UPDATE pack_publish_requests
       SET status = 'approved',
           status_reason = NULL,
@@ -1637,7 +1664,10 @@ export class PostgresRegistryStore implements RegistryStore {
           reviewed_at = now(),
           updated_at = now()
       WHERE id = ${id}
+        AND status = 'pending_review'
+      RETURNING id
     `;
+    if (!approvedRow) throw await this.publishRequestActionError(id, "approved");
     await this.audit(actorUserId, "publish_request.approve", "publish_request", id, {
       requestedName: current.requestedName,
       requestedVersion: current.requestedVersion,
@@ -1660,6 +1690,9 @@ export class PostgresRegistryStore implements RegistryStore {
     reason: string,
   ): Promise<PublishRequestRow> {
     const cleanReason = normalizeStatusReason(reason, "Rejected by registry staff.");
+    // Reject is a pre-approval action; it must not stomp an approved/withdrawn row (that would
+    // silently unpublish and destroy the withdraw audit trail). Takedown of an approved publish
+    // is `withdrawPublishRequest`.
     const [row] = await this.sql`
       UPDATE pack_publish_requests
       SET status = 'rejected',
@@ -1668,15 +1701,81 @@ export class PostgresRegistryStore implements RegistryStore {
           reviewed_at = now(),
           updated_at = now()
       WHERE id = ${id}
+        AND status IN ('pending_validation', 'validation_failed', 'pending_review')
       RETURNING id
     `;
-    if (!row) throw new StoreValidationError("Publish request not found.");
+    if (!row) throw await this.publishRequestActionError(id, "rejected");
     await this.audit(actorUserId, "publish_request.reject", "publish_request", id, {
       reason: cleanReason,
     });
     const request = await this.getPublishRequest(id);
     if (!request) throw new Error("Publish request not found after rejection.");
     return request;
+  }
+
+  async withdrawPublishRequest(
+    actorUserId: string,
+    id: string,
+    reason: string,
+  ): Promise<PublishRequestRow> {
+    const cleanReason = normalizeStatusReason(reason, "Withdrawn by registry staff.");
+    // Only an approved (currently-served) request can be withdrawn; atomic so it can't race a
+    // concurrent re-approve. registry_entry is intentionally KEPT as takedown evidence + input
+    // to the post-withdraw version-conflict guard.
+    const [row] = await this.sql`
+      UPDATE pack_publish_requests
+      SET status = 'withdrawn',
+          status_reason = ${cleanReason},
+          reviewed_by_user_id = ${actorUserId},
+          reviewed_at = now(),
+          updated_at = now()
+      WHERE id = ${id}
+        AND status = 'approved'
+      RETURNING id
+    `;
+    if (!row) throw await this.publishRequestActionError(id, "withdrawn");
+    await this.audit(actorUserId, "publish_request.withdraw", "publish_request", id, {
+      reason: cleanReason,
+    });
+    const request = await this.getPublishRequest(id);
+    if (!request) throw new Error("Publish request not found after withdrawal.");
+    return request;
+  }
+
+  async listWithdrawnPublishRequestsForVersion(name: string, version: string): Promise<PublishRequestRow[]> {
+    // Scoped to the exact name@version (uses pack_publish_requests_pack_version_idx). The validator
+    // pins registry_entry name/version to requested_name/requested_version, so filtering on the
+    // indexed request columns captures every withdrawn row the reinstatement guard must compare —
+    // with no LIMIT, so a conflicting takedown can never fall out of the window.
+    const rows = await this.sql`
+      SELECT
+        pack_publish_requests.*,
+        users.id AS user_id,
+        users.handle,
+        users.display_name,
+        users.avatar_url,
+        users.email,
+        users.role
+      FROM pack_publish_requests
+      JOIN users ON users.id = pack_publish_requests.submitter_user_id
+      WHERE pack_publish_requests.status = 'withdrawn'
+        AND pack_publish_requests.requested_name = ${name}
+        AND pack_publish_requests.requested_version = ${version}
+      ORDER BY pack_publish_requests.created_at ASC
+    `;
+    return rows.map((row) =>
+      publishRequestFromRows(
+        row,
+        publicUser({
+          id: row.user_id,
+          handle: row.handle,
+          display_name: row.display_name,
+          avatar_url: row.avatar_url,
+          email: row.email,
+          role: row.role,
+        }),
+      ),
+    );
   }
 
   private async resolveHandle(rawHandle: string | undefined, userId: string) {
@@ -2353,7 +2452,8 @@ class FileRegistryStore implements RegistryStore {
           request.requestedName === normalized.requestedName &&
           request.requestedVersion === normalized.requestedVersion &&
           request.submittedBy.id === userId &&
-          request.status !== "rejected",
+          request.status !== "rejected" &&
+          request.status !== "withdrawn",
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
     if (existing) {
@@ -2410,6 +2510,9 @@ class FileRegistryStore implements RegistryStore {
 
   async markPublishRequestValidated(id: string, entry: PublishRegistryEntry) {
     const request = this.requirePublishRequest(id);
+    if (!isPreApprovalStatus(request.status)) {
+      throw new StoreValidationError("This publish request can no longer be validated.");
+    }
     const now = new Date().toISOString();
     const next: PublishRequestRow = {
       ...request,
@@ -2427,6 +2530,9 @@ class FileRegistryStore implements RegistryStore {
 
   async markPublishRequestValidationFailed(id: string, error: string) {
     const request = this.requirePublishRequest(id);
+    if (!isPreApprovalStatus(request.status)) {
+      throw new StoreValidationError("This publish request can no longer be validated.");
+    }
     const now = new Date().toISOString();
     const reason = normalizeStatusReason(error, "Validation failed.");
     const next: PublishRequestRow = {
@@ -2473,6 +2579,9 @@ class FileRegistryStore implements RegistryStore {
 
   async rejectPublishRequest(actorUserId: string, id: string, reason: string) {
     const request = this.requirePublishRequest(id);
+    if (!isPreApprovalStatus(request.status)) {
+      throw new StoreValidationError("This publish request can no longer be rejected.");
+    }
     const reviewer = this.users.get(actorUserId);
     if (!reviewer) throw new Error("Reviewer not found.");
     const now = new Date().toISOString();
@@ -2487,6 +2596,41 @@ class FileRegistryStore implements RegistryStore {
     this.publishRequests.set(id, next);
     await this.save();
     return next;
+  }
+
+  async withdrawPublishRequest(actorUserId: string, id: string, reason: string) {
+    const request = this.requirePublishRequest(id);
+    if (request.status !== "approved") {
+      // Same message as the Postgres lane (publishRequestActionError) so the two stores are
+      // observably identical on an invalid-state withdraw.
+      throw new StoreValidationError("This publish request can no longer be withdrawn.");
+    }
+    const reviewer = this.users.get(actorUserId);
+    if (!reviewer) throw new Error("Reviewer not found.");
+    const now = new Date().toISOString();
+    const next: PublishRequestRow = {
+      ...request,
+      status: "withdrawn",
+      statusReason: normalizeStatusReason(reason, "Withdrawn by registry staff."),
+      reviewedAt: now,
+      reviewedBy: reviewer,
+      updatedAt: now,
+      // registryEntry intentionally kept as takedown evidence + version-conflict-guard input.
+    };
+    this.publishRequests.set(id, next);
+    await this.save();
+    return next;
+  }
+
+  async listWithdrawnPublishRequestsForVersion(name: string, version: string) {
+    return [...this.publishRequests.values()]
+      .filter(
+        (request) =>
+          request.status === "withdrawn" &&
+          request.requestedName === name &&
+          request.requestedVersion === version,
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
   private async save() {

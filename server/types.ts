@@ -182,7 +182,8 @@ export type PublishRequestStatus =
   | "validation_failed"
   | "pending_review"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "withdrawn";
 
 // How a publish request was authenticated, derived server-side at submission time
 // (never read from the request body). `github_actions_oidc` and `github_import` are
@@ -373,6 +374,9 @@ export interface RegistryStore {
   listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]>;
   listPublishRequests(): Promise<PublishRequestRow[]>;
   listApprovedPublishRequests(): Promise<PublishRequestRow[]>;
+  // Withdrawn rows for one name@version — feeds the anti-content-swap reinstatement guard. Scoped
+  // (not a full list) so it stays O(index-hit) and can never truncate past the conflicting row.
+  listWithdrawnPublishRequestsForVersion(name: string, version: string): Promise<PublishRequestRow[]>;
   markPublishRequestValidated(
     id: string,
     entry: PublishRegistryEntry,
@@ -384,6 +388,12 @@ export interface RegistryStore {
     options?: PublishApprovalDecision,
   ): Promise<PublishRequestRow>;
   rejectPublishRequest(
+    actorUserId: string,
+    id: string,
+    reason: string,
+  ): Promise<PublishRequestRow>;
+  // Takedown of an already-approved (currently-served) publish. Terminal: approved -> withdrawn.
+  withdrawPublishRequest(
     actorUserId: string,
     id: string,
     reason: string,

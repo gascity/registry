@@ -29,6 +29,7 @@ export function AdminPublishPage({
 }) {
   const [publishRequests, setPublishRequests] = useState<PublishRequestRow[]>([]);
   const [rejectReasons, setRejectReasons] = useState<Record<string, string>>({});
+  const [withdrawReasons, setWithdrawReasons] = useState<Record<string, string>>({});
   const [overrideReasons, setOverrideReasons] = useState<Record<string, string>>({});
   const [workingRequestId, setWorkingRequestId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +95,7 @@ export function AdminPublishPage({
 
   async function runAction(
     request: PublishRequestRow,
-    action: "validate" | "approve" | "reject",
+    action: "validate" | "approve" | "reject" | "withdraw",
   ) {
     if (!auth.csrfToken) return;
     setWorkingRequestId(request.id);
@@ -104,9 +105,11 @@ export function AdminPublishPage({
       const body =
         action === "reject"
           ? JSON.stringify({ reason: rejectReasons[request.id] ?? "" })
-          : action === "approve" && overrideReason
-            ? JSON.stringify({ ownershipOverrideReason: overrideReason })
-            : undefined;
+          : action === "withdraw"
+            ? JSON.stringify({ reason: withdrawReasons[request.id] ?? "" })
+            : action === "approve" && overrideReason
+              ? JSON.stringify({ ownershipOverrideReason: overrideReason })
+              : undefined;
       const result = await apiRequest<{ publishRequest: PublishRequestRow }>(
         `/api/publish-requests/${encodeURIComponent(request.id)}/${action}`,
         { method: "POST", body },
@@ -216,7 +219,13 @@ export function AdminPublishPage({
                       </Button>
                     </>
                   ) : null}
-                  {request.status !== "approved" && request.status !== "rejected" ? (
+                  {/* Reject is only offered on pre-approval states, matching the server guard
+                      (rejectPublishRequest rejects only pending_validation | validation_failed |
+                      pending_review). An approved release is taken down via Withdraw, not Reject;
+                      terminal rejected/withdrawn rows offer nothing. */}
+                  {request.status === "pending_validation" ||
+                  request.status === "validation_failed" ||
+                  request.status === "pending_review" ? (
                     <>
                       {/* Inline action-row field: the kit <Input> always renders a
                           visible uppercase label, which doesn't fit this 3-up grid.
@@ -242,6 +251,31 @@ export function AdminPublishPage({
                         onClick={() => void runAction(request, "reject")}
                       >
                         Reject
+                      </Button>
+                    </>
+                  ) : null}
+                  {request.status === "approved" ? (
+                    <>
+                      <input
+                        className="gc-input"
+                        aria-label={`Withdraw reason for ${request.requestedName}`}
+                        placeholder="Takedown reason"
+                        value={withdrawReasons[request.id] ?? ""}
+                        onChange={(event) =>
+                          setWithdrawReasons((reasons) => ({
+                            ...reasons,
+                            [request.id]: event.target.value,
+                          }))
+                        }
+                      />
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        iconStart={<XCircle size={14} />}
+                        disabled={workingRequestId === request.id}
+                        onClick={() => void runAction(request, "withdraw")}
+                      >
+                        Withdraw
                       </Button>
                     </>
                   ) : null}
@@ -278,6 +312,8 @@ function statusLabel(status: PublishRequestRow["status"]) {
       return "Approved";
     case "rejected":
       return "Rejected";
+    case "withdrawn":
+      return "Withdrawn";
   }
 }
 
@@ -288,6 +324,8 @@ function statusStatus(status: PublishRequestRow["status"]) {
     case "rejected":
     case "validation_failed":
       return "danger" as const;
+    case "withdrawn":
+      return "warn" as const;
     default:
       return "info" as const;
   }
