@@ -704,5 +704,7 @@ function statusLabel(status: PublishRequestRow["status"]) {
       return "Approved";
     case "rejected":
       return "Rejected";
+    case "withdrawn":
+      return "Withdrawn";
   }
 }

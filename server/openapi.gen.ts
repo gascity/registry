@@ -368,6 +368,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/publish-requests/{id}/withdraw": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Withdraw (take down) an approved publish
+         * @description Session + CSRF + staff. Only an approved request can be withdrawn; the release drops from the served catalog and the row becomes terminal.
+         */
+        post: operations["withdrawPublishRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reviews": {
         parameters: {
             query?: never;
@@ -476,7 +496,7 @@ export interface components {
         PublishRequest: {
             id: string;
             /** @enum {string} */
-            status: "pending_validation" | "validation_failed" | "pending_review" | "approved" | "rejected";
+            status: "pending_validation" | "validation_failed" | "pending_review" | "approved" | "rejected" | "withdrawn";
             repoUrl?: string;
             sourceUrl?: string;
             packPath?: string;
@@ -1181,6 +1201,62 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishRequest"];
+                };
+            };
+            /** @description Unauthenticated. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    withdrawPublishRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description Audited takedown reason. */
+                    reason?: string;
+                };
+            };
+        };
         responses: {
             /** @description OK */
             200: {

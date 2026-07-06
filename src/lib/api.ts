@@ -99,7 +99,8 @@ export type PublishRequestStatus =
   | "validation_failed"
   | "pending_review"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "withdrawn";
 
 export type PublishSubmissionMethod =
   | "web_session"

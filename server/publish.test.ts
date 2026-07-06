@@ -178,11 +178,13 @@ describe("postgres publish request queries", () => {
     expect(createPublishRequestBody).toContain("AND pack_publish_requests.requested_version =");
     // Dedup must be scoped to the submitter so a user cannot occupy another's slot.
     expect(createPublishRequestBody).toContain("AND pack_publish_requests.submitter_user_id =");
-    expect(createPublishRequestBody).toContain("AND pack_publish_requests.status <> 'rejected'");
+    // Terminal states never block a re-submission: rejected AND withdrawn are both excluded so a
+    // taken-down name@version can be reinstated by re-publishing.
+    expect(createPublishRequestBody).toContain("AND pack_publish_requests.status NOT IN ('rejected', 'withdrawn')");
     expect(createPublishRequestBody).toContain("ORDER BY pack_publish_requests.created_at DESC");
     expect(createPublishRequestBody).not.toMatch(/\bWHERE requested_name =/);
     expect(createPublishRequestBody).not.toMatch(/\bAND requested_version =/);
-    expect(createPublishRequestBody).not.toMatch(/\bAND status <> 'rejected'/);
+    expect(createPublishRequestBody).not.toMatch(/\bAND status NOT IN \('rejected'/);
     expect(createPublishRequestBody).not.toMatch(/\bORDER BY created_at DESC/);
   });
 

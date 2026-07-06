@@ -844,6 +844,89 @@
         }
       }
     },
+    "/api/publish-requests/{id}/withdraw": {
+      "post": {
+        "operationId": "withdrawPublishRequest",
+        "summary": "Withdraw (take down) an approved publish",
+        "description": "Session + CSRF + staff. Only an approved request can be withdrawn; the release drops from the served catalog and the row becomes terminal.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "description": "Audited takedown reason."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/reviews": {
       "get": {
         "operationId": "listReviews",
@@ -1223,7 +1306,8 @@
               "validation_failed",
               "pending_review",
               "approved",
-              "rejected"
+              "rejected",
+              "withdrawn"
             ]
           },
           "repoUrl": {

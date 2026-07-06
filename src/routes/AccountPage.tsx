@@ -424,6 +424,8 @@ function statusLabel(status: PublishRequestRow["status"]) {
       return "Approved";
     case "rejected":
       return "Rejected";
+    case "withdrawn":
+      return "Withdrawn";
   }
 }
 
@@ -434,6 +436,8 @@ function statusStatus(status: PublishRequestRow["status"]) {
     case "rejected":
     case "validation_failed":
       return "danger" as const;
+    case "withdrawn":
+      return "warn" as const;
     default:
       return "info" as const;
   }

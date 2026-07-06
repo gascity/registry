@@ -314,6 +314,93 @@ for (const lane of lanes) {
       ).rejects.toBeInstanceOf(StoreValidationError);
     });
 
+    test("publish lifecycle: withdraw takes down an approved publish and is terminal", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = uid("pack");
+      const created = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      await store.markPublishRequestValidated(created.id, entry(name));
+      await store.approvePublishRequest(admin.id, created.id);
+      expect((await store.listApprovedPublishRequests()).some((r) => r.id === created.id)).toBe(true);
+
+      const withdrawn = await store.withdrawPublishRequest(admin.id, created.id, "conformance takedown reason");
+      expect(withdrawn.status).toBe("withdrawn");
+      expect(withdrawn.statusReason).toContain("conformance takedown reason");
+      expect(withdrawn.reviewedBy?.id).toBe(admin.id);
+      expect(withdrawn.reviewedAt).toBeTruthy();
+      // registryEntry is intentionally retained (takedown evidence + version-conflict-guard input).
+      expect(withdrawn.registryEntry?.name).toBe(name);
+
+      // No longer served; surfaced in the scoped withdrawn lookup; still visible on the admin + account lists.
+      expect((await store.listApprovedPublishRequests()).some((r) => r.id === created.id)).toBe(false);
+      expect(
+        (await store.listWithdrawnPublishRequestsForVersion(name, "0.1.0")).some((r) => r.id === created.id),
+      ).toBe(true);
+      expect((await store.listPublishRequests()).some((r) => r.id === created.id)).toBe(true);
+
+      // Terminal: a withdrawn request cannot be re-approved, re-validated, or rejected.
+      await expect(store.approvePublishRequest(admin.id, created.id)).rejects.toBeInstanceOf(StoreValidationError);
+      await expect(store.markPublishRequestValidated(created.id, entry(name))).rejects.toBeInstanceOf(StoreValidationError);
+      await expect(store.rejectPublishRequest(admin.id, created.id, "x")).rejects.toBeInstanceOf(StoreValidationError);
+    });
+
+    test("withdraw only applies to approved requests; approved is immune to reject/re-validate", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = uid("pack");
+      const created = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      // pending_validation cannot be withdrawn.
+      await expect(store.withdrawPublishRequest(admin.id, created.id, "x")).rejects.toBeInstanceOf(StoreValidationError);
+      await store.markPublishRequestValidated(created.id, entry(name));
+      // pending_review cannot be withdrawn either (only approved).
+      await expect(store.withdrawPublishRequest(admin.id, created.id, "x")).rejects.toBeInstanceOf(StoreValidationError);
+
+      await store.approvePublishRequest(admin.id, created.id);
+      // An approved (served) publish cannot be rejected or re-validated out from under itself —
+      // takedown is withdraw-only, so the served state and its audit trail stay honest.
+      await expect(store.rejectPublishRequest(admin.id, created.id, "x")).rejects.toBeInstanceOf(StoreValidationError);
+      await expect(store.markPublishRequestValidated(created.id, entry(name))).rejects.toBeInstanceOf(StoreValidationError);
+      await expect(store.markPublishRequestValidationFailed(created.id, "x")).rejects.toBeInstanceOf(StoreValidationError);
+      expect((await store.listApprovedPublishRequests()).some((r) => r.id === created.id)).toBe(true);
+    });
+
+    test("a withdrawn name@version can be re-submitted and reinstated (dedup ignores withdrawn)", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = uid("pack");
+      const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      await store.markPublishRequestValidated(first.id, entry(name));
+      await store.approvePublishRequest(admin.id, first.id);
+      await store.withdrawPublishRequest(admin.id, first.id, "takedown");
+
+      // A withdrawn row must not block a fresh submission of the same name@version — otherwise the
+      // takedown is permanent and un-reinstatable. Re-submitting yields a NEW pending request.
+      const reinstated = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      expect(reinstated.id).not.toBe(first.id);
+      expect(reinstated.status).toBe("pending_validation");
+      await store.markPublishRequestValidated(reinstated.id, entry(name));
+      expect((await store.approvePublishRequest(admin.id, reinstated.id)).status).toBe("approved");
+      expect((await store.listApprovedPublishRequests()).some((r) => r.id === reinstated.id)).toBe(true);
+      // The original withdrawn row stays terminal.
+      expect(
+        (await store.listWithdrawnPublishRequestsForVersion(name, "0.1.0")).some((r) => r.id === first.id),
+      ).toBe(true);
+    });
+
+    test("re-validating a validation_failed request clears the stale failure reason (both lanes)", async () => {
+      const submitter = await store.ensureUser(identity());
+      const name = uid("pack");
+      const created = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      const failed = await store.markPublishRequestValidationFailed(created.id, "hash mismatch");
+      expect(failed.status).toBe("validation_failed");
+      expect(failed.statusReason).toContain("hash mismatch");
+      // The submitter fixes the repo and re-runs validate: the pending_review row must NOT carry the
+      // stale failure reason (PG previously left status_reason set while File cleared it).
+      const revalidated = await store.markPublishRequestValidated(created.id, entry(name));
+      expect(revalidated.status).toBe("pending_review");
+      expect(revalidated.statusReason).toBeUndefined();
+    });
+
     test("validation failure records the error and clears the entry", async () => {
       const submitter = await store.ensureUser(identity());
       const name = uid("pack");
@@ -368,7 +455,7 @@ for (const lane of lanes) {
     // Documented divergence (store.ts): the file store keeps no audit_logs. This asserts the
     // Postgres audit trail — the ownership-override justification is a security/compliance record.
     if (lane.name === "postgres") {
-      test("audit_logs record create, approve(override) and reject", async () => {
+      test("audit_logs record create, approve(override), reject and withdraw", async () => {
         const submitter = await store.ensureUser(identity());
         const admin = await store.ensureUser(identity({ assertedAdmin: true }));
 
@@ -379,6 +466,8 @@ for (const lane of lanes) {
           ownershipOverrideReason: "conformance override justification",
           ownershipBasis: "override",
         });
+        // Take it down — the withdraw is itself an audited moderation action.
+        await store.withdrawPublishRequest(admin.id, approvedReq.id, "conformance takedown");
 
         const rejectedName = uid("pack");
         const rejectedReq = await store.createPublishRequest(submitter.id, publishInput(rejectedName), "web_session");
@@ -407,6 +496,15 @@ for (const lane of lanes) {
           expect(rejectRows).toHaveLength(1);
           expect(rejectRows[0]!.actor_user_id).toBe(admin.id);
           expect(String(rejectRows[0]!.metadata.reason)).toContain("conformance rejection");
+
+          const withdrawRows = await sql`
+            SELECT actor_user_id, metadata FROM audit_logs
+            WHERE target_id = ${approvedReq.id} AND action = 'publish_request.withdraw'`;
+          expect(withdrawRows).toHaveLength(1);
+          expect(withdrawRows[0]!.actor_user_id).toBe(admin.id); // accountability: the withdrawing staff
+          expect(String(withdrawRows[0]!.metadata.reason)).toContain("conformance takedown");
+          // The approve audit row remains — withdraw appends, never erases the approval record.
+          expect(approveRows).toHaveLength(1);
         } finally {
           await sql.end();
         }

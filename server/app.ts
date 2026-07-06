@@ -533,7 +533,7 @@ async function handleApi(request: Request) {
     return json({ publishRequests: await store.listPublishRequests() });
   }
   const publishRequestActionMatch = url.pathname.match(
-    /^\/api\/publish-requests\/([^/]+)\/(validate|approve|reject)$/,
+    /^\/api\/publish-requests\/([^/]+)\/(validate|approve|reject|withdraw)$/,
   );
   if (request.method === "POST" && publishRequestActionMatch?.[1] && publishRequestActionMatch[2]) {
     requireCsrf(request, session);
@@ -541,6 +541,15 @@ async function handleApi(request: Request) {
     const action = publishRequestActionMatch[2];
     const publishRequest = await requirePublishRequestAccess(id, session);
     if (action === "validate") {
+      // A terminal request must not re-enter validation — validate is submitter-accessible, so
+      // this stops a publisher resurrecting a withdrawn takedown or unpublishing an approved release.
+      if (
+        publishRequest.status === "approved" ||
+        publishRequest.status === "withdrawn" ||
+        publishRequest.status === "rejected"
+      ) {
+        throw new RequestError(409, "PUBLISH_STATE_TERMINAL", "This publish request can no longer be validated.");
+      }
       enforceRateLimit(request, "publish-request-validate", { windowMs: 60 * 60 * 1000, max: 12 }, session);
       return json(await validateAndStorePublishRequest(publishRequest.id));
     }
@@ -563,6 +572,13 @@ async function handleApi(request: Request) {
       });
     }
     const body = await readJsonBody<{ reason?: string }>(request);
+    if (action === "withdraw") {
+      // Takedown of an already-approved (served) publish; status approved -> withdrawn, drops from
+      // the runtime catalog on the next request. Staff-only (gated by requireRegistryStaff above).
+      return json({
+        publishRequest: await store.withdrawPublishRequest(session!.user.id, id, body.reason ?? ""),
+      });
+    }
     return json({
       publishRequest: await store.rejectPublishRequest(session!.user.id, id, body.reason ?? ""),
     });
@@ -771,6 +787,28 @@ async function assertPublishRequestCanMerge(
         "Publish request lacks proof of source-repository ownership. Submit via GitHub Actions or GitHub import, verify pack ownership, or supply an ownershipOverrideReason to override.",
       );
     }
+  }
+
+  // A withdrawn (taken-down) name@version must not be silently re-published with DIFFERENT
+  // provenance — pinned clients would otherwise get swapped bits. An IDENTICAL commit+hash+ref
+  // is allowed and is the staff-gated reinstatement path (a fresh, fully-audited approval). The
+  // query is scoped to this exact name@version so it can never miss a conflicting takedown.
+  const entry = publishRequest.registryEntry;
+  const withdrawnConflict = (
+    await store.listWithdrawnPublishRequestsForVersion(entry.name, entry.release.version)
+  ).find(
+    (w) =>
+      w.registryEntry != null &&
+      (w.registryEntry.release.commit !== entry.release.commit ||
+        w.registryEntry.release.hash !== entry.release.hash ||
+        w.registryEntry.release.ref !== entry.release.ref),
+  );
+  if (withdrawnConflict) {
+    throw new RequestError(
+      409,
+      "PUBLISH_VERSION_WITHDRAWN",
+      `${entry.name}@${entry.release.version} was withdrawn and can only be reinstated with the identical commit and hash.`,
+    );
   }
 
   const baseToml = await readRuntimeText("registry.toml");

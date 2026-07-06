@@ -275,6 +275,109 @@ describe("local registry publish integration", () => {
       await harness.close();
     }
   });
+
+  test("staff withdraw takes an approved publish off the served catalog; the name@version can be reinstated", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const submitter = await harness.signIn("withdraw-publisher", undefined, { orgMember: true });
+      const admin = await harness.signIn("admin", "admin");
+
+      const pack = await harness.createPack("withdraw-me", "1.0.0");
+      const request = await harness.publishWithSession(submitter, pack);
+      expect((await harness.approve(admin, request.id)).status).toBe("approved");
+
+      // Approved publish is live in both served artifacts.
+      const asServed = async () => ({
+        toml: await harness.publicClient.text("/registry.toml"),
+        catalog: await harness.publicClient.json<{ packs: Array<{ name: string; registry: string }> }>(
+          "/catalog.json",
+        ),
+      });
+      let served = await asServed();
+      expect(served.toml).toContain(`name = "${request.requestedName}"`);
+      expect(served.catalog.packs).toContainEqual(
+        expect.objectContaining({ name: request.requestedName, registry: "direct" }),
+      );
+
+      // The submitter owns the request but is not staff: withdraw is a staff-only takedown.
+      const forbidden = await submitter.request(`/api/publish-requests/${request.id}/withdraw`, {
+        method: "POST",
+        csrfToken: submitter.csrfToken,
+        body: { reason: "not allowed" },
+      });
+      expect(forbidden.status).toBe(403);
+      expect(((await forbidden.json()) as { error: { code: string } }).error.code).toBe("FORBIDDEN");
+
+      // Staff takedown flips the row terminal and drops it from the runtime catalog immediately.
+      const withdrawn = await harness.withdraw(admin, request.id, "takedown: DMCA notice #42");
+      expect(withdrawn.status).toBe("withdrawn");
+      expect(withdrawn.statusReason).toContain("DMCA notice #42");
+
+      served = await asServed();
+      expect(served.toml).not.toContain(`name = "${request.requestedName}"`);
+      expect(served.catalog.packs.some((p) => p.name === request.requestedName)).toBe(false);
+
+      // A withdrawn (terminal) request can't be resurrected via re-validation, even by its owner.
+      const revalidate = await submitter.request(`/api/publish-requests/${request.id}/validate`, {
+        method: "POST",
+        csrfToken: submitter.csrfToken,
+      });
+      expect(revalidate.status).toBe(409);
+      expect(((await revalidate.json()) as { error: { code: string } }).error.code).toBe("PUBLISH_STATE_TERMINAL");
+
+      // Reinstatement: re-submitting the identical name@version is a fresh request (dedup ignores
+      // withdrawn), and once approved the pack is served again.
+      const reinstated = await harness.publishWithSession(submitter, pack);
+      expect(reinstated.id).not.toBe(request.id);
+      expect((await harness.approve(admin, reinstated.id)).status).toBe("approved");
+
+      served = await asServed();
+      expect(served.toml).toContain(`name = "${request.requestedName}"`);
+      expect(served.catalog.packs).toContainEqual(
+        expect.objectContaining({ name: request.requestedName, registry: "direct" }),
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("withdraw blocks re-publishing the same name@version with DIFFERENT provenance", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const submitter = await harness.signIn("swap-publisher", undefined, { orgMember: true });
+      const admin = await harness.signIn("admin", "admin");
+
+      // Original release is pinned to an immutable tag ref.
+      const pack: TestPack = { ...(await harness.createPack("swap", "1.0.0")), requestedRef: "refs/tags/v1.0.0" };
+      const request = await harness.publishWithSession(submitter, pack);
+      expect((await harness.approve(admin, request.id)).status).toBe("approved");
+      await harness.withdraw(admin, request.id, "takedown: bad provenance");
+
+      // Re-publish the SAME name@version+commit+hash but swapping the immutable tag for a MUTABLE
+      // branch ref. Dedup ignores the withdrawn row, so this validates into a fresh pending request...
+      const swapped: TestPack = { ...pack, requestedRef: "refs/heads/main" };
+      const resubmitted = await harness.publishWithSession(submitter, swapped);
+      expect(resubmitted.id).not.toBe(request.id);
+      expect(resubmitted.registryEntry?.release.ref).toBe("refs/heads/main");
+
+      // ...but approval must be refused: a withdrawn name@version can only be reinstated with the
+      // identical commit+hash+ref, so a provenance swap under pinned clients is blocked.
+      const res = await admin.request(`/api/publish-requests/${resubmitted.id}/approve`, {
+        method: "POST",
+        csrfToken: admin.csrfToken,
+        body: {},
+      });
+      const text = await res.text();
+      expect(res.status, text).toBe(409);
+      expect((JSON.parse(text) as { error: { code: string } }).error.code).toBe("PUBLISH_VERSION_WITHDRAWN");
+
+      // Nothing is served at that name — neither the withdrawn original nor the rejected swap.
+      const catalog = await harness.publicClient.json<{ packs: Array<{ name: string }> }>("/catalog.json");
+      expect(catalog.packs.some((p) => p.name === request.requestedName)).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 type TestPack = PublishRequestInput & {
@@ -528,6 +631,15 @@ async function createPublishHarness() {
     expect(payload.error.code).toBe("OWNERSHIP_NOT_VERIFIED");
   }
 
+  async function withdraw(client: SignedInClient, requestId: string, reason?: string) {
+    const res = await client.json<{ publishRequest: PublishRequestRow }>(
+      `/api/publish-requests/${encodeURIComponent(requestId)}/withdraw`,
+      { method: "POST", csrfToken: client.csrfToken, body: reason ? { reason } : {} },
+    );
+    expect(res.publishRequest.status).toBe("withdrawn");
+    return res.publishRequest;
+  }
+
   return {
     store,
     dbUrl: testDb?.url,
@@ -542,6 +654,7 @@ async function createPublishHarness() {
     publishWithGitHubImport,
     approve,
     approveExpectingOwnershipError,
+    withdraw,
     async close() {
       server.stop(true);
       await store.close();

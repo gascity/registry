@@ -5,10 +5,17 @@ import { expectHealthyPage, trackRuntimeErrors } from "./runtimeErrors";
 // submit -> validate -> staff approve/reject -> assert the served /catalog.json + /registry.toml.
 // This is the browser twin of the flow a beta tester will exercise by hand.
 
-const repoUrl = "https://github.com/e2e-fixture/demo-pack";
 const commit = "c".repeat(40);
 
-async function submitPublishRequest(page: Page, name: string) {
+// Each test uses its OWN source repo (derived from its unique pack name). The harness runs a
+// single shared store across all parallel workers, and pack ownership is keyed per-repo — so a
+// shared repo makes concurrent seed-ownership calls clobber one another's verified owner,
+// spuriously tripping the approval gate on whichever test approves second.
+function repoUrlFor(name: string) {
+  return `https://github.com/e2e-fixture/${name}`;
+}
+
+async function submitPublishRequest(page: Page, name: string, repoUrl: string) {
   return page.evaluate(
     async ({ name, repoUrl, commit }) => {
       const me = await (await fetch("/api/me", { headers: { Accept: "application/json" } })).json();
@@ -34,7 +41,7 @@ async function submitPublishRequest(page: Page, name: string) {
   );
 }
 
-async function seedOwnership(page: Page) {
+async function seedOwnership(page: Page, repoUrl: string) {
   return page.evaluate(
     async ({ repoUrl }) => {
       const me = await (await fetch("/api/me", { headers: { Accept: "application/json" } })).json();
@@ -66,9 +73,10 @@ test("web publish: claim-only submit -> ownership gate -> override approve -> se
   // to the console as a failed-resource error.
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;
   const name = `e2e-loop-${stamp}`;
+  const repoUrl = repoUrlFor(name);
 
   await page.goto(`/api/dev/sign-in?handle=pub-${stamp}&redirect=/account`);
-  const submitted = await submitPublishRequest(page, name);
+  const submitted = await submitPublishRequest(page, name, repoUrl);
   expect(submitted.status).toBe(201);
   // The hermetic fake gc validated it synchronously.
   expect(submitted.body.publishRequest.status).toBe("pending_review");
@@ -99,10 +107,11 @@ test("web publish: verified ownership approves without an override", async ({ pa
   const errors = trackRuntimeErrors(page);
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;
   const name = `e2e-owned-${stamp}`;
+  const repoUrl = repoUrlFor(name);
 
   await page.goto(`/api/dev/sign-in?handle=owner-${stamp}&redirect=/account`);
-  expect(await seedOwnership(page)).toBe(201); // the dev ownership seam binds this user to the repo
-  const submitted = await submitPublishRequest(page, name);
+  expect(await seedOwnership(page, repoUrl)).toBe(201); // the dev ownership seam binds this user to the repo
+  const submitted = await submitPublishRequest(page, name, repoUrl);
   expect(submitted.body.publishRequest.status).toBe("pending_review");
 
   await page.goto(`/api/dev/sign-in?handle=admin-${stamp}&role=admin&redirect=/admin/publish-requests`);
@@ -122,9 +131,10 @@ test("web publish: reject terminates the request and never serves the pack", asy
   // Chromium logs to the console.
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;
   const name = `e2e-reject-${stamp}`;
+  const repoUrl = repoUrlFor(name);
 
   await page.goto(`/api/dev/sign-in?handle=pub-${stamp}&redirect=/account`);
-  const submitted = await submitPublishRequest(page, name);
+  const submitted = await submitPublishRequest(page, name, repoUrl);
   expect(submitted.body.publishRequest.status).toBe("pending_review");
 
   await page.goto(`/api/dev/sign-in?handle=admin-${stamp}&role=admin&redirect=/admin/publish-requests`);
@@ -151,6 +161,53 @@ test("web publish: reject terminates the request and never serves the pack", asy
     { id: submitted.body.publishRequest.id },
   );
   expect(reapprove).toBeGreaterThanOrEqual(400);
+
+  const { packs, toml } = await readCatalog(page);
+  expect(packs.some((pack) => pack.name === name)).toBe(false);
+  expect(toml).not.toContain(`name = "${name}"`);
+});
+
+test("web publish: staff withdraw takes an approved pack off the served catalog", async ({ page }, testInfo) => {
+  // No expectHealthyPage: the terminal re-validate probe deliberately triggers a 4xx, which
+  // Chromium logs to the console.
+  const stamp = `${Date.now()}-${testInfo.workerIndex}`;
+  const name = `e2e-withdraw-${stamp}`;
+  const repoUrl = repoUrlFor(name);
+
+  await page.goto(`/api/dev/sign-in?handle=owner-${stamp}&redirect=/account`);
+  expect(await seedOwnership(page, repoUrl)).toBe(201);
+  const submitted = await submitPublishRequest(page, name, repoUrl);
+  expect(submitted.body.publishRequest.status).toBe("pending_review");
+
+  await page.goto(`/api/dev/sign-in?handle=admin-${stamp}&role=admin&redirect=/admin/publish-requests`);
+  const row = page.locator("article").filter({ hasText: `${name} 0.1.0` });
+  await expect(row).toBeVisible();
+  await row.getByRole("button", { name: "Approve" }).click();
+  await expect(row.getByText("Approved", { exact: true })).toBeVisible();
+
+  // Live in the served catalog before takedown.
+  expect((await readCatalog(page)).packs.some((pack) => pack.name === name)).toBe(true);
+
+  // Staff takedown of the approved release drops it from the runtime catalog immediately.
+  await row.getByLabel(`Withdraw reason for ${name}`).fill("e2e takedown");
+  await row.getByRole("button", { name: "Withdraw" }).click();
+  await expect(row.getByText("Withdrawn", { exact: true })).toBeVisible();
+  await expect(row.getByText("e2e takedown")).toBeVisible();
+
+  // Terminal: a withdrawn request cannot be re-validated back to life (the UI hides its actions,
+  // so probe the API directly) — proving the catalog drop below isn't a transient merge artifact.
+  const revalidate = await page.evaluate(
+    async ({ id }) => {
+      const me = await (await fetch("/api/me", { headers: { Accept: "application/json" } })).json();
+      const res = await fetch(`/api/publish-requests/${encodeURIComponent(id)}/validate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": me.csrfToken },
+      });
+      return res.status;
+    },
+    { id: submitted.body.publishRequest.id },
+  );
+  expect(revalidate).toBeGreaterThanOrEqual(400);
 
   const { packs, toml } = await readCatalog(page);
   expect(packs.some((pack) => pack.name === name)).toBe(false);
