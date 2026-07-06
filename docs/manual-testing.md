@@ -133,13 +133,17 @@ The hourly `update-registry.yml` cron runs it and commits the result.
 The sections above use the localhost dev-auth path; the automated e2e suite (`bun run test:e2e`,
 `e2e/publish-flow.spec.ts`) is their headless twin. The **acceptance pass** runs the same flows
 against the deployed registry at `https://registry.gascity.com`, where the environment differs in
-two ways that matter:
+three ways that matter:
 
 - **No dev-auth.** You sign in with **GitHub** (product login) — `/api/dev/sign-in` and the CLI
   `--dev-auth` flag are localhost-only and refused here.
 - **Staff is SSO-asserted.** Moderation requires the `registry-staff` realm role; enter the staff
   surface via **`/staff`** (which routes the login through the staff IdP), then open
   `/admin/publish-requests`.
+- **A real GitHub App does the ownership/import work.** The `gas-city-registry-verifier` App backs
+  both *Find Packs From GitHub* (import) and Trust-tab ownership verification. The e2e/harness fakes
+  the GitHub API, so this pass is the **first real exercise of that App's permissions** — the two
+  features need different ones (see the publish steps).
 
 Walk it end-to-end and note anything that surprises you (paste raw output/console errors — that
 finds the real problem fastest):
@@ -147,9 +151,19 @@ finds the real problem fastest):
 - [ ] **Browse (signed out)** — home lists packs; a pack detail page renders README + versions;
       `GET /catalog.json` and `GET /registry.toml` both load, and `pack_count` agrees between them.
 - [ ] **Sign in** with GitHub from the header; `/account` shows your handle.
-- [ ] **Publish (web)** — `/publish`: *Find packs from GitHub* (repo-proven, approves straight
-      through) and/or *Manual publish request* (claim-only). Confirm the request shows
+- [ ] **Publish (web) — GitHub import** — `/publish` → **Find Packs From GitHub** → **Find packs**.
+      This drives the `gas-city-registry-verifier` App: it scans repos where the App is installed and
+      reads each repo's tree + `pack.toml`, which needs the App's **Contents: Read** permission.
+      Confirm candidates appear and a submitted one shows `pending_review` and approves repo-proven
+      (one click). If the list comes back **empty or errors**, it's almost always the App missing
+      **Contents: Read**, or the App not installed on the repo (use the **Install the GitHub App**
+      link) — ownership verification would still work, since that path only needs Metadata.
+- [ ] **Publish (web) — manual/claim** — *Manual publish request* (claim-only). Confirm it shows
       `pending_review`, or `validation_failed` with a reason (HTTP is still `201` — read the label).
+- [ ] **Verify ownership (Trust tab)** — open a published pack → **Trust** tab → verify via GitHub
+      (hits `/api/ownership/github/start`; needs the App's **Metadata: Read** and you being repo
+      **admin**). A claim-only request from a verified owner then approves **without** a staff
+      override.
 - [ ] **Publish (CLI)** — `gc pack registry login --registry-url https://registry.gascity.com
       --device` (or a `gcr_` token from the Account page), then
       `GC_REGISTRY_URL=https://registry.gascity.com gc pack registry publish <pack>`. Confirm the
