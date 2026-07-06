@@ -51,6 +51,21 @@ http://127.0.0.1:5173/api/dev/sign-in?handle=alice     # a plain user
      verified — the reason is audited. (Without it you get a `403 OWNERSHIP_NOT_VERIFIED`.)
 4. Approved packs appear immediately in `/registry.toml` and `/catalog.json`, tagged
    `registry = "direct"`.
+   - **Reject** is offered only on *pre-approval* states (pending validation / validation failed /
+     pending review). An already-approved release is taken down with **Withdraw**, not Reject, so
+     it can't be silently un-published out from under pinned clients.
+5. **Withdraw (takedown)** an approved pack: on an `approved` request, staff get a **Withdraw**
+   button with a **Takedown reason** field. Withdrawing flips it to `withdrawn`, drops it from
+   `/registry.toml` and `/catalog.json` on the next request, and records the reason + reviewer in
+   the audit log. The `registry_entry` is retained (takedown evidence + input to the reinstatement
+   guard). A withdrawn request is terminal — Validate / Approve / Reject are all refused on it.
+6. **Reinstate** a withdrawn `name@version` by re-submitting it (a fresh request — dedup ignores
+   withdrawn rows):
+   - Re-publishing the **identical** commit + hash + ref validates and approves normally; the pack
+     is served again.
+   - Re-publishing the **same `name@version` with different provenance** (changed commit / hash /
+     ref) is refused at approve with `409 PUBLISH_VERSION_WITHDRAWN` — a takedown can't be quietly
+     overwritten with swapped bits.
 
 ## 3. CLI: `gc pack registry publish`
 
@@ -112,3 +127,41 @@ The hourly `update-registry.yml` cron runs it and commits the result.
   verifies the committed files are mutually consistent and canonical, *not* that they match live
   upstream. Upstream freshness is the hourly cron's job, so an upstream change never reds an
   unrelated PR. Flags: `--sources <path>` / `--out-dir <path>` for testing against a fixture tree.
+
+## 6. Beta acceptance pass (G3) against production
+
+The sections above use the localhost dev-auth path; the automated e2e suite (`bun run test:e2e`,
+`e2e/publish-flow.spec.ts`) is their headless twin. The **acceptance pass** runs the same flows
+against the deployed registry at `https://registry.gascity.com`, where the environment differs in
+two ways that matter:
+
+- **No dev-auth.** You sign in with **GitHub** (product login) — `/api/dev/sign-in` and the CLI
+  `--dev-auth` flag are localhost-only and refused here.
+- **Staff is SSO-asserted.** Moderation requires the `registry-staff` realm role; enter the staff
+  surface via **`/staff`** (which routes the login through the staff IdP), then open
+  `/admin/publish-requests`.
+
+Walk it end-to-end and note anything that surprises you (paste raw output/console errors — that
+finds the real problem fastest):
+
+- [ ] **Browse (signed out)** — home lists packs; a pack detail page renders README + versions;
+      `GET /catalog.json` and `GET /registry.toml` both load, and `pack_count` agrees between them.
+- [ ] **Sign in** with GitHub from the header; `/account` shows your handle.
+- [ ] **Publish (web)** — `/publish`: *Find packs from GitHub* (repo-proven, approves straight
+      through) and/or *Manual publish request* (claim-only). Confirm the request shows
+      `pending_review`, or `validation_failed` with a reason (HTTP is still `201` — read the label).
+- [ ] **Publish (CLI)** — `gc pack registry login --registry-url https://registry.gascity.com
+      --device` (or a `gcr_` token from the Account page), then
+      `GC_REGISTRY_URL=https://registry.gascity.com gc pack registry publish <pack>`. Confirm the
+      request lands in the queue as `api_token` (claim-only).
+- [ ] **Moderate** — as staff via `/staff` → `/admin/publish-requests`: approve a repo-proven
+      request (one click); approve a claim-only one by filling the **Ownership override reason**;
+      reject one and confirm the reason shows and it never serves.
+- [ ] **Approved is served** — the approved packs appear in `/catalog.json` + `/registry.toml`
+      tagged `registry = "direct"`.
+- [ ] **Withdraw** — on an approved request use **Withdraw** + a takedown reason; confirm the badge
+      reads **Withdrawn** and the pack leaves `/catalog.json` and `/registry.toml`.
+- [ ] **Reinstate** — re-publish the withdrawn `name@version` **identically** → approves and serves
+      again; re-publish it with a **changed ref/commit** → refused with `PUBLISH_VERSION_WITHDRAWN`.
+- [ ] **Authz** — a signed-in non-staff account cannot open `/admin/publish-requests` (403) and the
+      withdraw / approve / reject endpoints refuse it (403).
