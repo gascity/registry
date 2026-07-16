@@ -242,7 +242,7 @@ export function identityFromOidcTokenResponse(
   );
 }
 
-type VerifiedBroker = "github" | "gascity-sso";
+type VerifiedBroker = "github" | "gascity-sso" | "customer-sso";
 
 function verifyOidcBrokerBoundary(
   claims: JWTPayload,
@@ -416,23 +416,35 @@ const GASCITY_SSO_IDP = "gascity-sso";
 // user-session note; the customer realm maps that note into the Registry ID token as
 // `idp_connection`. Unlike a user attribute or userinfo, this claim is tied to the current broker
 // session and covered by the realm's token signature.
-// Fail closed when it is absent or unknown: a persistent registry-staff role alone must never
-// turn a later GitHub login into a staff login.
+// GitHub plus canonical/grandfathered sso-* aliases are customer rails; gascity-sso is the only
+// staff rail. Fail closed when provenance is absent or unknown: a persistent privileged role must
+// never turn a later customer login into a staff login.
 function enforceVerifiedBrokerBoundary(claims: JWTPayload): VerifiedBroker {
-  const broker = stringClaim(claims.idp_connection);
-  const verifiedRoles = realmRoles(claims);
-  if (broker === GITHUB_IDP) {
-    if (
-      verifiedRoles.includes(STAFF_REALM_ROLE) ||
-      verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE)
-    ) {
-      throw new AuthError(
-        403,
-        "STAFF_SSO_REQUIRED",
-        "Gas City staff and organization members sign in with Gas City SSO, not GitHub — go to registry.gascity.com/staff.",
-      );
-    }
-    const email = stringClaim(claims.email);
+  const broker = exactStringClaim(claims.idp_connection);
+  if (!broker) {
+    throw new AuthError(
+      401,
+      "BAD_ID_TOKEN",
+      "Sign-in identity provider could not be verified.",
+    );
+  }
+
+  const verifiedBroker = classifyVerifiedBroker(broker);
+
+  const verifiedRoles = strictRealmRoles(claims);
+  const carriesRegistryPrivilege =
+    verifiedRoles.includes(STAFF_REALM_ROLE) ||
+    verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE);
+  if (verifiedBroker !== GASCITY_SSO_IDP && carriesRegistryPrivilege) {
+    throw new AuthError(
+      403,
+      "STAFF_SSO_REQUIRED",
+      "Gas City staff and organization members sign in with Gas City SSO, not a customer identity provider — go to registry.gascity.com/staff.",
+    );
+  }
+
+  if (verifiedBroker === GITHUB_IDP) {
+    const email = exactStringClaim(claims.email);
     if (!email || claims.email_verified !== true) {
       throw new AuthError(
         401,
@@ -440,7 +452,7 @@ function enforceVerifiedBrokerBoundary(claims: JWTPayload): VerifiedBroker {
         "Sign-in identity is missing a trusted email address.",
       );
     }
-    if (isGasCityStaffEmail(email)) {
+    if (hasGasCityStaffEmailShape(email)) {
       throw new AuthError(
         403,
         "STAFF_SSO_REQUIRED",
@@ -450,12 +462,13 @@ function enforceVerifiedBrokerBoundary(claims: JWTPayload): VerifiedBroker {
     return GITHUB_IDP;
   }
 
-  if (broker === GASCITY_SSO_IDP) {
-    const email = stringClaim(claims.email);
+  if (verifiedBroker === GASCITY_SSO_IDP) {
+    const email = exactStringClaim(claims.email);
     if (
       !email ||
       claims.email_verified !== true ||
-      !isGasCityStaffEmail(email) ||
+      !isCanonicalGasCityStaffEmail(email) ||
+      !hostedDomainMatchesEmail(claims.hd, email) ||
       !verifiedRoles.includes(STAFF_REALM_ROLE)
     ) {
       throw new AuthError(
@@ -467,6 +480,25 @@ function enforceVerifiedBrokerBoundary(claims: JWTPayload): VerifiedBroker {
     return GASCITY_SSO_IDP;
   }
 
+  if (verifiedBroker === "customer-sso") {
+    const email = exactStringClaim(claims.email);
+    if (!email) {
+      throw new AuthError(
+        401,
+        "BAD_ID_TOKEN",
+        "Sign-in identity is missing an email address.",
+      );
+    }
+    if (claims.email_verified === true && hasGasCityStaffEmailShape(email)) {
+      throw new AuthError(
+        403,
+        "STAFF_SSO_REQUIRED",
+        "Gas City staff sign in with Gas City SSO — go to registry.gascity.com/staff.",
+      );
+    }
+    return "customer-sso";
+  }
+
   throw new AuthError(
     401,
     "BAD_ID_TOKEN",
@@ -474,11 +506,46 @@ function enforceVerifiedBrokerBoundary(claims: JWTPayload): VerifiedBroker {
   );
 }
 
-function isGasCityStaffEmail(email: string) {
+function hasGasCityStaffEmailShape(email: string) {
   const at = email.lastIndexOf("@");
-  if (at <= 0) return false;
+  if (at < 0) return false;
   const domain = email.slice(at + 1).toLowerCase();
   return domain === "gascity.com" || domain === "gascity.com.";
+}
+
+function isCanonicalGasCityStaffEmail(email: string) {
+  const at = email.lastIndexOf("@");
+  if (at <= 0 || /[\t\n\r ]/.test(email.slice(0, at))) return false;
+  return email.slice(at + 1).toLowerCase() === "gascity.com";
+}
+
+function hostedDomainMatchesEmail(hostedDomainClaim: unknown, email: string) {
+  if (hostedDomainClaim === undefined || hostedDomainClaim === null) return true;
+  if (typeof hostedDomainClaim !== "string") return false;
+  const hostedDomain = hostedDomainClaim.trim().toLowerCase();
+  if (!hostedDomain) return true;
+  return hostedDomain === email.slice(email.lastIndexOf("@") + 1).toLowerCase();
+}
+
+function isCustomerSsoBroker(broker: string) {
+  if (
+    /^sso-org_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      broker,
+    )
+  ) {
+    return true;
+  }
+  return /^sso-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(broker);
+}
+
+function classifyVerifiedBroker(broker: string): VerifiedBroker {
+  if (broker === GITHUB_IDP || broker === GASCITY_SSO_IDP) return broker;
+  if (isCustomerSsoBroker(broker)) return "customer-sso";
+  throw new AuthError(
+    401,
+    "BAD_ID_TOKEN",
+    "Sign-in identity provider could not be verified.",
+  );
 }
 
 // Keycloak emits realm roles as { realm_access: { roles: string[] } }. Read it defensively:
@@ -489,6 +556,20 @@ function realmRoles(claims: JWTPayload): string[] {
   const roles = (realmAccess as { roles?: unknown }).roles;
   if (!Array.isArray(roles)) return [];
   return roles.filter((role): role is string => typeof role === "string");
+}
+
+function strictRealmRoles(claims: JWTPayload): string[] {
+  const realmAccess = claims.realm_access;
+  if (realmAccess === undefined || realmAccess === null) return [];
+  if (typeof realmAccess !== "object" || Array.isArray(realmAccess)) {
+    throw new AuthError(401, "BAD_ID_TOKEN", "Sign-in authorization claims are malformed.");
+  }
+  const roles = (realmAccess as { roles?: unknown }).roles;
+  if (roles === undefined) return [];
+  if (!Array.isArray(roles) || roles.some((role) => typeof role !== "string")) {
+    throw new AuthError(401, "BAD_ID_TOKEN", "Sign-in authorization claims are malformed.");
+  }
+  return roles;
 }
 
 function identityProfileFromVerifiedClaims(
@@ -543,6 +624,12 @@ function identityFromWorkos(user: WorkosUser, organizationId?: string | null): I
 
 function stringClaim(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function exactStringClaim(value: unknown) {
+  return typeof value === "string" && value !== "" && value.trim() === value
+    ? value
+    : undefined;
 }
 
 function clientIp(request: Request) {

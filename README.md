@@ -102,7 +102,8 @@ REGISTRY_GC_BIN=/usr/local/bin/gc
 
 Production auth is OIDC/Keycloak (`auth.gascity.com`); the `registry-staff` (admin)
 and `registry-member` (org publisher) roles ride the id_token. Production also requires the
-signed, per-session `idp_connection` claim and honors those roles only on the Gas City SSO rail.
+signed, per-session `idp_connection` claim. GitHub and validated customer `sso-*` brokers remain
+nonstaff; privileged roles are honored only on the Gas City SSO rail.
 A legacy WorkOS provider still exists in the code (`REGISTRY_AUTH_PROVIDER=workos`) but is not
 the deployed path.
 

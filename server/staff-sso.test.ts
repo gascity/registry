@@ -241,6 +241,108 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
     });
   });
 
+  test("canonical and grandfathered customer SSO brokers are admitted as nonstaff", () => {
+    for (const idp_connection of [
+      "sso-org_019ed1a3-5b7c-7abc-8def-0123456789ab",
+      "sso-acme-co",
+    ]) {
+      const claims = {
+        sub: `customer-via-${idp_connection}`,
+        email: "customer@acme.test",
+        idp_connection,
+        realm_access: { roles: ["default-roles"] },
+      } as unknown as JWTPayload;
+
+      expect(identityFromOidcTokenResponse(claims, {}, oidcConfig)).toMatchObject({
+        email: "customer@acme.test",
+        assertedAdmin: false,
+        assertedOrgMember: false,
+      });
+    }
+  });
+
+  test("customer SSO brokers cannot carry persisted Registry privilege", () => {
+    for (const role of ["registry-staff", "registry-member"]) {
+      const claims = {
+        sub: `privileged-customer-${role}`,
+        email: "customer@acme.test",
+        idp_connection: "sso-acme",
+        realm_access: { roles: [role] },
+      } as unknown as JWTPayload;
+
+      expectAuthError(
+        () => identityFromOidcTokenResponse(claims, {}, oidcConfig),
+        403,
+        "STAFF_SSO_REQUIRED",
+      );
+    }
+  });
+
+  test("malformed customer brokers and malformed role claims fail closed", () => {
+    for (const idp_connection of [
+      " github ",
+      "sso-",
+      "sso-Acme",
+      "sso-acme-",
+      "sso-org_not-a-uuid",
+      "sso-org_019ED1A3-5B7C-7ABC-8DEF-0123456789AB",
+    ]) {
+      const claims = {
+        sub: "malformed-customer-broker",
+        email: "customer@acme.test",
+        email_verified: true,
+        idp_connection,
+      } as unknown as JWTPayload;
+
+      expectAuthError(
+        () => identityFromOidcTokenResponse(claims, {}, oidcConfig),
+        401,
+        "BAD_ID_TOKEN",
+      );
+    }
+
+    const malformedRoles = {
+      sub: "malformed-customer-roles",
+      email: "customer@acme.test",
+      idp_connection: "sso-acme",
+      realm_access: { roles: ["default-roles", 7] },
+    } as unknown as JWTPayload;
+    expectAuthError(
+      () => identityFromOidcTokenResponse(malformedRoles, {}, oidcConfig),
+      401,
+      "BAD_ID_TOKEN",
+    );
+
+    const unknownBrokerWithPrivilege = {
+      sub: "unknown-privileged-broker",
+      email: "customer@acme.test",
+      email_verified: true,
+      idp_connection: "attacker-idp",
+      realm_access: { roles: ["registry-staff"] },
+    } as unknown as JWTPayload;
+    expectAuthError(
+      () => identityFromOidcTokenResponse(unknownBrokerWithPrivilege, {}, oidcConfig),
+      401,
+      "BAD_ID_TOKEN",
+    );
+  });
+
+  test("a verified Gas City email cannot enter through a customer SSO broker", () => {
+    const claims = {
+      sub: "staff-via-customer-sso",
+      email: "staff@gascity.com",
+      email_verified: true,
+      idp_connection: "sso-acme",
+      realm_access: { roles: [] },
+    } as unknown as JWTPayload;
+
+    expectAuthError(
+      () => identityFromOidcTokenResponse(claims, {}, oidcConfig),
+      403,
+      "STAFF_SSO_REQUIRED",
+    );
+  });
+
   test("a Gas City email authenticated by GitHub is denied without relying on realm roles", () => {
     const claims = {
       sub: "staff-via-github",
@@ -278,6 +380,7 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
       sub: "staff-via-sso",
       email: "staff@gascity.com",
       email_verified: true,
+      hd: " GASCITY.COM ",
       idp_connection: "gascity-sso",
       realm_access: { roles: ["registry-staff"] },
     } as unknown as JWTPayload;
@@ -304,6 +407,9 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
       { email: "someone@example.com", email_verified: true },
       { email_verified: true },
       { email: "someone@gascity.com", email_verified: false },
+      { email: "someone@gascity.com.", email_verified: true },
+      { email: "bad local@gascity.com", email_verified: true },
+      { email: "someone@gascity.com", email_verified: true, hd: "evil.test" },
     ]) {
       const claims = {
         sub: "bad-staff-email",
