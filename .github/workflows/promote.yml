@@ -31,20 +31,13 @@ jobs:
     # workflow_run's branches filter matches head_branch, which a fork PR can spoof (a fork branch
     # named "main"). Trust only a push, from THIS repo, on main, that succeeded — never a PR/fork.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_repository.full_name == github.repository &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.conclusion == 'success')
+      vars.PROMOTE_PAUSED != 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.conclusion == 'success'))
     steps:
-      - name: Kill switch
-        run: |
-          if [ "${{ vars.PROMOTE_PAUSED }}" = "true" ]; then
-            echo "## Promotion paused (PROMOTE_PAUSED=true) — skipping" >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::PROMOTE_PAUSED=true — skipping promotion"
-            exit 0
-          fi
-
       - name: Resolve target, pin to the live main tip
         id: target
         env:
