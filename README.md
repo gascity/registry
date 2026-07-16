@@ -92,6 +92,7 @@ OIDC_CLIENT_ID=<registry client id>
 OIDC_CLIENT_SECRET=<registry client secret>
 OIDC_GASCITY_USER_ID_CLAIM=gascity_user_id
 OIDC_GASCITY_ACCOUNT_ID_CLAIM=gascity_account_id
+OIDC_ENFORCE_BROKER_BOUNDARY=true
 GITHUB_APP_SLUG=<registry GitHub App slug>
 GITHUB_APP_CLIENT_ID=<registry GitHub App client id>
 GITHUB_APP_CLIENT_SECRET=<registry GitHub App client secret>
@@ -100,9 +101,11 @@ REGISTRY_GC_BIN=/usr/local/bin/gc
 ```
 
 Production auth is OIDC/Keycloak (`auth.gascity.com`); the `registry-staff` (admin)
-and `registry-member` (org publisher) roles ride the id_token. A legacy WorkOS
-provider still exists in the code (`REGISTRY_AUTH_PROVIDER=workos`) but is not the
-deployed path.
+and `registry-member` (org publisher) roles ride the id_token. Production also requires the
+signed, per-session `idp_connection` claim. GitHub and validated customer `sso-*` brokers remain
+nonstaff; privileged roles are honored only on the Gas City SSO rail.
+A legacy WorkOS provider still exists in the code (`REGISTRY_AUTH_PROVIDER=workos`) but is not
+the deployed path.
 
 When `DATABASE_URL` is absent the server intentionally falls back to the local JSON
 store, which is suitable for development but not for production.

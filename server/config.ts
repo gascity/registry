@@ -19,6 +19,9 @@ export type ServerConfig = {
     // straight to this IdP) and for the /staff entry. Unset = show the chooser (legacy behavior).
     idpHint?: string;
     staffIdpHint?: string;
+    // Gas City production requires a signed, per-session Keycloak broker-source claim. Generic
+    // OIDC deployments default this off because they do not share that realm contract.
+    enforceBrokerBoundary: boolean;
   };
   workos?: {
     apiBaseUrl: string;
@@ -70,6 +73,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const gasCityAccountIdClaim = env.OIDC_GASCITY_ACCOUNT_ID_CLAIM?.trim() || undefined;
   const idpHint = env.OIDC_IDP_HINT?.trim() || undefined;
   const staffIdpHint = env.OIDC_STAFF_IDP_HINT?.trim() || undefined;
+  const enforceBrokerBoundary = env.OIDC_ENFORCE_BROKER_BOUNDARY?.trim().toLowerCase() === "true";
   const workosApiKey = env.WORKOS_API_KEY?.trim();
   const workosClientId = env.WORKOS_CLIENT_ID?.trim();
   const workosApiBaseUrl = trimTrailingSlash(env.WORKOS_API_BASE_URL?.trim() || "https://api.workos.com");
@@ -92,6 +96,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
           gasCityAccountIdClaim,
           idpHint,
           staffIdpHint,
+          enforceBrokerBoundary,
         }
       : undefined;
   const workos =
