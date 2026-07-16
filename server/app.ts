@@ -81,6 +81,7 @@ export type RegistryAppDependencies = {
     config: ServerConfig,
   ) => Promise<PublishRegistryEntry>;
   verifyGitHubActionsOidcToken?: (token: string) => Promise<GitHubActionsIdentity>;
+  verifyRegistryEiaToken?: Parameters<typeof getRequestApiTokenAuth>[3];
   exchangeGitHubCode?: (config: ServerConfig, code: string) => Promise<string>;
   discoverGitHubPublishCandidates?: (accessToken: string) => Promise<GitHubPublishImportCreateInput>;
   verifyGitHubPackOwnership?: (
@@ -150,7 +151,12 @@ export function createRegistryFetchHandler(dependencies: RegistryAppDependencies
 async function handleApi(request: Request) {
   assertOrigin(request, config);
   const url = new URL(request.url);
-  const apiTokenAuth = await getRequestApiTokenAuth(request, store);
+  const apiTokenAuth = await getRequestApiTokenAuth(
+    request,
+    store,
+    config,
+    dependencies.verifyRegistryEiaToken,
+  );
   const session = apiTokenAuth ? null : await getRequestSession(request, store);
 
   if (request.method === "GET" && url.pathname === "/api/me") {

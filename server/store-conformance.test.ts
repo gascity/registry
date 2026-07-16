@@ -151,6 +151,59 @@ function ownershipInput(repoFull: string): VerifiedPackOwnershipInput {
   };
 }
 
+type StoredEiaUser = {
+  id: string;
+  gascityUserId: string;
+  status: "active" | "disabled";
+};
+
+async function disableUserForConformance(store: RegistryStore, dbUrl: string | undefined, userId: string) {
+  if (store.kind === "file") {
+    const users = (store as unknown as { users: Map<string, StoredEiaUser> }).users;
+    const user = users.get(userId);
+    if (!user) throw new Error(`File conformance user ${userId} not found.`);
+    user.status = "disabled";
+    return;
+  }
+
+  if (!dbUrl) throw new Error("Postgres conformance lane is missing its database URL.");
+  const sql = postgres(dbUrl, { max: 1 });
+  try {
+    const rows = await sql`UPDATE users SET status = 'disabled' WHERE id = ${userId} RETURNING id`;
+    if (rows.length !== 1) throw new Error(`Postgres conformance user ${userId} not found.`);
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+async function storedUsersForEiaSubject(
+  store: RegistryStore,
+  dbUrl: string | undefined,
+  subject: string,
+): Promise<StoredEiaUser[]> {
+  if (store.kind === "file") {
+    const users = (store as unknown as { users: Map<string, StoredEiaUser> }).users;
+    return [...users.values()]
+      .filter((user) => user.gascityUserId === subject)
+      .map(({ id, gascityUserId, status }) => ({ id, gascityUserId, status }));
+  }
+
+  if (!dbUrl) throw new Error("Postgres conformance lane is missing its database URL.");
+  const sql = postgres(dbUrl, { max: 1 });
+  try {
+    const rows = await sql`
+      SELECT id, gascity_user_id, status FROM users WHERE gascity_user_id = ${subject}
+    `;
+    return rows.map((row) => ({
+      id: String(row.id),
+      gascityUserId: String(row.gascity_user_id),
+      status: row.status === "disabled" ? "disabled" : "active",
+    }));
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 for (const lane of lanes) {
   describe(`RegistryStore conformance (${lane.name})`, () => {
     let store: RegistryStore;
@@ -217,6 +270,59 @@ for (const lane of lanes) {
       // A plain user is never an org member.
       const outsider = await store.ensureUser(identity());
       expect(await store.isOrgMember(outsider.id)).toBe(false);
+    });
+
+    test("EIA first use preserves existing account state and creates only missing users", async () => {
+      const existingIdentity = identity({
+        displayName: "Kept Profile",
+        assertedOrgMember: true,
+      });
+      const existing = await store.ensureUser(existingIdentity);
+      await store.setUserRoleForDev(existing.id, "moderator");
+
+      const resolved = await store.getOrCreateUserForEiaSubject(existingIdentity.gasCityUserId);
+      expect(resolved).toMatchObject({
+        id: existing.id,
+        displayName: "Kept Profile",
+        role: "moderator",
+        status: "active",
+      });
+      expect(await store.isOrgMember(existing.id)).toBe(true);
+
+      const newSubject = `usr_${uid("eia")}`;
+      const created = await store.getOrCreateUserForEiaSubject(newSubject);
+      expect(created).toMatchObject({ role: "user", status: "active" });
+      expect(created?.id).toBeTruthy();
+      expect(await store.isOrgMember(created!.id)).toBe(false);
+      expect((await store.getOrCreateUserForEiaSubject(newSubject))?.id).toBe(created?.id);
+
+      const distinctSubject = `usr_${uid("eia-distinct")}`;
+      const distinct = await store.getOrCreateUserForEiaSubject(distinctSubject);
+      expect(distinct?.id).toBeTruthy();
+      expect(distinct!.id).not.toBe(created!.id);
+
+      const concurrentSubject = `usr_${uid("eia-race")}`;
+      const concurrent = await Promise.all([
+        store.getOrCreateUserForEiaSubject(concurrentSubject),
+        store.getOrCreateUserForEiaSubject(concurrentSubject),
+      ]);
+      expect(concurrent[0]).not.toBeNull();
+      expect(concurrent[1]).not.toBeNull();
+      expect(concurrent[0]!.id.length).toBeGreaterThan(0);
+      expect(concurrent[1]!.id).toBe(concurrent[0]!.id);
+
+      const disabledIdentity = identity({ displayName: "Disabled Profile" });
+      const disabled = await store.ensureUser(disabledIdentity);
+      await disableUserForConformance(store, dbUrl, disabled.id);
+
+      expect(await store.getOrCreateUserForEiaSubject(disabledIdentity.gasCityUserId)).toBeNull();
+      expect(await storedUsersForEiaSubject(store, dbUrl, disabledIdentity.gasCityUserId)).toEqual([
+        {
+          id: disabled.id,
+          gascityUserId: disabledIdentity.gasCityUserId,
+          status: "disabled",
+        },
+      ]);
     });
 
     test("sessions round-trip and destroy", async () => {

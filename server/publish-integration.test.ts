@@ -74,9 +74,11 @@ describe("local registry publish integration", () => {
           submitter,
           await harness.createPack("cli-device", "0.1.0"),
         ),
+        await harness.publishWithEiaToken(await harness.createPack("sts-eia", "0.1.0")),
       ];
       expect(claimOnly.map((request) => request.submissionMethod)).toEqual([
         "web_session",
+        "api_token",
         "api_token",
         "api_token",
         "api_token",
@@ -438,6 +440,14 @@ async function createPublishHarness() {
         actorId: "actor_123",
         eventName: "push",
       }) satisfies GitHubActionsIdentity,
+    verifyRegistryEiaToken: async (token) => {
+      if (!token.startsWith("test-eia:")) throw new Error("invalid test EIA");
+      return {
+        subject: token.slice("test-eia:".length),
+        jti: `jti-${token.length}`,
+        scopes: ["registry:publish"],
+      };
+    },
     exchangeGitHubCode: async () => "github-user-token",
     discoverGitHubPublishCandidates: async () =>
       ({
@@ -558,6 +568,10 @@ async function createPublishHarness() {
     return publishWithBearerToken(minted.access_token, pack);
   }
 
+  async function publishWithEiaToken(pack: TestPack) {
+    return publishWithBearerToken(`test-eia:usr_${pack.slug}`, pack);
+  }
+
   async function publishWithGitHubImport(client: SignedInClient, pack: TestPack) {
     importCandidate = githubCandidateFor(pack);
     const started = await client.json<{ authorizationUrl: string }>("/api/publish/github/start", {
@@ -651,6 +665,7 @@ async function createPublishHarness() {
     publishWithCliBrowserToken,
     publishWithCliDeviceToken,
     publishWithGitHubActionsToken,
+    publishWithEiaToken,
     publishWithGitHubImport,
     approve,
     approveExpectingOwnershipError,
@@ -671,6 +686,11 @@ function testConfig(): ServerConfig {
     mountBase: "",
     sessionSecret: "integration-test-session-secret-value",
     localDataPath: ".registry-data/integration-test.json",
+    eia: {
+      issuer: "https://edge.gascity.internal",
+      audience: "registry",
+      jwksUrl: "https://works.gascity.com/sts/v0/jwks/registry",
+    },
     githubApp: {
       appSlug: "test-registry-app",
       clientId: "test-client-id",

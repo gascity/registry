@@ -150,6 +150,12 @@ gc pack registry login
 gc pack registry publish path/to/pack
 ```
 
+The publish endpoint also accepts a short-lived Gasworks STS assertion with
+audience `registry` and scope `registry:publish`. This lets a Gasworks-authenticated
+CLI publish without creating or storing a second Registry token. The two formats
+are dispatched strictly: `gcr_` credentials are checked only by the Registry token
+store, while every other bearer is checked only as an STS assertion.
+
 Headless environments can use `gc pack registry login --device`, or pass an existing
 token with `GC_REGISTRY_TOKEN`. GitHub Actions can publish without a stored
 secret by granting OIDC:
@@ -169,7 +175,7 @@ scoped to the exact repo, commit, pack path, name, and version. The registry
 stores only token hashes, short prefixes, labels, optional expiry and scope
 metadata, and usage timestamps. Revoked or expired tokens can no longer
 authenticate publish requests. Browser sessions remain cookie + CSRF
-authenticated; bearer tokens are accepted only by routes that explicitly opt in,
+authenticated; bearer credentials are accepted only by routes that explicitly opt in,
 currently `/api/me` introspection and direct publish request creation.
 
 The app defaults to the generated aggregate JSON:

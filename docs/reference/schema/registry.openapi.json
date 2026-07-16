@@ -3,7 +3,7 @@
   "info": {
     "title": "Gas City Registry (Pack/Skill Registry) API",
     "version": "0.1.0",
-    "description": "Hand-authored (spec-first) OpenAPI for the Gas City pack/skill registry (service: registry): the public CLI supply-chain surface (registry.toml, catalog.json), account + API-token management, the publish-request flow (gcr_ bearer / GitHub-Actions OIDC / session), device-grant CLI auth, and reviews. Grounded verbatim in server/app.ts + server/types.ts origin/main. Fully public product; spec-first with openapi-typescript. Wave-4 product spec.",
+    "description": "Hand-authored (spec-first) OpenAPI for the Gas City pack/skill registry (service: registry): the public CLI supply-chain surface (registry.toml, catalog.json), account + API-token management, the publish-request flow (gcr_ bearer / Gasworks STS EIA / GitHub-Actions OIDC / session), device-grant CLI auth, and reviews. Grounded verbatim in server/app.ts + server/types.ts origin/main. Fully public product; spec-first with openapi-typescript. Wave-4 product spec.",
     "x-gc-source": {
       "repo": "gascity/registry",
       "commit": "f412c83",
@@ -95,7 +95,7 @@
       "get": {
         "operationId": "getMe",
         "summary": "Current session/token identity",
-        "description": "Session or gcr_ bearer.",
+        "description": "Session, Registry-native gcr_ bearer, or Gasworks STS EIA.",
         "x-gc-enforcement": "authenticate-only",
         "x-gc-plane": "both",
         "security": [
@@ -594,7 +594,7 @@
       "post": {
         "operationId": "createPublishRequest",
         "summary": "Submit a publish request",
-        "description": "gcr_ bearer OR session+CSRF. ?validate=1 for dry-run.",
+        "description": "Registry-native gcr_ bearer, Gasworks STS EIA, or session+CSRF. ?validate=1 for dry-run.",
         "x-gc-enforcement": "authenticate-only",
         "x-gc-plane": "both",
         "security": [
@@ -1127,8 +1127,8 @@
       "gcrToken": {
         "type": "http",
         "scheme": "bearer",
-        "bearerFormat": "gcr_",
-        "description": "Registry API key (prefix gcr_)."
+        "bearerFormat": "gcr_ or EIA JWT",
+        "description": "Registry API key (prefix gcr_) or short-lived Gasworks STS EIA for audience registry."
       },
       "cookieSession": {
         "type": "apiKey",
