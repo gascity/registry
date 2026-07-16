@@ -35,7 +35,7 @@ export type ApiTokenCreateResult = ApiTokenRow & {
 
 export type ApiTokenAuthResult = {
   tokenId: string;
-  kind: ApiTokenRow["kind"];
+  kind: ApiTokenRow["kind"] | "sts_eia";
   constraints?: ApiTokenPublishConstraints;
   user: SessionUser;
 };
@@ -305,6 +305,7 @@ export interface RegistryStore {
   // Cheap readiness probe: resolves iff the backing store can currently serve queries.
   ping(): Promise<void>;
   ensureUser(identity: IdentityClaims): Promise<SessionUser>;
+  getOrCreateUserForEiaSubject(subject: string): Promise<SessionUser | null>;
   getSession(token: string): Promise<SessionRecord | null>;
   createSession(userId: string): Promise<{ token: string; csrfToken: string; expiresAt: Date }>;
   destroySession(token: string): Promise<void>;

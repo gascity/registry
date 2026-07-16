@@ -1,14 +1,20 @@
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import {
+  createRemoteJWKSet,
+  jwtVerify,
+  type JWTPayload,
+  type JWTVerifyGetKey,
+} from "jose";
 import type { ServerConfig } from "./config";
 import { pkceChallenge, randomToken, signValue, verifySignedValue } from "./crypto";
 import { appendCookie, cookiePath, parseCookies, redirect, safeRedirectPath } from "./http";
-import { parseBearerToken } from "./tokens";
+import { API_TOKEN_PREFIX, parseBearerToken } from "./tokens";
 import type { ApiTokenAuthResult, IdentityClaims, RegistryStore, SessionRecord } from "./types";
 
 const sessionCookie = "registry_session";
 const oauthCookie = "registry_oauth";
 const oauthMaxAgeSeconds = 10 * 60;
 const sessionMaxAgeSeconds = 30 * 24 * 60 * 60;
+const registryPublishScope = "registry:publish";
 
 type Discovery = {
   authorization_endpoint: string;
@@ -28,6 +34,18 @@ type OAuthState = {
 
 let cachedDiscovery: { issuer: string; discovery: Discovery; jwks: ReturnType<typeof createRemoteJWKSet> } | null =
   null;
+const registryEiaJwks = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+
+export type RegistryEiaPrincipal = {
+  subject: string;
+  jti: string;
+  scopes: string[];
+};
+
+export type RegistryEiaVerifier = (
+  token: string,
+  config: NonNullable<ServerConfig["eia"]>,
+) => Promise<RegistryEiaPrincipal>;
 
 export function getSessionCookie(request: Request) {
   return parseCookies(request).get(sessionCookie);
@@ -45,11 +63,82 @@ export async function getRequestSession(
 export async function getRequestApiTokenAuth(
   request: Request,
   store: RegistryStore,
+  config: ServerConfig,
+  verifyEia: RegistryEiaVerifier = verifyRegistryEiaToken,
 ): Promise<ApiTokenAuthResult | null> {
   const header = request.headers.get("authorization") ?? request.headers.get("Authorization");
+  if (header === null) return null;
   const token = parseBearerToken(header);
-  if (!token) return null;
-  return await store.getUserForApiToken(token);
+  if (!token) throw invalidBearer();
+
+  if (token.startsWith(API_TOKEN_PREFIX)) {
+    const native = await store.getUserForApiToken(token);
+    if (!native) throw invalidBearer();
+    return native;
+  }
+
+  if (!config.eia) throw invalidBearer();
+  let principal: RegistryEiaPrincipal;
+  try {
+    principal = await verifyEia(token, config.eia);
+  } catch {
+    throw invalidBearer();
+  }
+  if (!principal.scopes.includes(registryPublishScope)) throw insufficientScope();
+  const user = await store.getOrCreateUserForEiaSubject(principal.subject);
+  if (!user) throw invalidBearer();
+  return { tokenId: principal.jti, kind: "sts_eia", user };
+}
+
+export async function verifyRegistryEiaToken(
+  token: string,
+  config: NonNullable<ServerConfig["eia"]>,
+  getKey: JWTVerifyGetKey = remoteRegistryEiaJwks(config.jwksUrl),
+): Promise<RegistryEiaPrincipal> {
+  const { payload, protectedHeader } = await jwtVerify(token, getKey, {
+    algorithms: ["RS256"],
+    issuer: config.issuer,
+    audience: config.audience,
+    clockTolerance: 30,
+    requiredClaims: ["sub", "iat", "exp", "jti", "org_id", "subject_type", "scopes"],
+  });
+  const subject = exactStringClaim(payload.sub);
+  const jti = exactStringClaim(payload.jti);
+  const orgId = exactStringClaim(payload.org_id);
+  if (
+    !subject ||
+    !jti ||
+    !orgId ||
+    !exactStringClaim(protectedHeader.kid) ||
+    protectedHeader.typ !== "JWT" ||
+    payload.subject_type !== "user" ||
+    !Array.isArray(payload.scopes) ||
+    !payload.scopes.every((scope) => typeof scope === "string")
+  ) {
+    throw invalidBearer();
+  }
+  return { subject, jti, scopes: payload.scopes };
+}
+
+function remoteRegistryEiaJwks(url: string) {
+  let jwks = registryEiaJwks.get(url);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(url));
+    registryEiaJwks.set(url, jwks);
+  }
+  return jwks;
+}
+
+function invalidBearer() {
+  return new AuthError(401, "INVALID_BEARER", "Bearer credential is invalid.");
+}
+
+function insufficientScope() {
+  return new AuthError(
+    403,
+    "INSUFFICIENT_SCOPE",
+    `Bearer credential lacks ${registryPublishScope} scope.`,
+  );
 }
 
 export function requireCsrf(request: Request, session: SessionRecord | null) {

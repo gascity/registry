@@ -8,6 +8,11 @@ export type ServerConfig = {
   sessionSecret: string;
   databaseUrl?: string;
   localDataPath: string;
+  eia?: {
+    issuer: string;
+    audience: "registry";
+    jwksUrl: string;
+  };
   authProvider?: "oidc" | "workos";
   oidc?: {
     issuer: string;
@@ -81,6 +86,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const githubAppClientId = env.GITHUB_APP_CLIENT_ID?.trim();
   const githubAppClientSecret = env.GITHUB_APP_CLIENT_SECRET?.trim();
   const githubAppWebhookSecret = env.GITHUB_APP_WEBHOOK_SECRET?.trim();
+  const eiaIssuer = env.REGISTRY_EIA_ISSUER?.trim();
+  const eiaJwksUrl = env.REGISTRY_EIA_JWKS_URL?.trim();
+  if (Boolean(eiaIssuer) !== Boolean(eiaJwksUrl)) {
+    throw new Error("REGISTRY_EIA_ISSUER and REGISTRY_EIA_JWKS_URL must be configured together.");
+  }
   const publishValidationTimeoutMs = Number.parseInt(
     env.REGISTRY_PUBLISH_VALIDATION_TIMEOUT_MS ?? "120000",
     10,
@@ -165,6 +175,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     sessionSecret,
     databaseUrl,
     localDataPath: env.REGISTRY_DATA_PATH?.trim() || ".registry-data/registry.local.json",
+    eia:
+      eiaIssuer && eiaJwksUrl
+        ? {
+            issuer: trimTrailingSlash(eiaIssuer),
+            audience: "registry",
+            jwksUrl: eiaJwksUrl,
+          }
+        : undefined,
     authProvider,
     oidc,
     workos,

@@ -822,6 +822,31 @@ export class PostgresRegistryStore implements RegistryStore {
     return sessionUser(created as any);
   }
 
+  async getOrCreateUserForEiaSubject(subject: string): Promise<SessionUser | null> {
+    const existing = await this.sql`
+      SELECT * FROM users WHERE gascity_user_id = ${subject} LIMIT 1
+    `;
+    if (existing.length > 0) {
+      const user = sessionUser(existing[0] as any);
+      return user.status === "active" ? user : null;
+    }
+
+    const id = newId("user");
+    const baseHandle = normalizeHandle(subject) ?? "user";
+    const handle = await this.resolveHandle(`${baseHandle.slice(0, 31)}-${id.slice(-8)}`, id);
+    const created = await this.sql`
+      INSERT INTO users (
+        id, gascity_user_id, handle, display_name, role, status, org_member, created_at, updated_at
+      )
+      VALUES (${id}, ${subject}, ${handle}, ${handle}, 'user', 'active', false, now(), now())
+      ON CONFLICT (gascity_user_id) DO UPDATE
+      SET gascity_user_id = EXCLUDED.gascity_user_id
+      RETURNING *
+    `;
+    const user = sessionUser(created[0] as any);
+    return user.status === "active" ? user : null;
+  }
+
   async getSession(token: string): Promise<SessionRecord | null> {
     const rows = await this.sql`
       SELECT
@@ -2037,6 +2062,34 @@ class FileRegistryStore implements RegistryStore {
       orgMember: !!identity.assertedOrgMember,
     };
     this.users.set(user.id, user);
+    await this.save();
+    return user;
+  }
+
+  async getOrCreateUserForEiaSubject(subject: string): Promise<SessionUser | null> {
+    for (const user of this.users.values()) {
+      if (user.gascityUserId === subject) {
+        return user.status === "active" ? user : null;
+      }
+    }
+    const id = newId("user");
+    const baseHandle = normalizeHandle(subject) ?? "user";
+    const handle = `${baseHandle.slice(0, 31)}-${id.slice(-8)}`;
+    const user: SessionUser & {
+      gascityUserId: string;
+      gascityAccountId?: string;
+      oidcSubject?: string;
+      orgMember?: boolean;
+    } = {
+      id,
+      gascityUserId: subject,
+      handle,
+      displayName: handle,
+      role: "user",
+      status: "active",
+      orgMember: false,
+    };
+    this.users.set(id, user);
     await this.save();
     return user;
   }

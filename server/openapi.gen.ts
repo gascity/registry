@@ -73,7 +73,7 @@ export interface paths {
         };
         /**
          * Current session/token identity
-         * @description Session or gcr_ bearer.
+         * @description Session, Registry-native gcr_ bearer, or Gasworks STS EIA.
          */
         get: operations["getMe"];
         put?: never;
@@ -299,7 +299,7 @@ export interface paths {
         put?: never;
         /**
          * Submit a publish request
-         * @description gcr_ bearer OR session+CSRF. ?validate=1 for dry-run.
+         * @description Registry-native gcr_ bearer, Gasworks STS EIA, or session+CSRF. ?validate=1 for dry-run.
          */
         post: operations["createPublishRequest"];
         delete?: never;
