@@ -123,7 +123,13 @@ describe("identityFromOidcTokenResponse recomputes authz from the VERIFIED id_to
   test("an unsigned userinfo response cannot assert staff or org membership (spoof defense)", () => {
     // The verified id_token carries NEITHER privileged role; the (unsigned) userinfo tries to
     // inject BOTH. Authorization must be recomputed from the id_token alone -> both false.
-    const claims = { sub: "victim", realm_access: { roles: ["default-roles"] } } as unknown as JWTPayload;
+    const claims = {
+      sub: "victim",
+      email: "victim@example.com",
+      email_verified: true,
+      idp_connection: "github",
+      realm_access: { roles: ["default-roles"] },
+    } as unknown as JWTPayload;
     const userInfo = {
       realm_access: { roles: ["registry-staff", "registry-member"] },
     } as unknown as JWTPayload;
@@ -135,6 +141,8 @@ describe("identityFromOidcTokenResponse recomputes authz from the VERIFIED id_to
   test("roles in the verified id_token DO grant, while userinfo still enriches profile fields", () => {
     const claims = {
       sub: "staffer",
+      email: "staffer@gascity.com",
+      idp_connection: "gascity-sso",
       realm_access: { roles: ["registry-staff", "registry-member"] },
     } as unknown as JWTPayload;
     const userInfo = { name: "Display From Userinfo" } as unknown as JWTPayload;
@@ -142,6 +150,130 @@ describe("identityFromOidcTokenResponse recomputes authz from the VERIFIED id_to
     expect(identity.assertedAdmin).toBe(true);
     expect(identity.assertedOrgMember).toBe(true);
     expect(identity.displayName).toBe("Display From Userinfo"); // profile merge still works
+  });
+});
+
+describe("identityFromOidcTokenResponse enforces the verified broker boundary", () => {
+  test("an external customer authenticated by GitHub is admitted", () => {
+    const claims = {
+      sub: "customer-1",
+      email: "customer@example.com",
+      email_verified: true,
+      idp_connection: "github",
+      realm_access: { roles: ["default-roles"] },
+    } as unknown as JWTPayload;
+
+    expect(identityFromOidcTokenResponse(claims, {}, oidcConfig)).toMatchObject({
+      email: "customer@example.com",
+      assertedAdmin: false,
+    });
+  });
+
+  test("a Gas City email authenticated by GitHub is denied even if a staff role persisted", () => {
+    const claims = {
+      sub: "staff-via-github",
+      email: "Staff@GasCity.COM.",
+      email_verified: true,
+      idp_connection: "github",
+      realm_access: { roles: ["registry-staff"] },
+    } as unknown as JWTPayload;
+
+    expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
+      "Gas City staff sign in with Gas City SSO",
+    );
+  });
+
+  test("Gas City staff authenticated by SSO with the verified role are admitted", () => {
+    const claims = {
+      sub: "staff-via-sso",
+      email: "staff@gascity.com",
+      idp_connection: "gascity-sso",
+      realm_access: { roles: ["registry-staff"] },
+    } as unknown as JWTPayload;
+
+    expect(identityFromOidcTokenResponse(claims, {}, oidcConfig).assertedAdmin).toBe(true);
+  });
+
+  test("the staff broker fails closed when its verified token lacks the staff role", () => {
+    const claims = {
+      sub: "not-staff",
+      email: "someone@example.com",
+      idp_connection: "gascity-sso",
+      realm_access: { roles: [] },
+    } as unknown as JWTPayload;
+
+    expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
+      "Gas City staff sign in with Gas City SSO",
+    );
+  });
+
+  test("missing or unknown verified broker claims fail closed", () => {
+    for (const idp_connection of [undefined, "attacker-idp", 42]) {
+      const claims = {
+        sub: "ambiguous-source",
+        email: "customer@example.com",
+        ...(idp_connection === undefined ? {} : { idp_connection }),
+      } as unknown as JWTPayload;
+
+      expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
+        "Sign-in identity provider could not be verified",
+      );
+    }
+  });
+
+  test("a GitHub token without a verified email fails closed", () => {
+    const claims = {
+      sub: "missing-email",
+      email_verified: true,
+      idp_connection: "github",
+    } as unknown as JWTPayload;
+
+    expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
+      "Sign-in identity is missing a verified email address",
+    );
+  });
+
+  test("a GitHub token with an unverified email fails closed", () => {
+    for (const email_verified of [undefined, false, "true"]) {
+      const claims = {
+        sub: "unverified-email",
+        email: "customer@example.com",
+        idp_connection: "github",
+        ...(email_verified === undefined ? {} : { email_verified }),
+      } as unknown as JWTPayload;
+
+      expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
+        "Sign-in identity is missing a verified email address",
+      );
+    }
+  });
+
+  test("userinfo cannot forge the broker or hide a verified GitHub staff email", () => {
+    const missingSource = {
+      sub: "userinfo-source-spoof",
+      email: "customer@example.com",
+    } as unknown as JWTPayload;
+    expect(() =>
+      identityFromOidcTokenResponse(
+        missingSource,
+        { idp_connection: "github" } as unknown as JWTPayload,
+        oidcConfig,
+      ),
+    ).toThrow("Sign-in identity provider could not be verified");
+
+    const verifiedStaffEmail = {
+      sub: "userinfo-email-spoof",
+      email: "staff@gascity.com",
+      email_verified: true,
+      idp_connection: "github",
+    } as unknown as JWTPayload;
+    expect(() =>
+      identityFromOidcTokenResponse(
+        verifiedStaffEmail,
+        { email: "customer@example.com" } as unknown as JWTPayload,
+        oidcConfig,
+      ),
+    ).toThrow("Gas City staff sign in with Gas City SSO");
   });
 });
 

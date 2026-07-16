@@ -233,6 +233,7 @@ export function identityFromOidcTokenResponse(
   userInfo: JWTPayload,
   config: ServerConfig,
 ): IdentityClaims {
+  enforceVerifiedBrokerBoundary(claims);
   const identity = identityFromClaims({ ...claims, ...userInfo }, config);
   const verifiedRoles = realmRoles(claims);
   identity.assertedAdmin = verifiedRoles.includes(STAFF_REALM_ROLE);
@@ -370,6 +371,60 @@ const STAFF_REALM_ROLE = "registry-staff";
 // a verified id_token provably means "current @gascity member". Live-synced in ensureUser
 // (unlike the promote-only staff role): losing the role de-provisions on the next login.
 const REGISTRY_MEMBER_REALM_ROLE = "registry-member";
+
+const GITHUB_IDP = "github";
+const GASCITY_SSO_IDP = "gascity-sso";
+
+// The customer realm stamps the broker used for this exact login into a user-session note and
+// maps it into the Registry ID token as `idp_connection`. Unlike a user attribute or userinfo,
+// this claim is tied to the current broker session and covered by the realm's token signature.
+// Fail closed when it is absent or unknown: a persistent registry-staff role alone must never
+// turn a later GitHub login into a staff login.
+function enforceVerifiedBrokerBoundary(claims: JWTPayload) {
+  const broker = stringClaim(claims.idp_connection);
+  if (broker === GITHUB_IDP) {
+    const email = stringClaim(claims.email);
+    if (!email || claims.email_verified !== true) {
+      throw new AuthError(
+        401,
+        "BAD_ID_TOKEN",
+        "Sign-in identity is missing a verified email address.",
+      );
+    }
+    if (isGasCityStaffEmail(email)) {
+      throw new AuthError(
+        403,
+        "STAFF_SSO_REQUIRED",
+        "Gas City staff sign in with Gas City SSO, not GitHub — go to registry.gascity.com/staff.",
+      );
+    }
+    return;
+  }
+
+  if (broker === GASCITY_SSO_IDP) {
+    if (!realmRoles(claims).includes(STAFF_REALM_ROLE)) {
+      throw new AuthError(
+        403,
+        "STAFF_SSO_REQUIRED",
+        "Gas City staff sign in with Gas City SSO — go to registry.gascity.com/staff.",
+      );
+    }
+    return;
+  }
+
+  throw new AuthError(
+    401,
+    "BAD_ID_TOKEN",
+    "Sign-in identity provider could not be verified.",
+  );
+}
+
+function isGasCityStaffEmail(email: string) {
+  const at = email.lastIndexOf("@");
+  if (at <= 0) return false;
+  const domain = email.slice(at + 1).toLowerCase();
+  return domain === "gascity.com" || domain === "gascity.com.";
+}
 
 // Keycloak emits realm roles as { realm_access: { roles: string[] } }. Read it defensively:
 // the claim is attacker-influenced shape-wise (it arrives in a token), so narrow every level.
