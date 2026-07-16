@@ -787,16 +787,16 @@ export class PostgresRegistryStore implements RegistryStore {
             handle = COALESCE(NULLIF(handle, ''), ${handle}),
             display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
             avatar_url = ${identity.avatarUrl ?? null},
-            -- Staff entitlement: an SSO-asserted registry-staff role promotes to admin.
+            -- Staff entitlement: an auth-boundary-verified registry-staff assertion promotes to admin.
             -- Promote-only and re-checked at the row (race-safe): never downgrades, and never
             -- overrides a deliberate moderator/admin grant (preserves manual roles + de-escalations).
             role = CASE
                      WHEN ${!!identity.assertedAdmin} AND role NOT IN ('admin', 'moderator')
                      THEN 'admin' ELSE role
                    END,
-            -- Org-publisher entitlement: LIVE-synced from the verified registry-member realm
-            -- role on every login (contrast the promote-only role above: role protects manual
-            -- grants; org_member's only source of truth is the IdP, so losing the role must
+            -- Org-publisher entitlement: LIVE-synced from the trusted registry-member assertion
+            -- on every login (contrast the promote-only role above: role protects manual
+            -- grants; org_member's only source of truth is the auth adapter, so losing it must
             -- de-provision on next login).
             org_member = ${!!identity.assertedOrgMember},
             updated_at = ${now}
@@ -2004,14 +2004,14 @@ class FileRegistryStore implements RegistryStore {
         user.gascityUserId = identity.gasCityUserId;
         user.gascityAccountId = identity.gasCityAccountId;
         user.oidcSubject = identity.subject;
-        // Promote-only staff elevation (mirrors the Postgres store): a registry-staff SSO
-        // assertion raises the default user role to admin, but never downgrades or overrides
-        // a deliberate moderator/admin grant.
+        // Promote-only staff elevation (mirrors the Postgres store): an auth-boundary-verified
+        // registry-staff assertion raises the default user role to admin, but never downgrades
+        // or overrides a deliberate moderator/admin grant.
         if (identity.assertedAdmin && user.role !== "admin" && user.role !== "moderator") {
           user.role = "admin";
         }
-        // Live-synced (contrast the promote-only role above): the IdP is the sole source of
-        // truth for org membership, so losing the realm role de-provisions on next login.
+        // Live-synced (contrast the promote-only role above): the auth adapter is the sole source
+        // of truth for org membership, so losing the assertion de-provisions on next login.
         user.orgMember = !!identity.assertedOrgMember;
         await this.save();
         return user;

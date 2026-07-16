@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { startLogin } from "./auth";
-import type { ServerConfig } from "./config";
+import { loadConfig, type ServerConfig } from "./config";
 
 const discovery = {
   authorization_endpoint: "https://auth.example.test/realms/r/protocol/openid-connect/auth",
@@ -71,5 +71,24 @@ describe("login kc_idp_hint routing", () => {
     expect(await hintFor("https://registry.gascity.com/api/auth/login", cfg({}))).toBeNull();
     // staff request with no staffIdpHint configured also falls through to the chooser
     expect(await hintFor("https://registry.gascity.com/staff", cfg({}), { staff: true })).toBeNull();
+  });
+});
+
+describe("OIDC broker-boundary configuration", () => {
+  const oidcEnv = {
+    OIDC_ISSUER: "https://auth.example.test/realms/customer",
+    OIDC_CLIENT_ID: "registry",
+    OIDC_CLIENT_SECRET: "secret",
+  };
+
+  test("generic OIDC defaults the Gas City-specific boundary off", () => {
+    expect(loadConfig(oidcEnv).oidc?.enforceBrokerBoundary).toBe(false);
+  });
+
+  test("production can explicitly require the signed broker-source contract", () => {
+    expect(
+      loadConfig({ ...oidcEnv, OIDC_ENFORCE_BROKER_BOUNDARY: "true" }).oidc
+        ?.enforceBrokerBoundary,
+    ).toBe(true);
   });
 });

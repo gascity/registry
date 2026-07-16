@@ -3,20 +3,25 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JWTPayload } from "jose";
-import { identityFromClaims, identityFromOidcTokenResponse } from "./auth";
+import { AuthError, identityFromOidcTokenResponse } from "./auth";
 import { createStore } from "./store";
 import type { ServerConfig } from "./config";
 import type { IdentityClaims } from "./types";
 
-// identityFromClaims only reads config.oidc; a minimal cast keeps the test focused.
+// The pure OIDC identity builder only reads config.oidc; a minimal cast keeps the test focused.
 const oidcConfig = {
   oidc: {
     issuer: "https://auth.gascity.com/realms/gasworks-customers",
     clientId: "registry",
     clientSecret: "x",
     gasCityUserIdClaim: "sub",
+    enforceBrokerBoundary: true,
   },
 } as unknown as ServerConfig;
+const genericOidcConfig = {
+  ...oidcConfig,
+  oidc: { ...oidcConfig.oidc!, enforceBrokerBoundary: false },
+};
 
 async function withStore(fn: (store: ReturnType<typeof createStore>) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "regstaff-"));
@@ -40,14 +45,24 @@ function identity(over: Partial<IdentityClaims> & { subject: string }): Identity
   };
 }
 
-describe("identityFromClaims derives assertedAdmin from realm_access.roles", () => {
+function expectAuthError(fn: () => unknown, status: number, code: string) {
+  try {
+    fn();
+    throw new Error("expected an AuthError");
+  } catch (error) {
+    expect(error).toBeInstanceOf(AuthError);
+    expect(error).toMatchObject({ status, code });
+  }
+}
+
+describe("identityFromOidcTokenResponse derives assertedAdmin from realm_access.roles", () => {
   test("registry-staff role present -> assertedAdmin true", () => {
     const claims = {
       sub: "staff-1",
       email: "jules@gascity.com",
       realm_access: { roles: ["default-roles", "registry-staff"] },
     } as unknown as JWTPayload;
-    expect(identityFromClaims(claims, oidcConfig).assertedAdmin).toBe(true);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(true);
   });
 
   test("no registry-staff role -> assertedAdmin false", () => {
@@ -56,12 +71,12 @@ describe("identityFromClaims derives assertedAdmin from realm_access.roles", () 
       email: "someone@github.io",
       realm_access: { roles: ["default-roles"] },
     } as unknown as JWTPayload;
-    expect(identityFromClaims(claims, oidcConfig).assertedAdmin).toBe(false);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(false);
   });
 
   test("no realm_access at all -> assertedAdmin false", () => {
     const claims = { sub: "ext-2", email: "x@github.io" } as unknown as JWTPayload;
-    expect(identityFromClaims(claims, oidcConfig).assertedAdmin).toBe(false);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(false);
   });
 
   test("malformed realm_access shapes are not trusted (defensive)", () => {
@@ -73,39 +88,39 @@ describe("identityFromClaims derives assertedAdmin from realm_access.roles", () 
       null,
     ]) {
       const claims = { sub: "atk", realm_access } as unknown as JWTPayload;
-      expect(identityFromClaims(claims, oidcConfig).assertedAdmin).toBe(false);
+      expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(false);
     }
   });
 });
 
-describe("identityFromClaims derives assertedOrgMember from the registry-member realm role", () => {
+describe("identityFromOidcTokenResponse derives assertedOrgMember from realm_access.roles", () => {
   test("registry-member role present -> assertedOrgMember true", () => {
     const claims = {
       sub: "member-1",
       email: "dev@gascity.com",
       realm_access: { roles: ["default-roles", "registry-member"] },
     } as unknown as JWTPayload;
-    expect(identityFromClaims(claims, oidcConfig).assertedOrgMember).toBe(true);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedOrgMember).toBe(true);
   });
 
   test("no registry-member role -> assertedOrgMember false", () => {
     const claims = { sub: "ext-1", realm_access: { roles: ["default-roles"] } } as unknown as JWTPayload;
-    expect(identityFromClaims(claims, oidcConfig).assertedOrgMember).toBe(false);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedOrgMember).toBe(false);
   });
 
   test("no realm_access at all -> assertedOrgMember false", () => {
     const claims = { sub: "ext-2" } as unknown as JWTPayload;
-    expect(identityFromClaims(claims, oidcConfig).assertedOrgMember).toBe(false);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedOrgMember).toBe(false);
   });
 
   test("registry-member and registry-staff are independent rails", () => {
     const member = { sub: "m", realm_access: { roles: ["registry-member"] } } as unknown as JWTPayload;
-    expect(identityFromClaims(member, oidcConfig)).toMatchObject({
+    expect(identityFromOidcTokenResponse(member, {}, genericOidcConfig)).toMatchObject({
       assertedOrgMember: true,
       assertedAdmin: false,
     });
     const staff = { sub: "s", realm_access: { roles: ["registry-staff"] } } as unknown as JWTPayload;
-    expect(identityFromClaims(staff, oidcConfig)).toMatchObject({
+    expect(identityFromOidcTokenResponse(staff, {}, genericOidcConfig)).toMatchObject({
       assertedOrgMember: false,
       assertedAdmin: true,
     });
@@ -114,7 +129,7 @@ describe("identityFromClaims derives assertedOrgMember from the registry-member 
   test("malformed realm_access shapes are not trusted (defensive)", () => {
     for (const realm_access of [{ roles: "registry-member" }, "registry-member", null]) {
       const claims = { sub: "atk", realm_access } as unknown as JWTPayload;
-      expect(identityFromClaims(claims, oidcConfig).assertedOrgMember).toBe(false);
+      expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedOrgMember).toBe(false);
     }
   });
 });
@@ -142,6 +157,7 @@ describe("identityFromOidcTokenResponse recomputes authz from the VERIFIED id_to
     const claims = {
       sub: "staffer",
       email: "staffer@gascity.com",
+      email_verified: true,
       idp_connection: "gascity-sso",
       realm_access: { roles: ["registry-staff", "registry-member"] },
     } as unknown as JWTPayload;
@@ -150,6 +166,62 @@ describe("identityFromOidcTokenResponse recomputes authz from the VERIFIED id_to
     expect(identity.assertedAdmin).toBe(true);
     expect(identity.assertedOrgMember).toBe(true);
     expect(identity.displayName).toBe("Display From Userinfo"); // profile merge still works
+  });
+
+  test("userinfo cannot replace verified identity keys or email", () => {
+    const config = {
+      ...oidcConfig,
+      oidc: {
+        ...oidcConfig.oidc!,
+        gasCityUserIdClaim: "gascity_user_id",
+        gasCityAccountIdClaim: "gascity_account_id",
+      },
+    };
+    const claims = {
+      sub: "verified-sub",
+      gascity_user_id: "verified-user",
+      gascity_account_id: "verified-account",
+      email: "customer@example.com",
+      email_verified: true,
+      idp_connection: "github",
+    } as unknown as JWTPayload;
+    const userInfo = {
+      sub: "verified-sub",
+      gascity_user_id: "attacker-user",
+      gascity_account_id: "attacker-account",
+      email: "staff@gascity.com",
+      name: "Safe profile enrichment",
+      picture: "https://avatars.example.test/profile.png",
+    } as unknown as JWTPayload;
+
+    expect(identityFromOidcTokenResponse(claims, userInfo, config)).toMatchObject({
+      subject: "verified-sub",
+      gasCityUserId: "verified-user",
+      gasCityAccountId: "verified-account",
+      email: "customer@example.com",
+      displayName: "Safe profile enrichment",
+      avatarUrl: "https://avatars.example.test/profile.png",
+    });
+  });
+
+  test("userinfo subject mismatch is rejected", () => {
+    const claims = {
+      sub: "verified-sub",
+      email: "customer@example.com",
+      email_verified: true,
+      idp_connection: "github",
+    } as unknown as JWTPayload;
+
+    expectAuthError(
+      () =>
+        identityFromOidcTokenResponse(
+          claims,
+          { sub: "different-sub" } as unknown as JWTPayload,
+          oidcConfig,
+        ),
+      401,
+      "BAD_USERINFO",
+    );
   });
 });
 
@@ -169,17 +241,35 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
     });
   });
 
-  test("a Gas City email authenticated by GitHub is denied even if a staff role persisted", () => {
+  test("a Gas City email authenticated by GitHub is denied without relying on realm roles", () => {
     const claims = {
       sub: "staff-via-github",
       email: "Staff@GasCity.COM.",
       email_verified: true,
       idp_connection: "github",
-      realm_access: { roles: ["registry-staff"] },
+      realm_access: { roles: [] },
     } as unknown as JWTPayload;
 
-    expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
-      "Gas City staff sign in with Gas City SSO",
+    expectAuthError(
+      () => identityFromOidcTokenResponse(claims, {}, oidcConfig),
+      403,
+      "STAFF_SSO_REQUIRED",
+    );
+  });
+
+  test("persisted privileged roles cannot elevate a GitHub login with an external email", () => {
+    const claims = {
+      sub: "staff-role-via-github",
+      email: "staff-personal@example.com",
+      email_verified: true,
+      idp_connection: "github",
+      realm_access: { roles: ["registry-staff", "registry-member"] },
+    } as unknown as JWTPayload;
+
+    expectAuthError(
+      () => identityFromOidcTokenResponse(claims, {}, oidcConfig),
+      403,
+      "STAFF_SSO_REQUIRED",
     );
   });
 
@@ -187,6 +277,7 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
     const claims = {
       sub: "staff-via-sso",
       email: "staff@gascity.com",
+      email_verified: true,
       idp_connection: "gascity-sso",
       realm_access: { roles: ["registry-staff"] },
     } as unknown as JWTPayload;
@@ -194,10 +285,11 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
     expect(identityFromOidcTokenResponse(claims, {}, oidcConfig).assertedAdmin).toBe(true);
   });
 
-  test("the staff broker fails closed when its verified token lacks the staff role", () => {
+  test("the staff broker fails closed when an exact staff email lacks the staff role", () => {
     const claims = {
       sub: "not-staff",
-      email: "someone@example.com",
+      email: "someone@gascity.com",
+      email_verified: true,
       idp_connection: "gascity-sso",
       realm_access: { roles: [] },
     } as unknown as JWTPayload;
@@ -205,6 +297,38 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
     expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
       "Gas City staff sign in with Gas City SSO",
     );
+  });
+
+  test("the staff broker fails closed on an external, missing, or untrusted email despite the role", () => {
+    for (const emailClaims of [
+      { email: "someone@example.com", email_verified: true },
+      { email_verified: true },
+      { email: "someone@gascity.com", email_verified: false },
+    ]) {
+      const claims = {
+        sub: "bad-staff-email",
+        ...emailClaims,
+        idp_connection: "gascity-sso",
+        realm_access: { roles: ["registry-staff"] },
+      } as unknown as JWTPayload;
+
+      expectAuthError(
+        () => identityFromOidcTokenResponse(claims, {}, oidcConfig),
+        403,
+        "STAFF_SSO_REQUIRED",
+      );
+    }
+  });
+
+  test("a lookalike Gas City suffix remains an external GitHub customer", () => {
+    const claims = {
+      sub: "suffix-customer",
+      email: "person@gascity.com.attacker.example",
+      email_verified: true,
+      idp_connection: "github",
+      realm_access: { roles: [] },
+    } as unknown as JWTPayload;
+    expect(identityFromOidcTokenResponse(claims, {}, oidcConfig).assertedAdmin).toBe(false);
   });
 
   test("missing or unknown verified broker claims fail closed", () => {
@@ -215,8 +339,10 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
         ...(idp_connection === undefined ? {} : { idp_connection }),
       } as unknown as JWTPayload;
 
-      expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
-        "Sign-in identity provider could not be verified",
+      expectAuthError(
+        () => identityFromOidcTokenResponse(claims, {}, oidcConfig),
+        401,
+        "BAD_ID_TOKEN",
       );
     }
   });
@@ -229,7 +355,7 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
     } as unknown as JWTPayload;
 
     expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
-      "Sign-in identity is missing a verified email address",
+      "Sign-in identity is missing a trusted email address",
     );
   });
 
@@ -243,9 +369,26 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
       } as unknown as JWTPayload;
 
       expect(() => identityFromOidcTokenResponse(claims, {}, oidcConfig)).toThrow(
-        "Sign-in identity is missing a verified email address",
+        "Sign-in identity is missing a trusted email address",
       );
     }
+  });
+
+  test("generic OIDC remains compatible when the Gas City boundary is disabled", () => {
+    const genericConfig = {
+      ...oidcConfig,
+      oidc: { ...oidcConfig.oidc!, enforceBrokerBoundary: false },
+    };
+    const claims = {
+      sub: "generic-staff",
+      email: "staff@example.com",
+      realm_access: { roles: ["registry-staff", "registry-member"] },
+    } as unknown as JWTPayload;
+
+    expect(identityFromOidcTokenResponse(claims, {}, genericConfig)).toMatchObject({
+      assertedAdmin: true,
+      assertedOrgMember: true,
+    });
   });
 
   test("userinfo cannot forge the broker or hide a verified GitHub staff email", () => {

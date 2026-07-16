@@ -76,14 +76,13 @@ export type IdentityClaims = {
   handle?: string;
   displayName?: string;
   avatarUrl?: string;
-  // True when the sign-in token carries the SSO-asserted `registry-staff` realm role
-  // (Gas City staff brokered through gascity-sso). Drives a promote-only elevation to
-  // admin in ensureUser. Absent/false for external GitHub users and machine identities.
+  // True when the auth adapter accepts the `registry-staff` role for this login. Gas City OIDC
+  // requires both the signed current-broker claim and the persistent realm role. Drives a
+  // promote-only elevation to admin in ensureUser.
   assertedAdmin?: boolean;
-  // True when the sign-in token carries the SSO-asserted `registry-member` realm role
-  // (a verified @gascity org member). Live-synced onto users.org_member in ensureUser on
-  // EVERY login (absent => false => de-provision) — unlike assertedAdmin's promote-only
-  // elevation — so the IdP stays the single source of truth for the publish entitlement.
+  // True when the auth adapter accepts the `registry-member` role for this login. Live-synced
+  // onto users.org_member in ensureUser on EVERY login (absent => false => de-provision), unlike
+  // assertedAdmin's promote-only elevation.
   assertedOrgMember?: boolean;
 };
 
@@ -349,7 +348,7 @@ export interface RegistryStore {
   // identity rather than the commit-bearing publish sourceUrl, so it authorizes new
   // releases from a repo the submitter themselves onboarded.
   hasVerifiedRepoOwnership(userId: string, repoFullName: string): Promise<boolean>;
-  // True when the user's last login carried the verified registry-member realm role
+  // True when the user's last login carried a trusted registry-member assertion
   // (users.org_member, live-synced by ensureUser). Read by the publish merge gate.
   isOrgMember(userId: string): Promise<boolean>;
   upsertVerifiedPackOwnership(

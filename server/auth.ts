@@ -217,27 +217,67 @@ async function finishOidcLogin(config: ServerConfig, code: string, oauthState: O
   if (!tokenPayload.id_token) throw new AuthError(401, "TOKEN_EXCHANGE_FAILED", "Sign-in failed.");
 
   const claims = await verifyIdToken(tokenPayload.id_token, config, oauthState.nonce);
+  // Enforce the signed ID-token boundary before making the optional userinfo request. Userinfo is
+  // profile enrichment only and must never participate in broker or authorization decisions.
+  const verifiedBroker = verifyOidcBrokerBoundary(claims, config);
   const userInfo = tokenPayload.access_token
     ? await fetchUserInfo(discovery, tokenPayload.access_token)
     : {};
-  return identityFromOidcTokenResponse(claims, userInfo, config);
+  return buildIdentityFromOidcTokenResponse(claims, userInfo, config, verifiedBroker);
 }
 
-// Build the identity from an OIDC token response. userInfo is merged for richer PROFILE fields
-// only; the privilege-bearing realm roles (-> registry admin / org publisher rights) are
-// recomputed from the cryptographically VERIFIED id_token CLAIMS alone, so an unsigned userinfo
-// response can never assert authorization. This is the userinfo-spoof defense — kept pure and
-// directly tested (see staff-sso.test.ts).
+// Build the identity from an OIDC token response. Only an explicit allowlist of PROFILE fields is
+// read from userinfo; identity keys, email, broker source, and privilege-bearing realm roles come
+// from the cryptographically VERIFIED ID token. Kept pure and directly tested below.
 export function identityFromOidcTokenResponse(
   claims: JWTPayload,
   userInfo: JWTPayload,
   config: ServerConfig,
 ): IdentityClaims {
-  enforceVerifiedBrokerBoundary(claims);
-  const identity = identityFromClaims({ ...claims, ...userInfo }, config);
+  return buildIdentityFromOidcTokenResponse(
+    claims,
+    userInfo,
+    config,
+    verifyOidcBrokerBoundary(claims, config),
+  );
+}
+
+type VerifiedBroker = "github" | "gascity-sso";
+
+function verifyOidcBrokerBoundary(
+  claims: JWTPayload,
+  config: ServerConfig,
+): VerifiedBroker | null {
+  if (!config.oidc?.enforceBrokerBoundary) return null;
+  return enforceVerifiedBrokerBoundary(claims);
+}
+
+function buildIdentityFromOidcTokenResponse(
+  claims: JWTPayload,
+  userInfo: JWTPayload,
+  config: ServerConfig,
+  verifiedBroker: VerifiedBroker | null,
+): IdentityClaims {
+  const identity = identityProfileFromVerifiedClaims(claims, config);
+  if (userInfo.sub !== undefined && userInfo.sub !== identity.subject) {
+    throw new AuthError(401, "BAD_USERINFO", "Sign-in profile verification failed.");
+  }
+
+  // Explicit profile allowlist: identity keys, email, and authorization always remain the values
+  // from the cryptographically verified ID token.
+  const userInfoUsername = stringClaim(userInfo.preferred_username);
+  const userInfoName = stringClaim(userInfo.name);
+  const userInfoPicture = stringClaim(userInfo.picture);
+  if (userInfoUsername) identity.handle = userInfoUsername;
+  if (userInfoName) identity.displayName = userInfoName;
+  if (userInfoPicture) identity.avatarUrl = userInfoPicture;
+
   const verifiedRoles = realmRoles(claims);
-  identity.assertedAdmin = verifiedRoles.includes(STAFF_REALM_ROLE);
-  identity.assertedOrgMember = verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE);
+  const privilegedRoleSourceAllowed = verifiedBroker === null || verifiedBroker === GASCITY_SSO_IDP;
+  identity.assertedAdmin =
+    privilegedRoleSourceAllowed && verifiedRoles.includes(STAFF_REALM_ROLE);
+  identity.assertedOrgMember =
+    privilegedRoleSourceAllowed && verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE);
   return identity;
 }
 
@@ -359,36 +399,45 @@ async function fetchUserInfo(discovery: Discovery, accessToken: string): Promise
   return (await response.json()) as JWTPayload;
 }
 
-// The realm role that marks an SSO-brokered Gas City staff member as registry staff.
-// Granted ONLY by the gascity-sso IdP's hardcoded-role mapper (see the gasworks-customers
-// realm-as-code) — never to external GitHub self-registrations — so its presence in a
-// verified token provably means "authenticated via Gas City SSO".
+// These are persistent Keycloak user roles, not current-login provenance. The OIDC identity
+// builder may turn them into Registry assertions only after the broker-session boundary is
+// verified (or when that Gas City-specific boundary is explicitly disabled for generic OIDC).
+// registry-staff promotes a user to Registry admin.
 const STAFF_REALM_ROLE = "registry-staff";
 
-// The realm role that marks a verified @gascity org member. Granted ONLY by the
-// gasworks-customers realm-as-code to verified Gas City org members (mirroring how
-// registry-staff is minted) — never a default or self-assignable role — so its presence in
-// a verified id_token provably means "current @gascity member". Live-synced in ensureUser
-// (unlike the promote-only staff role): losing the role de-provisions on the next login.
+// registry-member marks a verified @gascity org member. It is live-synced in ensureUser (unlike
+// the promote-only staff role), so losing the trusted assertion de-provisions on the next login.
 const REGISTRY_MEMBER_REALM_ROLE = "registry-member";
 
 const GITHUB_IDP = "github";
 const GASCITY_SSO_IDP = "gascity-sso";
 
-// The customer realm stamps the broker used for this exact login into a user-session note and
-// maps it into the Registry ID token as `idp_connection`. Unlike a user attribute or userinfo,
-// this claim is tied to the current broker session and covered by the realm's token signature.
+// Keycloak records the broker used for this exact login in its core `identity_provider`
+// user-session note; the customer realm maps that note into the Registry ID token as
+// `idp_connection`. Unlike a user attribute or userinfo, this claim is tied to the current broker
+// session and covered by the realm's token signature.
 // Fail closed when it is absent or unknown: a persistent registry-staff role alone must never
 // turn a later GitHub login into a staff login.
-function enforceVerifiedBrokerBoundary(claims: JWTPayload) {
+function enforceVerifiedBrokerBoundary(claims: JWTPayload): VerifiedBroker {
   const broker = stringClaim(claims.idp_connection);
+  const verifiedRoles = realmRoles(claims);
   if (broker === GITHUB_IDP) {
+    if (
+      verifiedRoles.includes(STAFF_REALM_ROLE) ||
+      verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE)
+    ) {
+      throw new AuthError(
+        403,
+        "STAFF_SSO_REQUIRED",
+        "Gas City staff and organization members sign in with Gas City SSO, not GitHub — go to registry.gascity.com/staff.",
+      );
+    }
     const email = stringClaim(claims.email);
     if (!email || claims.email_verified !== true) {
       throw new AuthError(
         401,
         "BAD_ID_TOKEN",
-        "Sign-in identity is missing a verified email address.",
+        "Sign-in identity is missing a trusted email address.",
       );
     }
     if (isGasCityStaffEmail(email)) {
@@ -398,18 +447,24 @@ function enforceVerifiedBrokerBoundary(claims: JWTPayload) {
         "Gas City staff sign in with Gas City SSO, not GitHub — go to registry.gascity.com/staff.",
       );
     }
-    return;
+    return GITHUB_IDP;
   }
 
   if (broker === GASCITY_SSO_IDP) {
-    if (!realmRoles(claims).includes(STAFF_REALM_ROLE)) {
+    const email = stringClaim(claims.email);
+    if (
+      !email ||
+      claims.email_verified !== true ||
+      !isGasCityStaffEmail(email) ||
+      !verifiedRoles.includes(STAFF_REALM_ROLE)
+    ) {
       throw new AuthError(
         403,
         "STAFF_SSO_REQUIRED",
         "Gas City staff sign in with Gas City SSO — go to registry.gascity.com/staff.",
       );
     }
-    return;
+    return GASCITY_SSO_IDP;
   }
 
   throw new AuthError(
@@ -436,7 +491,10 @@ function realmRoles(claims: JWTPayload): string[] {
   return roles.filter((role): role is string => typeof role === "string");
 }
 
-export function identityFromClaims(claims: JWTPayload, config: ServerConfig): IdentityClaims {
+function identityProfileFromVerifiedClaims(
+  claims: JWTPayload,
+  config: ServerConfig,
+): IdentityClaims {
   if (!config.oidc) throw new AuthError(503, "AUTH_NOT_CONFIGURED", "Auth is not configured.");
   if (!claims.sub) throw new AuthError(401, "BAD_ID_TOKEN", "Sign-in verification failed.");
   const gasCityUserId = stringClaim(claims[config.oidc.gasCityUserIdClaim]);
@@ -455,8 +513,6 @@ export function identityFromClaims(claims: JWTPayload, config: ServerConfig): Id
     handle: preferredUsername ?? email?.split("@")[0],
     displayName: stringClaim(claims.name) ?? preferredUsername,
     avatarUrl: stringClaim(claims.picture),
-    assertedAdmin: realmRoles(claims).includes(STAFF_REALM_ROLE),
-    assertedOrgMember: realmRoles(claims).includes(REGISTRY_MEMBER_REALM_ROLE),
   };
 }
 
