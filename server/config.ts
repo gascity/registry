@@ -13,6 +13,11 @@ export type ServerConfig = {
     audience: "registry";
     jwksUrl: string;
   };
+  accountsIdentityResolver?: {
+    baseUrl: string;
+    token: string;
+    timeoutMs: number;
+  };
   authProvider?: "oidc" | "workos";
   oidc?: {
     issuer: string;
@@ -90,6 +95,31 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const eiaJwksUrl = env.REGISTRY_EIA_JWKS_URL?.trim();
   if (Boolean(eiaIssuer) !== Boolean(eiaJwksUrl)) {
     throw new Error("REGISTRY_EIA_ISSUER and REGISTRY_EIA_JWKS_URL must be configured together.");
+  }
+  const accountsBaseUrlRaw = env.REGISTRY_ACCOUNTS_BASE_URL?.trim();
+  const accountsResolverToken = env.REGISTRY_ACCOUNTS_RESOLVER_TOKEN?.trim();
+  if (Boolean(accountsBaseUrlRaw) !== Boolean(accountsResolverToken)) {
+    throw new Error(
+      "REGISTRY_ACCOUNTS_BASE_URL and REGISTRY_ACCOUNTS_RESOLVER_TOKEN must be configured together.",
+    );
+  }
+  const accountsBaseUrl = accountsBaseUrlRaw
+    ? parseAccountsBaseUrl(accountsBaseUrlRaw)
+    : undefined;
+  if (accountsBaseUrl && hasAmbientProxy(env) && effectiveNoProxy(env).trim() !== "*") {
+    throw new Error(
+      "Accounts identity resolution requires no_proxy=* when proxy environment variables are set.",
+    );
+  }
+  const accountsResolveTimeoutRaw = env.REGISTRY_ACCOUNTS_RESOLVE_TIMEOUT_MS?.trim() || "3000";
+  const accountsResolveTimeoutMs = Number(accountsResolveTimeoutRaw);
+  if (
+    accountsBaseUrl &&
+    (!/^\d+$/.test(accountsResolveTimeoutRaw) ||
+      !Number.isSafeInteger(accountsResolveTimeoutMs) ||
+      accountsResolveTimeoutMs <= 0)
+  ) {
+    throw new Error("REGISTRY_ACCOUNTS_RESOLVE_TIMEOUT_MS must be a positive integer.");
   }
   const publishValidationTimeoutMs = Number.parseInt(
     env.REGISTRY_PUBLISH_VALIDATION_TIMEOUT_MS ?? "120000",
@@ -183,6 +213,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
             jwksUrl: eiaJwksUrl,
           }
         : undefined,
+    accountsIdentityResolver:
+      accountsBaseUrl && accountsResolverToken
+        ? {
+            baseUrl: accountsBaseUrl,
+            token: accountsResolverToken,
+            timeoutMs: accountsResolveTimeoutMs,
+          }
+        : undefined,
     authProvider,
     oidc,
     workos,
@@ -218,4 +256,45 @@ function parseAuthProvider(value: string | undefined) {
 
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
+}
+
+function parseAccountsBaseUrl(value: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw invalidAccountsBaseUrl();
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.pathname !== "/" ||
+    value.includes("?") ||
+    value.includes("#")
+  ) {
+    throw invalidAccountsBaseUrl();
+  }
+  return parsed.origin;
+}
+
+function invalidAccountsBaseUrl() {
+  return new Error(
+    "REGISTRY_ACCOUNTS_BASE_URL must be an absolute HTTP(S) origin without credentials, path, query, or fragment.",
+  );
+}
+
+function hasAmbientProxy(env: Record<string, string | undefined>) {
+  return [
+    env.http_proxy,
+    env.https_proxy,
+    env.all_proxy,
+    env.HTTP_PROXY,
+    env.HTTPS_PROXY,
+    env.ALL_PROXY,
+  ].some((value) => Boolean(value?.trim()));
+}
+
+function effectiveNoProxy(env: Record<string, string | undefined>) {
+  return env.no_proxy ?? env.NO_PROXY ?? "";
 }
