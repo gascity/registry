@@ -125,6 +125,11 @@ function sessionUser(row: {
   };
 }
 
+function identityConvergenceConflict() {
+  console.error("[registry] identity convergence conflict");
+  return new StoreConflictError("Registry identity requires operator reconciliation.");
+}
+
 function apiTokenFromRow(row: {
   id: string;
   label: string;
@@ -767,84 +772,100 @@ export class PostgresRegistryStore implements RegistryStore {
   }
 
   async ensureUser(identity: IdentityClaims): Promise<SessionUser> {
-    const existing = await this.sql`
-      SELECT * FROM users
-      WHERE gascity_user_id = ${identity.gasCityUserId}
-         OR oidc_subject = ${identity.subject}
-      ORDER BY CASE WHEN gascity_user_id = ${identity.gasCityUserId} THEN 0 ELSE 1 END
-      LIMIT 1
-    `;
     const now = new Date();
     const handle = normalizeHandle(identity.handle ?? identity.email?.split("@")[0]) ?? "user";
     const displayName = identity.displayName?.trim() || handle;
-    if (existing.length > 0) {
-      const [updated] = await this.sql`
-        UPDATE users
-        SET gascity_user_id = ${identity.gasCityUserId},
-            gascity_account_id = ${identity.gasCityAccountId ?? null},
-            oidc_subject = ${identity.subject},
-            email = ${identity.email ?? null},
-            handle = COALESCE(NULLIF(handle, ''), ${handle}),
-            display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
-            avatar_url = ${identity.avatarUrl ?? null},
-            -- Staff entitlement: an auth-boundary-verified registry-staff assertion promotes to admin.
-            -- Promote-only and re-checked at the row (race-safe): never downgrades, and never
-            -- overrides a deliberate moderator/admin grant (preserves manual roles + de-escalations).
-            role = CASE
-                     WHEN ${!!identity.assertedAdmin} AND role NOT IN ('admin', 'moderator')
-                     THEN 'admin' ELSE role
-                   END,
-            -- Org-publisher entitlement: LIVE-synced from the trusted registry-member assertion
-            -- on every login (contrast the promote-only role above: role protects manual
-            -- grants; org_member's only source of truth is the auth adapter, so losing it must
-            -- de-provision on next login).
-            org_member = ${!!identity.assertedOrgMember},
-            updated_at = ${now}
-        WHERE id = ${existing[0].id}
-        RETURNING *
-      `;
-      return sessionUser(updated as any);
-    }
     const id = newId("user");
     const uniqueHandle = await this.resolveHandle(handle, id);
-    const [created] = await this.sql`
-      INSERT INTO users (
-        id, gascity_user_id, gascity_account_id, oidc_subject, email, handle, display_name,
-        avatar_url, role, status, org_member, created_at, updated_at
-      )
-      VALUES (
-        ${id}, ${identity.gasCityUserId}, ${identity.gasCityAccountId ?? null}, ${identity.subject},
-        ${identity.email ?? null}, ${uniqueHandle}, ${displayName}, ${identity.avatarUrl ?? null},
-        ${identity.assertedAdmin ? "admin" : "user"}, 'active', ${!!identity.assertedOrgMember}, ${now}, ${now}
-      )
-      RETURNING *
-    `;
-    return sessionUser(created as any);
+    return this.sql.begin(async (sql) => {
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`registry-user-oidc:${identity.subject}`}, 0))`;
+      const established = await sql`
+        SELECT gascity_user_id FROM users WHERE oidc_subject = ${identity.subject} LIMIT 1
+      `;
+      const stableId =
+        identity.gasCityUserId === identity.subject &&
+        established[0]?.gascity_user_id &&
+        established[0].gascity_user_id !== identity.subject
+          ? String(established[0].gascity_user_id)
+          : identity.gasCityUserId;
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`registry-user-stable:${stableId}`}, 0))`;
+      const existing = await sql`
+        SELECT * FROM users
+        WHERE gascity_user_id = ${stableId}
+           OR oidc_subject = ${identity.subject}
+        ORDER BY CASE WHEN gascity_user_id = ${stableId} THEN 0 ELSE 1 END
+        FOR UPDATE
+      `;
+      if (existing.length > 1) {
+        throw identityConvergenceConflict();
+      }
+      if (existing.length === 1) {
+        const [updated] = await sql`
+          UPDATE users
+          SET gascity_user_id = ${stableId},
+              gascity_account_id = ${identity.gasCityAccountId ?? null},
+              oidc_subject = ${identity.subject},
+              email = ${identity.email ?? null},
+              handle = COALESCE(NULLIF(handle, ''), ${handle}),
+              display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
+              avatar_url = ${identity.avatarUrl ?? null},
+              -- Staff entitlement: an auth-boundary-verified registry-staff assertion promotes to admin.
+              -- Promote-only and re-checked at the row (race-safe): never downgrades, and never
+              -- overrides a deliberate moderator/admin grant (preserves manual roles + de-escalations).
+              role = CASE
+                       WHEN ${!!identity.assertedAdmin} AND role NOT IN ('admin', 'moderator')
+                       THEN 'admin' ELSE role
+                     END,
+              -- Org-publisher entitlement: LIVE-synced from the trusted registry-member assertion
+              -- on every login (contrast the promote-only role above: role protects manual
+              -- grants; org_member's only source of truth is the auth adapter, so losing it must
+              -- de-provision on next login).
+              org_member = ${!!identity.assertedOrgMember},
+              updated_at = ${now}
+          WHERE id = ${existing[0].id}
+          RETURNING *
+        `;
+        return sessionUser(updated as any);
+      }
+      const [created] = await sql`
+        INSERT INTO users (
+          id, gascity_user_id, gascity_account_id, oidc_subject, email, handle, display_name,
+          avatar_url, role, status, org_member, created_at, updated_at
+        )
+        VALUES (
+          ${id}, ${stableId}, ${identity.gasCityAccountId ?? null}, ${identity.subject},
+          ${identity.email ?? null}, ${uniqueHandle}, ${displayName}, ${identity.avatarUrl ?? null},
+          ${identity.assertedAdmin ? "admin" : "user"}, 'active', ${!!identity.assertedOrgMember}, ${now}, ${now}
+        )
+        RETURNING *
+      `;
+      return sessionUser(created as any);
+    });
   }
 
   async getOrCreateUserForEiaSubject(subject: string): Promise<SessionUser | null> {
-    const existing = await this.sql`
-      SELECT * FROM users WHERE gascity_user_id = ${subject} LIMIT 1
-    `;
-    if (existing.length > 0) {
-      const user = sessionUser(existing[0] as any);
-      return user.status === "active" ? user : null;
-    }
-
     const id = newId("user");
     const baseHandle = normalizeHandle(subject) ?? "user";
     const handle = await this.resolveHandle(`${baseHandle.slice(0, 31)}-${id.slice(-8)}`, id);
-    const created = await this.sql`
-      INSERT INTO users (
-        id, gascity_user_id, handle, display_name, role, status, org_member, created_at, updated_at
-      )
-      VALUES (${id}, ${subject}, ${handle}, ${handle}, 'user', 'active', false, now(), now())
-      ON CONFLICT (gascity_user_id) DO UPDATE
-      SET gascity_user_id = EXCLUDED.gascity_user_id
-      RETURNING *
-    `;
-    const user = sessionUser(created[0] as any);
-    return user.status === "active" ? user : null;
+    return this.sql.begin(async (sql) => {
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`registry-user-stable:${subject}`}, 0))`;
+      const existing = await sql`
+        SELECT * FROM users WHERE gascity_user_id = ${subject} LIMIT 1 FOR UPDATE
+      `;
+      if (existing.length > 0) {
+        const user = sessionUser(existing[0] as any);
+        return user.status === "active" ? user : null;
+      }
+      const created = await sql`
+        INSERT INTO users (
+          id, gascity_user_id, handle, display_name, role, status, org_member, created_at, updated_at
+        )
+        VALUES (${id}, ${subject}, ${handle}, ${handle}, 'user', 'active', false, now(), now())
+        RETURNING *
+      `;
+      const user = sessionUser(created[0] as any);
+      return user.status === "active" ? user : null;
+    });
   }
 
   async getSession(token: string): Promise<SessionRecord | null> {
@@ -2024,33 +2045,47 @@ class FileRegistryStore implements RegistryStore {
   async ping() {} // file store is always ready
 
   async ensureUser(identity: IdentityClaims): Promise<SessionUser> {
-    for (const user of this.users.values()) {
-      if (user.gascityUserId === identity.gasCityUserId || user.oidcSubject === identity.subject) {
-        user.gascityUserId = identity.gasCityUserId;
-        user.gascityAccountId = identity.gasCityAccountId;
-        user.oidcSubject = identity.subject;
-        // Promote-only staff elevation (mirrors the Postgres store): an auth-boundary-verified
-        // registry-staff assertion raises the default user role to admin, but never downgrades
-        // or overrides a deliberate moderator/admin grant.
-        if (identity.assertedAdmin && user.role !== "admin" && user.role !== "moderator") {
-          user.role = "admin";
-        }
-        // Live-synced (contrast the promote-only role above): the auth adapter is the sole source
-        // of truth for org membership, so losing the assertion de-provisions on next login.
-        user.orgMember = !!identity.assertedOrgMember;
-        await this.save();
-        return user;
+    const oidcUser = [...this.users.values()].find(
+      (user) => user.oidcSubject === identity.subject,
+    );
+    const stableId =
+      identity.gasCityUserId === identity.subject &&
+      oidcUser?.gascityUserId !== undefined &&
+      oidcUser.gascityUserId !== identity.subject
+        ? oidcUser.gascityUserId
+        : identity.gasCityUserId;
+    const stableUser = [...this.users.values()].find(
+      (user) => user.gascityUserId === stableId,
+    );
+    if (stableUser && oidcUser && stableUser.id !== oidcUser.id) {
+      throw identityConvergenceConflict();
+    }
+    const user = stableUser ?? oidcUser;
+    if (user) {
+      user.gascityUserId = stableId;
+      user.gascityAccountId = identity.gasCityAccountId;
+      user.oidcSubject = identity.subject;
+      // Promote-only staff elevation (mirrors the Postgres store): an auth-boundary-verified
+      // registry-staff assertion raises the default user role to admin, but never downgrades
+      // or overrides a deliberate moderator/admin grant.
+      if (identity.assertedAdmin && user.role !== "admin" && user.role !== "moderator") {
+        user.role = "admin";
       }
+      // Live-synced (contrast the promote-only role above): the auth adapter is the sole source
+      // of truth for org membership, so losing the assertion de-provisions on next login.
+      user.orgMember = !!identity.assertedOrgMember;
+      await this.save();
+      return user;
     }
     const handle = normalizeHandle(identity.handle ?? identity.email?.split("@")[0]) ?? "local";
-    const user: SessionUser & {
+    const created: SessionUser & {
       gascityUserId: string;
       gascityAccountId?: string;
       oidcSubject?: string;
       orgMember?: boolean;
     } = {
       id: newId("user"),
-      gascityUserId: identity.gasCityUserId,
+      gascityUserId: stableId,
       gascityAccountId: identity.gasCityAccountId,
       oidcSubject: identity.subject,
       email: identity.email,
@@ -2061,9 +2096,9 @@ class FileRegistryStore implements RegistryStore {
       status: "active",
       orgMember: !!identity.assertedOrgMember,
     };
-    this.users.set(user.id, user);
+    this.users.set(created.id, created);
     await this.save();
-    return user;
+    return created;
   }
 
   async getOrCreateUserForEiaSubject(subject: string): Promise<SessionUser | null> {

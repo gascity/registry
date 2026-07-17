@@ -93,6 +93,9 @@ OIDC_CLIENT_SECRET=<registry client secret>
 OIDC_GASCITY_USER_ID_CLAIM=gascity_user_id
 OIDC_GASCITY_ACCOUNT_ID_CLAIM=gascity_account_id
 OIDC_ENFORCE_BROKER_BOUNDARY=true
+REGISTRY_ACCOUNTS_BASE_URL=http://accounts.accounts.svc.cluster.local
+REGISTRY_ACCOUNTS_RESOLVER_TOKEN=<registry-identity secret>
+REGISTRY_ACCOUNTS_RESOLVE_TIMEOUT_MS=3000
 GITHUB_APP_SLUG=<registry GitHub App slug>
 GITHUB_APP_CLIENT_ID=<registry GitHub App client id>
 GITHUB_APP_CLIENT_SECRET=<registry GitHub App client secret>
@@ -104,6 +107,12 @@ Production auth is OIDC/Keycloak (`auth.gascity.com`); the `registry-staff` (adm
 and `registry-member` (org publisher) roles ride the id_token. Production also requires the
 signed, per-session `idp_connection` claim. GitHub and validated customer `sso-*` brokers remain
 nonstaff; privileged roles are honored only on the Gas City SSO rail.
+A configured Accounts resolver maps the verified OIDC `sub` to the stable Accounts `user_id`, so
+native Registry sessions and Gasworks STS assertions select the same principal. Only an explicit
+Accounts unknown-subject response falls back to native-only identity; resolver failures fail login.
+The credential is accepted only by Accounts' dedicated `/v0/resolve/registry-user` read seam. When
+proxy environment variables are present, the effective `no_proxy` must be `*` so that credential is
+never sent through an ambient proxy.
 A legacy WorkOS provider still exists in the code (`REGISTRY_AUTH_PROVIDER=workos`) but is not
 the deployed path.
 

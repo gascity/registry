@@ -19,7 +19,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import postgres from "postgres";
 import { CLI_DEVICE_CODE_TTL_MS, CLI_DEVICE_CODE_INTERVAL_SECONDS, generateCliDeviceCodePair } from "./cli-auth";
 import { StoreConflictError, StoreValidationError, createStore } from "./store";
@@ -157,6 +157,8 @@ type StoredEiaUser = {
   status: "active" | "disabled";
 };
 
+type StoredIdentityUser = StoredEiaUser & { oidcSubject?: string };
+
 async function disableUserForConformance(store: RegistryStore, dbUrl: string | undefined, userId: string) {
   if (store.kind === "file") {
     const users = (store as unknown as { users: Map<string, StoredEiaUser> }).users;
@@ -197,6 +199,48 @@ async function storedUsersForEiaSubject(
     return rows.map((row) => ({
       id: String(row.id),
       gascityUserId: String(row.gascity_user_id),
+      status: row.status === "disabled" ? "disabled" : "active",
+    }));
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+async function storedUsersForIdentity(
+  store: RegistryStore,
+  dbUrl: string | undefined,
+  oidcSubject: string,
+  gascityUserId: string,
+): Promise<StoredIdentityUser[]> {
+  if (store.kind === "file") {
+    const users = (
+      store as unknown as { users: Map<string, StoredIdentityUser> }
+    ).users;
+    return [...users.values()]
+      .filter(
+        (user) => user.oidcSubject === oidcSubject || user.gascityUserId === gascityUserId,
+      )
+      .map(({ id, gascityUserId: stableId, oidcSubject: subject, status }) => ({
+        id,
+        gascityUserId: stableId,
+        oidcSubject: subject,
+        status,
+      }));
+  }
+
+  if (!dbUrl) throw new Error("Postgres conformance lane is missing its database URL.");
+  const sql = postgres(dbUrl, { max: 1 });
+  try {
+    const rows = await sql`
+      SELECT id, gascity_user_id, oidc_subject, status
+      FROM users
+      WHERE oidc_subject = ${oidcSubject} OR gascity_user_id = ${gascityUserId}
+      ORDER BY id
+    `;
+    return rows.map((row) => ({
+      id: String(row.id),
+      gascityUserId: String(row.gascity_user_id),
+      oidcSubject: row.oidc_subject ? String(row.oidc_subject) : undefined,
       status: row.status === "disabled" ? "disabled" : "active",
     }));
   } finally {
@@ -321,6 +365,84 @@ for (const lane of lanes) {
           id: disabled.id,
           gascityUserId: disabledIdentity.gasCityUserId,
           status: "disabled",
+        },
+      ]);
+    });
+
+    test("resolved OIDC migrates a preexisting native user in place and converges with EIA", async () => {
+      const nativeSubject = `sub:${uid("native")}`;
+      const stableId = `usr_${uid("stable")}`;
+      const nativeIdentity = identity({
+        subject: nativeSubject,
+        gasCityUserId: nativeSubject,
+        displayName: "Native Profile",
+      });
+      const nativeUser = await store.ensureUser(nativeIdentity);
+
+      const resolvedUser = await store.ensureUser({ ...nativeIdentity, gasCityUserId: stableId });
+      const eiaUser = await store.getOrCreateUserForEiaSubject(stableId);
+
+      expect(resolvedUser.id).toBe(nativeUser.id);
+      expect(eiaUser?.id).toBe(nativeUser.id);
+      expect(await storedUsersForIdentity(store, dbUrl, nativeSubject, stableId)).toEqual([
+        {
+          id: nativeUser.id,
+          gascityUserId: stableId,
+          oidcSubject: nativeSubject,
+          status: "active",
+        },
+      ]);
+    });
+
+    test("resolved OIDC fails closed without corrupting preexisting split principals", async () => {
+      const nativeSubject = `sub:${uid("split-native")}`;
+      const stableId = `usr_${uid("split-stable")}`;
+      const nativeIdentity = identity({ subject: nativeSubject, gasCityUserId: nativeSubject });
+      const nativeUser = await store.ensureUser(nativeIdentity);
+      const eiaUser = await store.getOrCreateUserForEiaSubject(stableId);
+      expect(eiaUser).not.toBeNull();
+      await store.createApiToken(nativeUser.id, { label: "native-state" });
+      await store.createApiToken(eiaUser!.id, { label: "eia-state" });
+
+      const log = spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await expect(
+          store.ensureUser({ ...nativeIdentity, gasCityUserId: stableId }),
+        ).rejects.toBeInstanceOf(StoreConflictError);
+        expect(log).toHaveBeenCalledWith("[registry] identity convergence conflict");
+        expect(JSON.stringify(log.mock.calls)).not.toContain(nativeSubject);
+        expect(JSON.stringify(log.mock.calls)).not.toContain(stableId);
+      } finally {
+        log.mockRestore();
+      }
+
+      expect(await storedUsersForIdentity(store, dbUrl, nativeSubject, stableId)).toHaveLength(2);
+      expect(await store.listApiTokens(nativeUser.id)).toHaveLength(1);
+      expect(await store.listApiTokens(eiaUser!.id)).toHaveLength(1);
+    });
+
+    test("native fallback cannot replace an established Accounts stable identity", async () => {
+      const nativeSubject = `sub:${uid("fallback-native")}`;
+      const stableId = `usr_${uid("fallback-stable")}`;
+      const nativeIdentity = identity({ subject: nativeSubject, gasCityUserId: nativeSubject });
+      const nativeUser = await store.ensureUser(nativeIdentity);
+      await store.ensureUser({ ...nativeIdentity, gasCityUserId: stableId });
+
+      const [fallbackUser, eiaUser, resolvedUser] = await Promise.all([
+        store.ensureUser(nativeIdentity),
+        store.getOrCreateUserForEiaSubject(stableId),
+        store.ensureUser({ ...nativeIdentity, gasCityUserId: stableId }),
+      ]);
+
+      expect(fallbackUser.id).toBe(nativeUser.id);
+      expect(eiaUser?.id).toBe(nativeUser.id);
+      expect(resolvedUser.id).toBe(nativeUser.id);
+      expect(await storedUsersForIdentity(store, dbUrl, nativeSubject, stableId)).toEqual([
+        {
+          id: nativeUser.id,
+          gascityUserId: stableId,
+          oidcSubject: nativeSubject,
+          status: "active",
         },
       ]);
     });

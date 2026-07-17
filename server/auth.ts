@@ -312,7 +312,130 @@ async function finishOidcLogin(config: ServerConfig, code: string, oauthState: O
   const userInfo = tokenPayload.access_token
     ? await fetchUserInfo(discovery, tokenPayload.access_token)
     : {};
-  return buildIdentityFromOidcTokenResponse(claims, userInfo, config, verifiedBroker);
+  const identity = buildIdentityFromOidcTokenResponse(claims, userInfo, config, verifiedBroker);
+  return await resolveOidcIdentityWithAccounts(identity, config);
+}
+
+const accountsResolvePath = "/v0/resolve/registry-user";
+const accountsResolveResponseMaxBytes = 16 * 1024;
+type RegistryFetch = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export async function resolveOidcIdentityWithAccounts(
+  identity: IdentityClaims,
+  config: ServerConfig,
+  fetcher: RegistryFetch = fetch,
+): Promise<IdentityClaims> {
+  const resolver = config.accountsIdentityResolver;
+  if (!resolver) return identity;
+  const startedAt = Date.now();
+  const signal = AbortSignal.timeout(resolver.timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetcher(`${resolver.baseUrl}${accountsResolvePath}`, {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${resolver.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ keycloak_sub: identity.subject }),
+      signal,
+    });
+  } catch {
+    throw identityResolutionFailed("transport_or_timeout", startedAt);
+  }
+
+  if (!isJsonContentType(response.headers.get("content-type"))) {
+    await response.body?.cancel().catch(() => undefined);
+    throw identityResolutionFailed("content_type", startedAt, response.status);
+  }
+
+  let payload: unknown;
+  try {
+    payload = await readBoundedJson(response, accountsResolveResponseMaxBytes, signal);
+  } catch {
+    throw identityResolutionFailed("response_body", startedAt, response.status);
+  }
+
+  if (response.status === 404 && isAccountsUnknownSubject(payload)) return identity;
+  if (!response.ok) throw identityResolutionFailed("upstream_status", startedAt, response.status);
+
+  const userId =
+    payload &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    Object.keys(payload).length === 1
+      ? exactStringClaim((payload as { user_id?: unknown }).user_id)
+      : undefined;
+  if (!userId) throw identityResolutionFailed("response_schema", startedAt, response.status);
+  return { ...identity, gasCityUserId: userId };
+}
+
+async function readBoundedJson(
+  response: Response,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Accounts response has no body");
+  const cancel = () => {
+    void reader.cancel(signal.reason).catch(() => undefined);
+  };
+  if (signal.aborted) throw signal.reason;
+  signal.addEventListener("abort", cancel, { once: true });
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (signal.aborted) throw signal.reason;
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error("Accounts response exceeds limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+  if (signal.aborted) throw signal.reason;
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(body));
+}
+
+function isAccountsUnknownSubject(payload: unknown) {
+  return (
+    payload !== null &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    Object.keys(payload).length === 1 &&
+    (payload as { error?: unknown }).error === "user not found"
+  );
+}
+
+function isJsonContentType(value: string | null) {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
+}
+
+function identityResolutionFailed(reason: string, startedAt: number, upstreamStatus?: number) {
+  console.error("[registry] Accounts identity resolution failed", {
+    reason,
+    upstream_status: upstreamStatus,
+    elapsed_ms: Math.max(0, Date.now() - startedAt),
+  });
+  return new AuthError(503, "IDENTITY_RESOLUTION_FAILED", "Sign-in failed.");
 }
 
 // Build the identity from an OIDC token response. Only an explicit allowlist of PROFILE fields is
