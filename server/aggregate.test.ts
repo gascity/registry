@@ -111,9 +111,107 @@ describe("fail-soft catalog render", () => {
   });
 
   test("strict mode (the approve-time dry run) still THROWS on a conflict", () => {
+    // `alpha` is a BASE pack, so a direct publish claiming that name is now caught as a
+    // base collision — earlier and more precisely than the old same-version check.
     const approved = [approvedRow("prq_bad", entry("alpha", "1.0.0", { commit: commitB }))];
-    expect(() => renderRegistryTomlWithApprovedPublishes(baseToml, approved)).toThrow(/conflicts with existing alpha/);
-    expect(() => renderCatalogJsonWithApprovedPublishes(baseJson, approved)).toThrow(/conflicts with existing alpha/);
+    expect(() => renderRegistryTomlWithApprovedPublishes(baseToml, approved)).toThrow(
+      /collides with base pack alpha/,
+    );
+    expect(() => renderCatalogJsonWithApprovedPublishes(baseJson, approved)).toThrow(
+      /collides with base pack alpha/,
+    );
+  });
+
+  test("a direct publish can NEVER graft a release into a same-named first-party pack", () => {
+    // The H3 hole: mergeApprovedEntry matched on the flat name, so this release was appended
+    // INSIDE the base `alpha` pack and became its `latest`, while the pack still advertised
+    // the first-party source. Strict mode must refuse it; fail-soft must skip and report it.
+    const { issues, onIssue } = collectIssues();
+    const approved = [approvedRow("prq_graft", entry("alpha", "9.9.9", { commit: commitB }))];
+
+    expect(() => renderCatalogJsonWithApprovedPublishes(baseJson, approved)).toThrow(
+      /collides with base pack alpha/,
+    );
+
+    const json = renderCatalogJsonWithApprovedPublishes(baseJson, approved, { mode: "fail-soft", onIssue });
+    const parsed = JSON.parse(json) as {
+      packs: Array<{ name: string; registry: string; latest: string; releases: Array<{ commit: string }> }>;
+    };
+    const alpha = parsed.packs.find((p) => p.name === "alpha")!;
+    expect(alpha.registry).toBe("gascity-packs"); // still first-party
+    expect(alpha.latest).toBe("1.0.0"); // NOT 9.9.9
+    expect(alpha.releases.every((r) => r.commit === commitA)).toBe(true); // no foreign commit
+    expect(parsed.packs.filter((p) => p.name === "alpha")).toHaveLength(1);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ kind: "entry", requestId: "prq_graft", name: "alpha" });
+  });
+
+  test("two publishes whose names flatten to the same pack_key are refused", () => {
+    // `a/b` and `a--b` are both individually valid names and both flatten to `direct--a--b`.
+    // pack_key keys reviews and ownership, so serving both would silently pool two distinct
+    // packs under one identity. The generator treats this as fatal; the serve path must too.
+    const approved = [
+      approvedRow("prq_scoped", entry("acme/tool", "1.0.0", { commit: commitA })),
+      approvedRow("prq_twin", entry("acme--tool", "1.0.0", { commit: commitB })),
+    ];
+    expect(() => renderCatalogJsonWithApprovedPublishes(baseJson, approved)).toThrow(/pack_key direct--acme--tool/);
+
+    const { issues, onIssue } = collectIssues();
+    const json = renderCatalogJsonWithApprovedPublishes(baseJson, approved, { mode: "fail-soft", onIssue });
+    const parsed = JSON.parse(json) as { packs: Array<{ pack_key: string }> };
+    const keys = parsed.packs.map((p) => p.pack_key);
+    expect(new Set(keys).size).toBe(keys.length); // no duplicate pack_key is ever served
+    expect(issues).toHaveLength(1);
+  });
+
+  test("a base pack claiming registry \"direct\" is not a graft target", () => {
+    // normalizeJsonPack copies `registry` straight out of catalog.json, so trusting that string
+    // would let a base pack named `direct` become a merge target and re-open the graft hole.
+    const poisonedBase = JSON.stringify({
+      schema: 1,
+      packs: [
+        {
+          pack_key: "direct--widget",
+          registry: "direct",
+          name: "widget",
+          description: "first-party widget",
+          source: "https://github.com/firstparty/widget",
+          source_kind: "git",
+          releases: [{ version: "1.0.0", ref: "refs/heads/main", commit: commitA, hash, description: "d" }],
+        },
+      ],
+    });
+    const approved = [approvedRow("prq_graft2", entry("widget", "9.9.9", { commit: commitB }))];
+
+    expect(() => renderCatalogJsonWithApprovedPublishes(poisonedBase, approved)).toThrow(/collides with base pack/);
+
+    const { issues, onIssue } = collectIssues();
+    const json = renderCatalogJsonWithApprovedPublishes(poisonedBase, approved, { mode: "fail-soft", onIssue });
+    const parsed = JSON.parse(json) as { packs: Array<{ name: string; latest: string }> };
+    expect(parsed.packs.find((p) => p.name === "widget")!.latest).toBe("1.0.0"); // NOT 9.9.9
+    expect(issues).toHaveLength(1);
+  });
+
+  test("re-approving the identical bits for a version stays idempotent", () => {
+    // The withdraw -> reinstate flow deliberately allows a second approved row with identical
+    // commit/hash/ref. Without coverage, a regression here silently duplicates releases.
+    const same = entry("gamma", "1.0.0", { commit: commitA });
+    const approved = [approvedRow("prq_a", same), approvedRow("prq_b", { ...same, release: { ...same.release } })];
+    const json = renderCatalogJsonWithApprovedPublishes(baseJson, approved);
+    const parsed = JSON.parse(json) as { packs: Array<{ name: string; releases: unknown[] }> };
+    expect(parsed.packs.find((p) => p.name === "gamma")!.releases).toHaveLength(1);
+  });
+
+  test("two DIRECT entries for the same name@version still conflict on differing bits", () => {
+    // Preserves the original same-version guard for the direct-vs-direct case the base
+    // collision check does not cover.
+    const approved = [
+      approvedRow("prq_one", entry("gamma", "1.0.0", { commit: commitA })),
+      approvedRow("prq_two", entry("gamma", "1.0.0", { commit: commitB })),
+    ];
+    expect(() => renderCatalogJsonWithApprovedPublishes(baseJson, approved)).toThrow(
+      /conflicts with existing gamma 1\.0\.0/,
+    );
   });
 
   test("falls back to the raw base artifact when the base itself can't parse (fail-soft)", () => {

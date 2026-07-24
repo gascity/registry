@@ -153,9 +153,19 @@ function approvedEntries(requests: PublishRequestRow[]): ApprovedEntry[] {
 
 function mergeApprovedEntries(basePacks: RuntimePack[], entries: ApprovedEntry[], options: RenderOptions) {
   const packs = basePacks.map((pack) => ({ ...pack, releases: [...pack.releases] }));
+  // Identity is tracked structurally, not by trusting the base artifact's `registry` string:
+  // normalizeJsonPack copies that field straight out of catalog.json, so a base pack claiming
+  // registry "direct" would otherwise be treated as a merge target and re-open the graft hole.
+  // `basePackKeys` is every identity that existed before merging; `directPacks` holds only the
+  // packs THIS merge created, which are the sole legitimate targets for a later release.
+  const basePackKeys = new Map<string, RuntimePack>();
+  for (const pack of packs) {
+    basePackKeys.set(packKeyFor(pack), pack);
+  }
+  const directPacks = new Map<string, RuntimePack>();
   for (const { requestId, entry } of entries) {
     try {
-      mergeApprovedEntry(packs, entry);
+      mergeApprovedEntry(packs, entry, { basePacks: packs.slice(0, basePacks.length), basePackKeys, directPacks });
     } catch (error) {
       if (options.mode !== "fail-soft") throw error;
       options.onIssue?.({
@@ -177,7 +187,15 @@ function mergeApprovedEntries(basePacks: RuntimePack[], entries: ApprovedEntry[]
 // Merge one approved direct-publish entry. Re-validates the stored registry_entry BEFORE any
 // mutation (a junk row must not reach the renderer — quote(undefined) would emit a literal
 // `undefined`), so a skipped entry in fail-soft mode leaves zero partial state.
-function mergeApprovedEntry(packs: RuntimePack[], entry: PublishRegistryEntry) {
+function mergeApprovedEntry(
+  packs: RuntimePack[],
+  entry: PublishRegistryEntry,
+  ctx: {
+    basePacks: RuntimePack[];
+    basePackKeys: Map<string, RuntimePack>;
+    directPacks: Map<string, RuntimePack>;
+  },
+) {
   const name = requireString(entry?.name, "approved entry name");
   const release = entry?.release ?? ({} as PublishRegistryEntry["release"]);
   const version = requireString(release?.version, `${name} release version`);
@@ -189,7 +207,32 @@ function mergeApprovedEntry(packs: RuntimePack[], entry: PublishRegistryEntry) {
   requireString(release.hash, `${name}@${version} hash`);
   requireString(release.description, `${name}@${version} description`);
 
-  const pack = packs.find((candidate) => candidate.name === name);
+  // An approved direct publish may only extend a pack THIS merge created. Matching on the flat
+  // name alone let a third-party publish append a release inside a same-named first-party pack —
+  // becoming `latest` while still advertising the first-party source.
+  const pack = ctx.directPacks.get(name);
+  const newKey = `direct--${flattenName(name)}`;
+
+  if (!pack) {
+    // No direct pack yet, so this entry wants to create `newKey`. It must not collide with any
+    // pre-existing identity, by name OR by flattened pack_key — `a/b` and `a--b` both flatten to
+    // `a--b`, and pack_key is what keys reviews and ownership, so a duplicate silently pools two
+    // packs under one identity. The generator treats this as fatal; the serve path must too.
+    const collision =
+      ctx.basePacks.find((candidate) => candidate.name === name) ?? ctx.basePackKeys.get(newKey);
+    if (collision) {
+      throw new Error(
+        `approved publish ${name} collides with base pack ${collision.name} from source ${collision.registry}`,
+      );
+    }
+    const twin = [...ctx.directPacks.values()].find((candidate) => packKeyFor(candidate) === newKey);
+    if (twin) {
+      throw new Error(
+        `approved publish ${name} collides with ${twin.name}: both resolve to pack_key ${newKey}`,
+      );
+    }
+  }
+
   const existingRelease = pack?.releases.find((candidate) => candidate.version === version);
   if (existingRelease) {
     if (
@@ -215,6 +258,7 @@ function mergeApprovedEntry(packs: RuntimePack[], entry: PublishRegistryEntry) {
         releases: [],
       };
       packs.push(created);
+      ctx.directPacks.set(name, created);
       return created;
     })();
   target.releases.push({ ...release });
@@ -310,10 +354,21 @@ function renderRegistryToml(packs: RuntimePack[]) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+// A scoped name flattens with the same "/" -> "--" rule the generator and the SPA use
+// (scripts/generate-registry.lib.ts, src/lib/registry.ts). Kept as one helper so the
+// collision check and the emitted pack_key can never drift apart.
+function flattenName(name: string) {
+  return name.replaceAll("/", "--");
+}
+
+function packKeyFor(pack: RuntimePack) {
+  return `${pack.registry}--${flattenName(pack.name)}`;
+}
+
 function catalogJsonPack(pack: RuntimePack) {
   const latest = latestActiveVersion(pack);
   return {
-    pack_key: `${pack.registry}--${pack.name.replaceAll("/", "--")}`,
+    pack_key: packKeyFor(pack),
     registry: pack.registry,
     name: pack.name,
     description: pack.description,
