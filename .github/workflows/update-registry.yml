@@ -8,6 +8,8 @@ on:
 permissions:
   contents: write
   packages: read # the @gascity/* deps live on GitHub Packages (org-internal)
+  pull-requests: write # the refresh lands via a PR, not a direct push to main
+  actions: write # to dispatch CI on the PR branch (see the merge step)
 
 jobs:
   update:
@@ -36,15 +38,77 @@ jobs:
         # registry.toml + catalog.json + og before we commit them. No network.
         run: bun run generate:check
 
-      - name: Commit aggregate updates
+      - name: Open a PR with the aggregate updates and merge it on green
+        # `main` requires the "CI / required" check, and a freshly pushed commit carries no
+        # status, so a direct push is rejected outright (GH006). Rather than bypass protection
+        # with an admin credential, the refresh goes through a normal PR that genuinely passes
+        # CI — so `generate:check` actually gates the artifacts we serve.
+        #
+        # The one wrinkle: a PR opened by GITHUB_TOKEN gets its `pull_request` run queued in an
+        # "approval required" state, which nothing would ever approve unattended. But
+        # `workflow_dispatch` is a documented exception that ALWAYS creates a run, so we
+        # dispatch CI on the branch ourselves. Its "CI / required" check attaches to the branch
+        # head — the PR's head SHA — which is exactly what protection evaluates.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           if git diff --quiet -- public/registry.toml public/catalog.json public/og; then
             echo "aggregate registry already current"
             exit 0
           fi
 
+          branch="chore/aggregate-$(date -u +%Y%m%dT%H%M%SZ)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
           git add public/registry.toml public/catalog.json public/og
           git commit -m "chore: update aggregate registry"
-          git push origin HEAD:main
+          git push origin "$branch"
+
+          cat > /tmp/pr-body.md <<'BODY'
+          Hourly upstream refresh of `public/registry.toml`, `public/catalog.json` and `public/og`.
+
+          Produced by `bun run generate` and self-checked offline with `bun run generate:check`
+          before this PR was opened. Merged automatically once CI is green.
+          BODY
+          sed -i 's/^          //' /tmp/pr-body.md
+
+          gh pr create --base main --head "$branch" \
+            --title "chore: update aggregate registry" \
+            --body-file /tmp/pr-body.md
+          pr=$(gh pr list --head "$branch" --json number --jq '.[0].number')
+          echo "opened PR #$pr on $branch"
+
+          # Always creates a run, unlike the auto-queued pull_request run.
+          gh workflow run ci.yml --ref "$branch"
+
+          # Watch OUR dispatched run by id, not `gh pr checks --watch`: the PR also carries an
+          # approval-gated pull_request run that stays action_required forever, and waiting on
+          # every check would hang on it.
+          run_id=""
+          for _ in $(seq 1 30); do
+            sleep 10
+            run_id=$(gh run list --workflow=ci.yml --branch "$branch" \
+              --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            [ -n "$run_id" ] && break
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::dispatched CI run never appeared for $branch; PR #$pr left open"
+            exit 1
+          fi
+          echo "watching dispatched CI run $run_id"
+          if ! gh run watch "$run_id" --exit-status --interval 20; then
+            echo "::error::CI failed on the aggregate refresh; PR #$pr left open for inspection"
+            exit 1
+          fi
+
+          # A plain merge — protection is satisfied by that run's "CI / required" check on this
+          # head SHA. Nothing is bypassed. If GitHub still refuses, surface it loudly rather
+          # than leaving a silently stale catalog.
+          if ! gh pr merge "$pr" --squash --delete-branch; then
+            echo "::error::CI passed but merging PR #$pr was refused; check branch protection"
+            exit 1
+          fi
+          echo "merged PR #$pr"

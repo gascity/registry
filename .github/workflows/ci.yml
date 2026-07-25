@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Lets the hourly aggregate refresh run CI on its own PR branch. A PR opened by
+  # GITHUB_TOKEN only gets an approval-gated pull_request run, whereas workflow_dispatch
+  # always creates one — so this is what makes that refresh mergeable unattended.
+  workflow_dispatch: {}
 
 permissions:
   contents: read
