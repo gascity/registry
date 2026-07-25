@@ -26,6 +26,7 @@ import { requireCatalogPackSource } from "./catalog";
 import {
   PublishRequestValidationError,
   normalizePublishRequestInput,
+  packNameScope,
   parseGitHubRepositoryUrl,
 } from "./publish";
 import { validatePublishRequestForRegistry } from "./publish-validation";
@@ -61,6 +62,7 @@ import type {
   ApiTokenAuthResult,
   ApiTokenPublishConstraints,
   GitHubPublishImportCreateInput,
+  PackNameClaim,
   PublishApprovalDecision,
   PublishRegistryEntry,
   PublishRequestInput,
@@ -571,28 +573,39 @@ async function handleApi(request: Request) {
     }
     requireRegistryStaff(session);
     if (action === "approve") {
-      const approveBody = await readOptionalJsonBody<{ ownershipOverrideReason?: string }>(
-        request,
-        4 * 1024,
+      const approveBody = await readOptionalJsonBody<{
+        ownershipOverrideReason?: string;
+        namePinOverrideReason?: string;
+      }>(request, 4 * 1024);
+      // Two separate keys, deliberately: an ownership override waved through for a plausible
+      // "I checked out of band" reason must not silently move a pack name off the repo that owns
+      // it. Re-pinning a name is its own decision and needs its own justification.
+      const overrideReason = staffOverrideReason(
+        approveBody.ownershipOverrideReason,
+        "Ownership override reason is too long.",
       );
-      const overrideReason =
-        typeof approveBody.ownershipOverrideReason === "string"
-          ? approveBody.ownershipOverrideReason.trim()
-          : "";
-      if (overrideReason.length > 500) {
-        throw new RequestError(422, "VALIDATION_ERROR", "Ownership override reason is too long.");
-      }
-      const decision = await assertPublishRequestCanMerge(publishRequest, overrideReason || undefined);
+      const namePinOverrideReason = staffOverrideReason(
+        approveBody.namePinOverrideReason,
+        "Name re-pin override reason is too long.",
+      );
+      const decision = await assertPublishRequestCanMerge(publishRequest, {
+        ownershipOverrideReason: overrideReason,
+        namePinOverrideReason,
+      });
       return json({
         publishRequest: await store.approvePublishRequest(session!.user.id, id, decision),
       });
     }
-    const body = await readJsonBody<{ reason?: string }>(request);
+    const body = await readJsonBody<{ reason?: string; releaseNameClaim?: boolean }>(request);
     if (action === "withdraw") {
       // Takedown of an already-approved (served) publish; status approved -> withdrawn, drops from
       // the runtime catalog on the next request. Staff-only (gated by requireRegistryStaff above).
+      // releaseNameClaim additionally unclaims the pack name, returning it to the unclaimed pool
+      // (bare names stay reserved — releasing one does not make it publishable again).
       return json({
-        publishRequest: await store.withdrawPublishRequest(session!.user.id, id, body.reason ?? ""),
+        publishRequest: await store.withdrawPublishRequest(session!.user.id, id, body.reason ?? "", {
+          releaseNameClaim: body.releaseNameClaim === true,
+        }),
       });
     }
     return json({
@@ -716,6 +729,14 @@ function publishSourceIdentityForActor(
   };
 }
 
+// A staff override justification from an approve body: trimmed, length-bounded, and normalized
+// to undefined when blank so the gate treats "" the same as absent.
+function staffOverrideReason(value: unknown, tooLongMessage: string) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (trimmed.length > 500) throw new RequestError(422, "VALIDATION_ERROR", tooLongMessage);
+  return trimmed || undefined;
+}
+
 function assertPublishTokenAllows(
   constraints: ApiTokenPublishConstraints,
   input: PublishRequestInput,
@@ -776,15 +797,21 @@ async function validateAndStorePublishRequest(id: string) {
   }
 }
 
-// The publish-approval merge gate. Returns the audit decision (the consumed ownership
-// override reason, if any) for the caller to thread into approvePublishRequest.
+// The publish-approval merge gate. Returns the audit decision (the consumed override reasons and
+// the bases they satisfied) for the caller to thread into approvePublishRequest.
+//
+// Order, and why: (1) validated; (2) repo control; (3) bare names reserved; (4) scope == the
+// proven repo owner; (5) the name's existing claim must match; (6) withdrawn name@version guard;
+// (7) aggregate dry run. 3-5 come after 2 because they are all measured against the repo that
+// step 2 proved — checking a name against an unproven repo would prove nothing.
 async function assertPublishRequestCanMerge(
   publishRequest: Awaited<ReturnType<typeof store.getPublishRequest>>,
-  overrideReason: string | undefined,
+  overrides: { ownershipOverrideReason?: string; namePinOverrideReason?: string },
 ): Promise<PublishApprovalDecision> {
   if (!publishRequest?.registryEntry) {
     throw new RequestError(422, "PUBLISH_NOT_VALIDATED", "Publish request must be validated before approval.");
   }
+  const overrideReason = overrides.ownershipOverrideReason;
 
   // Path-aware ownership gate. Open self-registration turns the approval queue into a
   // security boundary, so approve requires proof that the submitter controls the source
@@ -818,16 +845,69 @@ async function assertPublishRequestCanMerge(
     }
   }
 
-  // A withdrawn (taken-down) name@version must not be silently re-published with DIFFERENT
-  // provenance — pinned clients would otherwise get swapped bits. An IDENTICAL commit+hash+ref
-  // is allowed and is the staff-gated reinstatement path (a fresh, fully-audited approval). The
-  // query is scoped to this exact name@version so it can never miss a conflicting takedown.
+  // The namespace gate (H1a/H1b/H2). The name checked here is requestedName, not
+  // registryEntry.name: requestedName is what the store keys the claim by, so measuring anything
+  // else could pass the gate for one name and pin another.
+  const requestedName = publishRequest.requestedName;
+  const scope = packNameScope(requestedName);
+  const repoOwnerLogin = publishRequest.repository.owner.toLowerCase();
+  const claim = await store.getPackNameClaim(requestedName);
+
+  // H1a — bare (unscoped) names are reserved. They are the base/ingested half of the namespace,
+  // and the only bare names a publish may use are the ones already claimed when this gate
+  // shipped (the closed grandfathered set). No staff bypass exists on purpose: first-party packs
+  // arrive through sources.toml ingest, never through publish, so a bypass would only ever be
+  // used to hand out a reserved name.
+  if (!scope && !claim) {
+    throw new RequestError(
+      403,
+      "PUBLISH_NAME_RESERVED",
+      `Unscoped pack names are reserved. Publish ${requestedName} as ${repoOwnerLogin}/${requestedName} instead.`,
+    );
+  }
+
+  // H1b — a scoped name's scope must be the GitHub owner of the source repo, case-folded. Step 2
+  // already proved control of that repo, and proving repo control IS proving scope control, so
+  // this needs no separate verification flow.
+  if (scope && scope !== repoOwnerLogin) {
+    throw new RequestError(
+      403,
+      "PUBLISH_SCOPE_MISMATCH",
+      `Pack name scope ${JSON.stringify(scope)} does not match the source repository owner ${JSON.stringify(publishRequest.repository.owner)}.`,
+    );
+  }
+
+  // H2 — the name's existing claim pins it to a REPO (not a person, so teammates can cut
+  // releases). A mismatch is a takeover attempt; staff can authorize an audited RE-PIN instead,
+  // which is the legitimate repo-migration path.
+  let namePinDecision: Pick<PublishApprovalDecision, "namePinOverrideReason"> = {};
+  if (claim && !nameClaimMatchesRequest(claim, publishRequest)) {
+    if (!overrides.namePinOverrideReason) {
+      throw new RequestError(
+        409,
+        "PUBLISH_NAME_OWNER_MISMATCH",
+        `${requestedName} is claimed by ${claim.repoFullName}; releases must come from that repository. Supply a namePinOverrideReason to re-pin the name (repo migration).`,
+      );
+    }
+    namePinDecision = { namePinOverrideReason: overrides.namePinOverrideReason };
+  }
+
+  // H4 — a withdrawn (taken-down) name@version must not be silently re-published with DIFFERENT
+  // provenance: pinned clients would otherwise get swapped bits. An IDENTICAL commit+hash+ref is
+  // allowed and is the staff-gated reinstatement path (a fresh, fully-audited approval).
+  //
+  // Scoped to the SAME LINEAGE (same repo, or same submitter) rather than globally on
+  // (name, version). Globally, anyone who could get one publish approved and then taken down
+  // permanently burned that version number for the real owner — a denial of service on every
+  // future release of a pack they do not own. Content-swap protection only ever mattered within
+  // a lineage anyway: the bits a takedown was about are that lineage's bits.
   const entry = publishRequest.registryEntry;
   const withdrawnConflict = (
     await store.listWithdrawnPublishRequestsForVersion(entry.name, entry.release.version)
   ).find(
     (w) =>
       w.registryEntry != null &&
+      (sameSourceRepository(w, publishRequest) || w.submittedBy.id === publishRequest.submittedBy.id) &&
       (w.registryEntry.release.commit !== entry.release.commit ||
         w.registryEntry.release.hash !== entry.release.hash ||
         w.registryEntry.release.ref !== entry.release.ref),
@@ -851,7 +931,37 @@ async function assertPublishRequestCanMerge(
     const message = error instanceof Error ? error.message : "Publish request conflicts with the aggregate.";
     throw new RequestError(409, "PUBLISH_CONFLICT", message);
   }
-  return ownershipDecision;
+  return { ...ownershipDecision, ...namePinDecision };
+}
+
+// Does an incoming publish come from the repo a name claim is pinned to? Compares GitHub's
+// numeric repository id when BOTH sides know it (rename-stable), and otherwise falls back to the
+// case-folded repo full name — claim-only publishes and grandfathered claims prove no ids. The
+// owner login is checked too: a repo TRANSFER keeps its id while moving to a different account,
+// and that account must not inherit the name.
+function nameClaimMatchesRequest(claim: PackNameClaim, request: PublishRequestRow) {
+  // Owner identity by numeric id when both sides know it, because that is what survives an account
+  // RENAME — comparing logins alone would 409 a publisher who simply renamed their GitHub account
+  // and force a staff re-pin. A TRANSFER still fails here, which is the point: it changes the owner
+  // id. Falls back to the login when either side proved no owner id (claim-only, grandfathered).
+  if (claim.githubOwnerId && request.sourceGithubOwnerId) {
+    if (claim.githubOwnerId !== request.sourceGithubOwnerId) return false;
+  } else if (claim.githubOwnerLogin.toLowerCase() !== request.repository.owner.toLowerCase()) {
+    return false;
+  }
+  if (claim.githubRepositoryId && request.sourceGithubRepositoryId) {
+    return claim.githubRepositoryId === request.sourceGithubRepositoryId;
+  }
+  return claim.repoFullName.toLowerCase() === request.repository.fullName.toLowerCase();
+}
+
+// Same rule as above, between two publish requests: the lineage filter on the withdrawn-version
+// guard. Ids first when both are stamped, else the case-folded repo full name.
+function sameSourceRepository(left: PublishRequestRow, right: PublishRequestRow) {
+  if (left.sourceGithubRepositoryId && right.sourceGithubRepositoryId) {
+    return left.sourceGithubRepositoryId === right.sourceGithubRepositoryId;
+  }
+  return left.repository.fullName.toLowerCase() === right.repository.fullName.toLowerCase();
 }
 
 // Readiness probe: /health resolves only if the backing store can serve queries, so a

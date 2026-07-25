@@ -1010,6 +1010,139 @@ for (const lane of lanes) {
       });
     });
 
+    // The re-pin is the audited repo-migration path. It has to be opt-in per approval: if a plain
+    // approve could move a claim, the merge gate's whole name pin would be advisory.
+    test("an approve re-points a name claim ONLY with an explicit re-pin authorization", async () => {
+      const first = await store.ensureUser(identity());
+      const migrated = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      const original = await approvedPublishRequest(store, admin.id, first.id, name, {
+        repoUrl: "https://github.com/acme/original-repo",
+      });
+      const claim = await store.getPackNameClaim(name);
+      expect(claim).toMatchObject({ repoFullName: "acme/original-repo", sourceRequestId: original.id });
+
+      // A plain approve of the same name from another repo leaves the claim exactly as it is.
+      const unauthorized = await validatedPublishRequest(store, migrated.id, name, {
+        repoUrl: "https://github.com/acme/new-repo",
+        requestedVersion: "0.2.0",
+      });
+      await store.approvePublishRequest(admin.id, unauthorized.id);
+      expect(await store.getPackNameClaim(name)).toEqual(claim);
+
+      await Bun.sleep(2); // so an updatedAt bump is observable on both lanes
+      const authorized = await validatedPublishRequest(store, migrated.id, name, {
+        repoUrl: "https://github.com/acme/new-repo",
+        requestedVersion: "0.3.0",
+      });
+      await store.approvePublishRequest(admin.id, authorized.id, {
+        namePinOverrideReason: "repo migrated to acme/new-repo",
+      });
+
+      const repinned = await store.getPackNameClaim(name);
+      expect(repinned).toMatchObject({
+        name,
+        repoFullName: "acme/new-repo",
+        githubOwnerLogin: "acme",
+        claimedByUserId: migrated.id,
+        sourceRequestId: authorized.id,
+      });
+      // The claim's identity is the NAME, so its createdAt is when the name was first claimed —
+      // a re-pin moves the binding, it does not mint a new claim.
+      expect(repinned!.createdAt).toBe(claim!.createdAt);
+      expect(Date.parse(repinned!.updatedAt)).toBeGreaterThan(Date.parse(claim!.updatedAt));
+
+      // A re-pin authorization on a name that has NO claim yet still just mints one.
+      const fresh = `${uid("scope")}/${uid("pack")}`;
+      const minted = await validatedPublishRequest(store, first.id, fresh);
+      await store.approvePublishRequest(admin.id, minted.id, { namePinOverrideReason: "not needed" });
+      expect(await store.getPackNameClaim(fresh)).toMatchObject({ sourceRequestId: minted.id });
+    });
+
+    test("withdraw releases the name claim only when asked", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const kept = `${uid("scope")}/${uid("pack")}`;
+      const freed = `${uid("scope")}/${uid("pack")}`;
+
+      // A content takedown must NOT unclaim the name: the repo that owns it still owns it, and
+      // an unclaimed name is open to whoever asks next.
+      const keptRequest = await approvedPublishRequest(store, admin.id, submitter.id, kept);
+      await store.withdrawPublishRequest(admin.id, keptRequest.id, "takedown: content");
+      expect(await store.getPackNameClaim(kept)).toMatchObject({ name: kept });
+
+      const freedRequest = await approvedPublishRequest(store, admin.id, submitter.id, freed);
+      expect(await store.getPackNameClaim(freed)).not.toBeNull();
+      await store.withdrawPublishRequest(admin.id, freedRequest.id, "takedown: squat", {
+        releaseNameClaim: true,
+      });
+      expect(await store.getPackNameClaim(freed)).toBeNull();
+
+      // The release is part of the takedown, not a substitute for it.
+      expect((await store.getPublishRequest(freedRequest.id))?.status).toBe("withdrawn");
+      // A failed withdraw releases nothing: the row is already terminal, so neither effect applies.
+      await expect(
+        store.withdrawPublishRequest(admin.id, keptRequest.id, "again", { releaseNameClaim: true }),
+      ).rejects.toBeInstanceOf(StoreValidationError);
+      expect(await store.getPackNameClaim(kept)).toMatchObject({ name: kept });
+    });
+
+    // A release has to SURVIVE the next boot. init()'s grandfather backfill re-mints a claim for
+    // any name that still has an approved request, so releasing a name while a sibling release is
+    // still served would silently revert on restart — pinned to the FIRST-approved repo, with no
+    // audit row for the reversion. That would restore a squatter's binding and undo the staff
+    // decision this lever exists to make, which is why the release is refused instead.
+    test("a released name claim survives init(); releasing is refused while a sibling release is served", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      const first = await approvedPublishRequest(store, admin.id, submitter.id, name);
+      const second = await approvedPublishRequest(store, admin.id, submitter.id, name, {
+        requestedVersion: "0.2.0",
+      });
+
+      // Two approved releases: releasing now would leave a live, served name unclaimed AND be
+      // undone by the next backfill.
+      await expect(
+        store.withdrawPublishRequest(admin.id, second.id, "takedown", { releaseNameClaim: true }),
+      ).rejects.toBeInstanceOf(StoreValidationError);
+      // Refused BEFORE anything mutated — the request is still served, not taken down and then failed.
+      expect((await store.getPublishRequest(second.id))?.status).toBe("approved");
+      expect(await store.getPackNameClaim(name)).not.toBeNull();
+
+      // Take the sibling down without releasing, leaving exactly one approved release...
+      await store.withdrawPublishRequest(admin.id, second.id, "takedown: content");
+      // ...now the release is legal, and it must stick across a reboot.
+      await store.withdrawPublishRequest(admin.id, first.id, "takedown: squat", {
+        releaseNameClaim: true,
+      });
+      expect(await store.getPackNameClaim(name)).toBeNull();
+      await store.init();
+      expect(await store.getPackNameClaim(name)).toBeNull();
+    });
+
+    // Releasing a BARE name's claim can only ever cause harm: bare names are reserved, so nothing
+    // can mint a bare claim afterwards and the name becomes permanently unpublishable.
+    test("releasing an unscoped name's claim is refused outright", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const bare = uid("legacy");
+
+      const request = await approvedPublishRequest(store, admin.id, submitter.id, bare);
+      await expect(
+        store.withdrawPublishRequest(admin.id, request.id, "takedown", { releaseNameClaim: true }),
+      ).rejects.toBeInstanceOf(StoreValidationError);
+      expect((await store.getPublishRequest(request.id))?.status).toBe("approved");
+      expect(await store.getPackNameClaim(bare)).toMatchObject({ name: bare });
+
+      // Without the flag the takedown works normally and the claim is retained.
+      await store.withdrawPublishRequest(admin.id, request.id, "takedown");
+      expect(await store.getPackNameClaim(bare)).toMatchObject({ name: bare });
+    });
+
     // Documented divergence (store.ts): the file store keeps no audit_logs. This asserts the
     // Postgres audit trail — the ownership-override justification is a security/compliance record.
     if (lane.name === "postgres") {
@@ -1087,6 +1220,84 @@ for (const lane of lanes) {
           expect(rows).toHaveLength(2);
           expect(rows.find((row) => row.target_id === first.id)!.metadata.namePin).toBe("created");
           expect(rows.find((row) => row.target_id === second.id)!.metadata.namePin).toBe("matched");
+        } finally {
+          await sql.end();
+        }
+      });
+
+      // A re-pin hands a name to a different repo, so the audit row has to be reconstructable on
+      // its own: the justification plus both ends of the move.
+      test("the approve audit reconstructs a re-pin from where to where", async () => {
+        const original = await store.ensureUser(identity());
+        const migrated = await store.ensureUser(identity());
+        const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+        const name = `${uid("scope")}/${uid("pack")}`;
+
+        const before = await approvedPublishRequest(store, admin.id, original.id, name, {
+          repoUrl: "https://github.com/acme/audited-old",
+        });
+        const after = await validatedPublishRequest(store, migrated.id, name, {
+          repoUrl: "https://github.com/acme/audited-new",
+          requestedVersion: "0.2.0",
+        });
+        await store.approvePublishRequest(admin.id, after.id, {
+          namePinOverrideReason: "migration ticket #4212",
+        });
+
+        const sql = postgres(dbUrl!, { max: 1 });
+        try {
+          const [row] = await sql`
+            SELECT metadata FROM audit_logs
+            WHERE action = 'publish_request.approve' AND target_id = ${after.id}`;
+          expect(row!.metadata.namePin).toBe("repinned");
+          expect(row!.metadata.namePinOverrideReason).toBe("migration ticket #4212");
+          expect(row!.metadata.namePinFrom).toMatchObject({
+            repoFullName: "acme/audited-old",
+            githubOwnerLogin: "acme",
+            claimedByUserId: original.id,
+            sourceRequestId: before.id,
+          });
+          expect(row!.metadata.namePinTo).toMatchObject({
+            repoFullName: "acme/audited-new",
+            claimedByUserId: migrated.id,
+            sourceRequestId: after.id,
+          });
+        } finally {
+          await sql.end();
+        }
+      });
+
+      test("the withdraw audit records a released name claim (and nothing when none was released)", async () => {
+        const submitter = await store.ensureUser(identity());
+        const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+        const freed = `${uid("scope")}/${uid("pack")}`;
+        const kept = `${uid("scope")}/${uid("pack")}`;
+
+        const freedRequest = await approvedPublishRequest(store, admin.id, submitter.id, freed, {
+          repoUrl: "https://github.com/acme/released-repo",
+        });
+        await store.withdrawPublishRequest(admin.id, freedRequest.id, "takedown: squat", {
+          releaseNameClaim: true,
+        });
+        const keptRequest = await approvedPublishRequest(store, admin.id, submitter.id, kept);
+        await store.withdrawPublishRequest(admin.id, keptRequest.id, "takedown: content");
+
+        const sql = postgres(dbUrl!, { max: 1 });
+        try {
+          const [releasedRow] = await sql`
+            SELECT metadata FROM audit_logs
+            WHERE action = 'publish_request.withdraw' AND target_id = ${freedRequest.id}`;
+          // The claim row is gone, so this is the only surviving record of who held the name.
+          expect(releasedRow!.metadata.releasedNameClaim).toMatchObject({
+            name: freed,
+            repoFullName: "acme/released-repo",
+            claimedByUserId: submitter.id,
+            sourceRequestId: freedRequest.id,
+          });
+          const [keptRow] = await sql`
+            SELECT metadata FROM audit_logs
+            WHERE action = 'publish_request.withdraw' AND target_id = ${keptRequest.id}`;
+          expect(keptRow!.metadata.releasedNameClaim ?? null).toBeNull();
         } finally {
           await sql.end();
         }

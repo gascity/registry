@@ -97,10 +97,23 @@ export type IdentityClaims = {
 export type PublishApprovalDecision = {
   ownershipOverrideReason?: string;
   ownershipBasis?: "repo_proven" | "verified_repo_ownership" | "org_member" | "override";
-  // What the approval did to the pack's name claim: minted the first claim, or matched the
-  // claim already on file. Derived by the store at approve time (never supplied by the
-  // caller) and recorded in the approve audit row.
+  // Staff authorization to RE-POINT the name's existing claim at this request's repo — the
+  // audited repo-migration path. Set by the merge gate only after it has both found a claim
+  // mismatch AND been handed this justification; the store performs the re-point inside the
+  // approve transaction. Deliberately NOT the same field as ownershipOverrideReason: an
+  // override waved through for an ownership reason must not silently move a name too.
+  namePinOverrideReason?: string;
+  // What the approval did to the pack's name claim: minted the first claim, matched the claim
+  // already on file, or re-pointed it under a staff override. Derived by the store at approve
+  // time (never supplied by the caller) and recorded in the approve audit row.
   namePin?: "created" | "matched" | "repinned";
+};
+
+// Options for a staff takedown. Releasing the name claim is opt-in and separate from the
+// takedown itself: most withdrawals are content takedowns where the name must stay pinned to
+// the repo that owns it, and only a deliberate "free this name" decision unclaims it.
+export type PublishWithdrawOptions = {
+  releaseNameClaim?: boolean;
 };
 
 export type ReviewInput = {
@@ -426,7 +439,9 @@ export interface RegistryStore {
   // (not a full list) so it stays O(index-hit) and can never truncate past the conflicting row.
   listWithdrawnPublishRequestsForVersion(name: string, version: string): Promise<PublishRequestRow[]>;
   // The name→owner binding for a pack name, or null while the name is unclaimed. Written by
-  // approvePublishRequest (first approval of a name wins) and by the init() backfill.
+  // approvePublishRequest (first approval of a name wins; a later approval re-points it only under
+  // a staff namePinOverrideReason) and by the init() backfill; dropped by a withdraw that asked to
+  // release it. Read by the publish merge gate, which measures every incoming release against it.
   getPackNameClaim(name: string): Promise<PackNameClaim | null>;
   markPublishRequestValidated(
     id: string,
@@ -444,9 +459,12 @@ export interface RegistryStore {
     reason: string,
   ): Promise<PublishRequestRow>;
   // Takedown of an already-approved (currently-served) publish. Terminal: approved -> withdrawn.
+  // With options.releaseNameClaim the pack name's claim is dropped in the SAME step, so the
+  // takedown and the unclaim can never half-apply.
   withdrawPublishRequest(
     actorUserId: string,
     id: string,
     reason: string,
+    options?: PublishWithdrawOptions,
   ): Promise<PublishRequestRow>;
 }

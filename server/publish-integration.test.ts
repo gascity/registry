@@ -16,6 +16,8 @@ import type {
   GitHubPublishImportCreateInput,
   PublishRequestInput,
   PublishRequestRow,
+  PublishSourceIdentity,
+  PublishSubmissionMethod,
 } from "./types";
 
 // Mirror the conformance suite's no-silent-skip gate so this file also fails loudly if the CI
@@ -29,7 +31,13 @@ if (process.env.REGISTRY_TEST_REQUIRE_POSTGRES === "1" && !process.env.REGISTRY_
 const owner = "acme";
 const repo = "registry-fixtures";
 const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+// A second commit, for the cases that need two releases whose bits genuinely differ (the
+// withdrawn-version guard compares commit + hash + ref).
+const secondCommit = "cccccccccccccccccccccccccccccccccccccccc";
 const repoUrl = `https://github.com/${owner}/${repo}`;
+// Module-scoped so every bearer publish in the file gets its own client address (see
+// nextMachineClient) — the rate-limit buckets live in module state and outlive a harness.
+let machineCount = 0;
 
 describe("local registry publish integration", () => {
   test("accepts a locally created pack through every supported publish method", async () => {
@@ -380,6 +388,385 @@ describe("local registry publish integration", () => {
       await harness.close();
     }
   });
+
+  // ATTACK (a) — name takeover. Before the namespace gate, assertPublishRequestCanMerge never
+  // compared the requested name to any owner record, so a repo-proven publish from ANY repo could
+  // claim ANY name. Every case below approves 200 on that code and takes the pack over.
+  test("a proven repo cannot take over a name another repo already claimed", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const incumbent = await harness.signIn("incumbent-maintainer");
+      const admin = await harness.signIn("admin", "admin");
+
+      // 1. A grandfathered BARE name, shaped like the live community pack: claimed by
+      //    wespd/cacc-twin-team from the pre-gate world.
+      await harness.seedApprovedPublish(
+        incumbent.userId,
+        admin.userId,
+        await harness.createPack("bare-incumbent", "1.0.0", {
+          name: "cacc-twin-team",
+          repoUrl: "https://github.com/wespd/cacc-twin-team",
+        }),
+      );
+      // The attacker forks it, so validation (which only reads public content) passes, and holds a
+      // real GitHub Actions token for their OWN repo — fully repo-proven.
+      const bareAttack = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("bare-attack", "2.0.0", {
+          name: "cacc-twin-team",
+          repoUrl: "https://github.com/evil/cacc-twin-team",
+        }),
+      );
+      expect(bareAttack.submissionMethod).toBe("github_actions_oidc");
+      const bareError = await harness.approveExpectingError(
+        admin,
+        bareAttack.id,
+        409,
+        "PUBLISH_NAME_OWNER_MISMATCH",
+      );
+      expect(bareError.message).toContain("wespd/cacc-twin-team");
+
+      // 2. A SIBLING repo under the same owner. The scope matches, so only the claim pin stands
+      //    between one team's repo and another team's pack name.
+      const sibling = `${owner}/integration-sibling`;
+      const held = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("sibling-incumbent", "1.0.0", { name: sibling }),
+      );
+      await harness.approve(admin, held.id);
+      const siblingAttack = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("sibling-attack", "1.1.0", {
+          name: sibling,
+          repoUrl: `https://github.com/${owner}/some-other-repo`,
+        }),
+      );
+      await harness.approveExpectingError(admin, siblingAttack.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+
+      // 3. A repo TRANSFER: same GitHub repository id, new account. The id alone would report
+      //    "same repo", so the claim pin has to compare the owner login too.
+      const transferred = "integration-transferred";
+      await harness.seedApprovedPublish(
+        incumbent.userId,
+        admin.userId,
+        await harness.createPack("transfer-incumbent", "1.0.0", {
+          name: transferred,
+          repoUrl: `https://github.com/${owner}/transferred-pack`,
+        }),
+        {
+          submissionMethod: "github_actions_oidc",
+          sourceIdentity: sourceIdentityFor(`${owner}/transferred-pack`),
+        },
+      );
+      const transferAttack = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("transfer-attack", "2.0.0", {
+          name: transferred,
+          repoUrl: "https://github.com/evil/transferred-pack",
+        }),
+      );
+      expect(transferAttack.sourceGithubRepositoryId).toBe("repo_transferred"); // id says "same repo"
+      await harness.approveExpectingError(admin, transferAttack.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+
+      // Nothing the attacker submitted was served, and no claim moved.
+      const catalog = await harness.publicClient.json<{ packs: Array<{ name: string; latest: string }> }>(
+        "/catalog.json",
+      );
+      expect(catalog.packs).toContainEqual(expect.objectContaining({ name: "cacc-twin-team", latest: "1.0.0" }));
+      expect(catalog.packs).toContainEqual(expect.objectContaining({ name: sibling, latest: "1.0.0" }));
+      expect((await harness.store.getPackNameClaim("cacc-twin-team"))?.repoFullName).toBe("wespd/cacc-twin-team");
+      expect((await harness.store.getPackNameClaim(sibling))?.repoFullName).toBe(`${owner}/${repo}`);
+      expect((await harness.store.getPackNameClaim(transferred))?.githubOwnerLogin).toBe(owner);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // ATTACK (b) — minting a NEW bare name. Bare names are the ingested half of the namespace; the
+  // only publishable ones are those already claimed when the gate shipped.
+  test("a new bare (unscoped) name is refused even from a fully proven repo", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const publisher = await harness.signIn("bare-namer", undefined, { orgMember: true });
+      const admin = await harness.signIn("admin", "admin");
+
+      const bare = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("bare-new", "1.0.0", { name: "integration-bare-new" }),
+      );
+      expect(bare.submissionMethod).toBe("github_actions_oidc");
+      const error = await harness.approveExpectingError(admin, bare.id, 403, "PUBLISH_NAME_RESERVED");
+      // The refusal names the scoped form the publisher should have used.
+      expect(error.message).toContain(`${owner}/integration-bare-new`);
+
+      // No staff bypass: neither override key opens a reserved name.
+      await harness.approveExpectingError(admin, bare.id, 403, "PUBLISH_NAME_RESERVED", {
+        ownershipOverrideReason: "I know these people",
+        namePinOverrideReason: "let them have it",
+      });
+      expect(await harness.store.getPackNameClaim("integration-bare-new")).toBeNull();
+
+      // The same pack under its owner's scope is fine — the gate blocks the shape, not the pack.
+      const scoped = await harness.publishWithSession(
+        publisher,
+        await harness.createPack("bare-new-scoped", "1.0.0", { name: `${owner}/integration-bare-new` }),
+      );
+      expect((await harness.approve(admin, scoped.id)).status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // ATTACK (c) — squatting someone else's scope. Proving repo control IS proving scope control, so
+  // the scope segment must equal the owner of the repo the merge gate already proved.
+  test("a scope that is not the proven repo owner is refused", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const attacker = await harness.signIn("scope-squatter", undefined, { orgMember: true });
+      const admin = await harness.signIn("admin", "admin");
+
+      // Repo-proven for acme/registry-fixtures, but the name claims the `microsoft` scope.
+      const squat = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("scope-squat", "1.0.0", { name: "microsoft/integration-scope-squat" }),
+      );
+      const error = await harness.approveExpectingError(admin, squat.id, 403, "PUBLISH_SCOPE_MISMATCH");
+      expect(error.message).toContain("microsoft");
+      expect(error.message).toContain(owner);
+
+      // Not overridable either: staff cannot hand out a scope whose owner nobody proved.
+      await harness.approveExpectingError(admin, squat.id, 403, "PUBLISH_SCOPE_MISMATCH", {
+        ownershipOverrideReason: "vouched for",
+        namePinOverrideReason: "vouched for",
+      });
+
+      // A claim-only submission can't route around it either — the asserted repo owner is still
+      // what the scope is compared against.
+      const claimOnly = await harness.publishWithPersonalToken(
+        attacker,
+        await harness.createPack("scope-squat-cli", "1.0.0", { name: "microsoft/integration-scope-cli" }),
+      );
+      await harness.approveExpectingError(admin, claimOnly.id, 403, "PUBLISH_SCOPE_MISMATCH");
+      expect(await harness.store.getPackNameClaim("microsoft/integration-scope-squat")).toBeNull();
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // ATTACK (d) — the withdrawn-version denial of service. The withdrawn-name@version guard used to
+  // be global, so a hostile publish plus a takedown permanently burned that version number for the
+  // repo that actually owns the name. Now it only bites within one lineage (same repo or same
+  // submitter), which is the only place the anti-content-swap rule ever meant anything.
+  test("a hostile publish-then-takedown no longer burns the version for the real owner", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const name = `${owner}/integration-dos`;
+
+      // The squatter gets there first from a DIFFERENT repo under the same owner, so the scope
+      // check passes and they legitimately mint the claim...
+      const hostile = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("dos-hostile", "1.0.0", {
+          name,
+          repoUrl: `https://github.com/${owner}/squatted-fork`,
+        }),
+      );
+      await harness.approve(admin, hostile.id);
+      // ...and staff take it down AND free the name (the release flag this slice adds; without it
+      // the claim would still point at the squatter's repo).
+      await harness.withdraw(admin, hostile.id, "takedown: hostile squat", { releaseNameClaim: true });
+
+      // The real owner now publishes the same name@1.0.0 from its own repo with different bits.
+      const owned = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("dos-real", "1.0.0", { name, commit: secondCommit }),
+      );
+      // A different repo AND a different submitter (each repo's workflow publishes as its own
+      // GitHub Actions identity), so this is a different lineage on both tests.
+      expect(owned.submittedBy.id).not.toBe(hostile.submittedBy.id);
+      expect(owned.registryEntry?.release.hash).not.toBe(hostile.registryEntry?.release.hash);
+
+      // Different lineage -> the takedown does not follow the version number around. Asserted
+      // BEFORE the claim-release assertion below on purpose: the refusal is what this test exists
+      // to prove, so a regression has to surface as a refused approve, not as a missing flag.
+      expect((await harness.approve(admin, owned.id)).status).toBe("approved");
+      const catalog = await harness.publicClient.json<{ packs: Array<{ name: string; latest: string }> }>(
+        "/catalog.json",
+      );
+      expect(catalog.packs).toContainEqual(expect.objectContaining({ name, latest: "1.0.0" }));
+      // The release freed the name, so the owner's approve is what re-claimed it.
+      expect((await harness.store.getPackNameClaim(name))?.repoFullName).toBe(`${owner}/${repo}`);
+      expect((await harness.store.getPackNameClaim(name))?.sourceRequestId).toBe(owned.id);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // BACKWARD-COMPAT GUARANTEE the whole design rests on: the live bare-named community pack keeps
+  // working. No rename and no alias (either would break its installers) — its grandfathered claim
+  // is what makes the reserved-bare-name rule survivable.
+  test("a grandfathered bare-named pack keeps cutting releases from its own repo", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const maintainer = await harness.signIn("wespd");
+      const admin = await harness.signIn("admin", "admin");
+      const legacyRepo = "wespd/cacc-twin-team";
+
+      await harness.seedApprovedPublish(
+        maintainer.userId,
+        admin.userId,
+        await harness.createPack("cacc-v1", "1.0.0", {
+          name: "cacc-twin-team",
+          repoUrl: `https://github.com/${legacyRepo}`,
+        }),
+      );
+      const claim = await harness.store.getPackNameClaim("cacc-twin-team");
+      expect(claim).toMatchObject({ repoFullName: legacyRepo, githubOwnerLogin: "wespd" });
+      expect(claim?.scope).toBeUndefined();
+
+      // The maintainer proved the repo through the GitHub App, so the next release needs no staff
+      // override at all — the bare name is the ONLY thing that could have blocked it.
+      await harness.store.upsertVerifiedPackOwnership(maintainer.userId, {
+        packKey: "wespd--cacc-twin-team",
+        sourceUrl: `https://github.com/${legacyRepo}/tree/main`,
+        githubRepositoryId: "repo_wespd_cacc-twin-team",
+        githubRepositoryFullName: legacyRepo,
+        githubRepositoryName: "cacc-twin-team",
+        githubOwnerId: "owner_wespd",
+        githubOwnerLogin: "wespd",
+        githubOwnerType: "User",
+        verificationMethod: "github_app_user_token",
+      });
+      const next = await harness.publishWithPersonalToken(
+        maintainer,
+        await harness.createPack("cacc-v2", "1.1.0", {
+          name: "cacc-twin-team",
+          repoUrl: `https://github.com/${legacyRepo}`,
+          commit: secondCommit,
+        }),
+      );
+      expect((await harness.approve(admin, next.id)).status).toBe("approved");
+
+      // Both releases served under the unchanged bare name, and the claim did not move.
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; latest: string; releases: Array<{ version: string }> }>;
+      }>("/catalog.json");
+      const served = catalog.packs.find((pack) => pack.name === "cacc-twin-team");
+      expect(served?.latest).toBe("1.1.0");
+      expect(served?.releases.map((release) => release.version).sort()).toEqual(["1.0.0", "1.1.0"]);
+      expect(await harness.store.getPackNameClaim("cacc-twin-team")).toEqual(claim);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The population the claim pin exists to SERVE, as opposed to the ones it exists to block: a
+  // repo-proven scoped pack cutting its own follow-up releases from the same repo. Every other pin
+  // test is a mismatch, and the grandfathered/claim-only cases take the repoFullName fallback, so
+  // without this the id-equality branch of nameClaimMatchesRequest has no coverage at all —
+  // stubbing it to `return false` left the whole suite green.
+  test("a scoped pack's own follow-up releases keep approving from the same repo", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const name = `${owner}/integration-followup`;
+
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("followup-v1", "1.0.0", { name }),
+      );
+      expect((await harness.approve(admin, first.id)).status).toBe("approved");
+      const claim = await harness.store.getPackNameClaim(name);
+      // Repo-proven, so the claim carries GitHub's numeric ids — this is what makes the comparison
+      // take the id path rather than the name fallback.
+      expect(claim).toMatchObject({
+        githubRepositoryId: repoIdentityFor(`${owner}/${repo}`).repositoryId,
+        githubOwnerId: repoIdentityFor(`${owner}/${repo}`).ownerId,
+      });
+
+      // Same repo, same owner, later release: approves with no override, and does NOT move the pin.
+      const second = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("followup-v2", "1.1.0", { name }),
+      );
+      expect(second.sourceGithubRepositoryId).toBe(claim!.githubRepositoryId);
+      expect((await harness.approve(admin, second.id)).status).toBe("approved");
+      expect(await harness.store.getPackNameClaim(name)).toEqual(claim);
+
+      // A teammate's release counts too: the pin is to the REPO, not to the person who first
+      // published it, so a second maintainer publishing from the same repo is not a takeover.
+      const teammate = await harness.signIn("followup-teammate", undefined, { orgMember: true });
+      const third = await harness.publishWithGitHubImport(
+        teammate,
+        await harness.createPack("followup-v3", "1.2.0", { name }),
+      );
+      expect(third.submittedBy.id).not.toBe(first.submittedBy.id);
+      expect((await harness.approve(admin, third.id)).status).toBe("approved");
+      expect(await harness.store.getPackNameClaim(name)).toEqual(claim);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("staff can re-pin a name onto a migrated repo, and the move is audited", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const name = `${owner}/integration-migrated`;
+      const newRepo = `${owner}/registry-fixtures-next`;
+
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("migrated-v1", "1.0.0", { name }),
+      );
+      await harness.approve(admin, first.id);
+
+      // The pack moves to a new repo under the same owner: the scope still matches, but the claim
+      // still points at the old repo.
+      const moved = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("migrated-v2", "1.1.0", { name, repoUrl: `https://github.com/${newRepo}` }),
+      );
+      await harness.approveExpectingError(admin, moved.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+      // An OWNERSHIP override does not authorize moving a name. Two decisions, two keys — otherwise
+      // any "I verified them out of band" approval would silently re-point whatever name it touched.
+      await harness.approveExpectingError(admin, moved.id, 409, "PUBLISH_NAME_OWNER_MISMATCH", {
+        ownershipOverrideReason: "vouched for the publisher",
+      });
+
+      const approved = await harness.approve(admin, moved.id, undefined, "repo migrated, ticket #77");
+      expect(approved.status).toBe("approved");
+      expect(await harness.store.getPackNameClaim(name)).toMatchObject({
+        repoFullName: newRepo,
+        githubRepositoryId: repoIdentityFor(newRepo).repositoryId,
+        sourceRequestId: moved.id,
+      });
+      // The re-pinned repo is now the pinned one: the OLD repo has to be re-pinned back to publish.
+      const relapse = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("migrated-v3", "1.2.0", { name }),
+      );
+      await harness.approveExpectingError(admin, relapse.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+
+      if (harness.dbUrl) {
+        const sql = postgres(harness.dbUrl, { max: 1, onnotice: () => {} });
+        try {
+          const [row] = await sql`
+            SELECT metadata FROM audit_logs
+            WHERE target_id = ${moved.id} AND action = 'publish_request.approve'`;
+          expect(row?.metadata.namePin).toBe("repinned");
+          expect(row?.metadata.namePinOverrideReason).toBe("repo migrated, ticket #77");
+          // Enough to reconstruct what moved from where to where.
+          expect(row?.metadata.namePinFrom).toMatchObject({
+            repoFullName: `${owner}/${repo}`,
+            sourceRequestId: first.id,
+          });
+          expect(row?.metadata.namePinTo).toMatchObject({
+            repoFullName: newRepo,
+            sourceRequestId: moved.id,
+          });
+          // An approve that only MATCHED the claim records no move at all.
+          const [firstRow] = await sql`
+            SELECT metadata FROM audit_logs
+            WHERE target_id = ${first.id} AND action = 'publish_request.approve'`;
+          expect(firstRow?.metadata.namePin).toBe("created");
+          expect(firstRow?.metadata.namePinFrom ?? null).toBeNull();
+        } finally {
+          await sql.end();
+        }
+      }
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 type TestPack = PublishRequestInput & {
@@ -417,6 +804,10 @@ async function createPublishHarness() {
 
   const config = testConfig();
   let importCandidate: GitHubPublishCandidate | null = null;
+  // The repo + commit the next minted GitHub Actions token proves. publishWithGitHubActionsToken
+  // points this at whatever repo the pack claims, so a test can hold a repo-proven token for a
+  // repo OTHER than the one that owns the name it is attacking.
+  let oidcSource = { repository: `${owner}/${repo}`, sha: commit };
   const handler = createRegistryFetchHandler({
     config,
     store,
@@ -426,20 +817,23 @@ async function createPublishHarness() {
         fetchFn: localRawGitHubFetch(repoRoot),
         computeHash: async (publishRequest) => packHash(publishRequest),
       }),
-    verifyGitHubActionsOidcToken: async () =>
-      ({
-        repository: `${owner}/${repo}`,
-        repositoryId: "repo_123",
-        repositoryOwner: owner,
-        repositoryOwnerId: "owner_123",
-        workflowRef: `${owner}/${repo}/.github/workflows/release.yml@refs/heads/main`,
+    verifyGitHubActionsOidcToken: async () => {
+      const [identityOwner = owner] = oidcSource.repository.split("/");
+      const ids = repoIdentityFor(oidcSource.repository);
+      return {
+        repository: oidcSource.repository,
+        repositoryId: ids.repositoryId,
+        repositoryOwner: identityOwner,
+        repositoryOwnerId: ids.ownerId,
+        workflowRef: `${oidcSource.repository}/.github/workflows/release.yml@refs/heads/main`,
         runId: "1",
         runAttempt: "1",
-        sha: commit,
+        sha: oidcSource.sha,
         actor: "publisher",
         actorId: "actor_123",
         eventName: "push",
-      }) satisfies GitHubActionsIdentity,
+      } satisfies GitHubActionsIdentity;
+    },
     verifyRegistryEiaToken: async (token) => {
       if (!token.startsWith("test-eia:")) throw new Error("invalid test EIA");
       return {
@@ -466,10 +860,17 @@ async function createPublishHarness() {
   config.appUrl = `http://127.0.0.1:${port}`;
   const publicClient = new TestHttpClient(config.appUrl);
 
-  async function createPack(slug: string, version: string): Promise<TestPack> {
+  // Direct publishes are SCOPED `owner/pack`, where owner is the GitHub owner of the source repo
+  // (`acme` here). `name` overrides that for the namespace-gate cases that deliberately request a
+  // bare or foreign-scoped name.
+  async function createPack(
+    slug: string,
+    version: string,
+    over: { name?: string; repoUrl?: string; commit?: string } = {},
+  ): Promise<TestPack> {
     const packPath = `packs/${slug}`;
     const packDir = join(repoRoot, packPath);
-    const requestedName = `integration-${slug}`;
+    const requestedName = over.name ?? `${owner}/integration-${slug}`;
     await mkdir(packDir, { recursive: true });
     await writeFile(
       join(packDir, "pack.toml"),
@@ -481,14 +882,47 @@ async function createPublishHarness() {
     );
     return {
       slug,
-      repoUrl,
-      commit,
+      repoUrl: over.repoUrl ?? repoUrl,
+      commit: over.commit ?? commit,
       packPath,
       requestedName,
       requestedVersion: version,
       requestedRef: "refs/heads/main",
       requestedDescription: `Release ${requestedName} ${version}.`,
     };
+  }
+
+  // Writes an approved publish (and therefore its name claim) straight through the store, which
+  // is exactly what the server did before this gate existed. Tests use it to stand up the
+  // pre-gate world — notably a grandfathered BARE-named pack — without pretending the gate would
+  // mint one today. In production those claims come from slice 2's init() backfill; the gate reads
+  // the same row either way.
+  async function seedApprovedPublish(
+    submitterUserId: string,
+    adminUserId: string,
+    pack: TestPack,
+    over: { submissionMethod?: PublishSubmissionMethod; sourceIdentity?: PublishSourceIdentity } = {},
+  ) {
+    const created = await store.createPublishRequest(
+      submitterUserId,
+      pack,
+      over.submissionMethod ?? "web_session",
+      over.sourceIdentity,
+    );
+    const validated = await store.markPublishRequestValidated(created.id, {
+      name: created.requestedName,
+      description: pack.requestedDescription ?? `${created.requestedName} pack.`,
+      source: created.sourceUrl,
+      sourceKind: "git",
+      release: {
+        version: created.requestedVersion,
+        ref: created.requestedRef ?? created.commit,
+        commit: created.commit,
+        hash: packHash(created),
+        description: `Publish ${created.requestedName} ${created.requestedVersion}.`,
+      },
+    });
+    return store.approvePublishRequest(adminUserId, validated.id);
   }
 
   async function signIn(
@@ -561,11 +995,16 @@ async function createPublishHarness() {
   }
 
   async function publishWithGitHubActionsToken(pack: TestPack) {
-    const minted = await publicClient.json<{ access_token: string }>("/api/publish-tokens/github-actions/mint", {
+    // The token proves the pack's OWN repo — that is what a real workflow running in that repo
+    // gets. A test attacks a foreign name by pointing the pack at its own hostile repo, never by
+    // holding a token for one repo and asserting another (the mint path already refuses that).
+    oidcSource = { repository: new URL(pack.repoUrl).pathname.slice(1), sha: pack.commit };
+    const runner = nextMachineClient();
+    const minted = await runner.json<{ access_token: string }>("/api/publish-tokens/github-actions/mint", {
       method: "POST",
       body: { ...pack, oidcToken: "test-oidc-token" },
     });
-    return publishWithBearerToken(minted.access_token, pack);
+    return publishWithBearerToken(minted.access_token, pack, runner);
   }
 
   async function publishWithEiaToken(pack: TestPack) {
@@ -611,9 +1050,18 @@ async function createPublishHarness() {
     );
   }
 
-  async function publishWithBearerToken(token: string, pack: TestPack) {
+  // A bearer publish carries no session, so the create rate limit keys on the client address.
+  // Real publishes arrive from many machines (one CI runner or laptop per publisher); funnelling
+  // the whole suite through one address would let the number of tests, rather than the code under
+  // test, decide whether a test passes.
+  function nextMachineClient() {
+    machineCount += 1;
+    return new TestHttpClient(config.appUrl, `10.0.${Math.floor(machineCount / 256)}.${machineCount % 256}`);
+  }
+
+  async function publishWithBearerToken(token: string, pack: TestPack, client = nextMachineClient()) {
     return publishRequestFromResponse(
-      await publicClient.json<{ publishRequest: PublishRequestRow }>("/api/publish-requests?validate=1", {
+      await client.json<{ publishRequest: PublishRequestRow }>("/api/publish-requests?validate=1", {
         method: "POST",
         bearerToken: token,
         body: pack,
@@ -621,13 +1069,21 @@ async function createPublishHarness() {
     );
   }
 
-  async function approve(client: SignedInClient, requestId: string, ownershipOverrideReason?: string) {
+  async function approve(
+    client: SignedInClient,
+    requestId: string,
+    ownershipOverrideReason?: string,
+    namePinOverrideReason?: string,
+  ) {
     const approved = await client.json<{ publishRequest: PublishRequestRow }>(
       `/api/publish-requests/${encodeURIComponent(requestId)}/approve`,
       {
         method: "POST",
         csrfToken: client.csrfToken,
-        body: ownershipOverrideReason ? { ownershipOverrideReason } : {},
+        body: {
+          ...(ownershipOverrideReason ? { ownershipOverrideReason } : {}),
+          ...(namePinOverrideReason ? { namePinOverrideReason } : {}),
+        },
       },
     );
     expect(approved.publishRequest.status).toBe("approved");
@@ -635,20 +1091,43 @@ async function createPublishHarness() {
   }
 
   async function approveExpectingOwnershipError(client: SignedInClient, requestId: string) {
-    const response = await client.request(
-      `/api/publish-requests/${encodeURIComponent(requestId)}/approve`,
-      { method: "POST", csrfToken: client.csrfToken, body: {} },
-    );
-    const text = await response.text();
-    expect(response.status, text).toBe(403);
-    const payload = JSON.parse(text) as { error: { code: string } };
-    expect(payload.error.code).toBe("OWNERSHIP_NOT_VERIFIED");
+    await approveExpectingError(client, requestId, 403, "OWNERSHIP_NOT_VERIFIED");
   }
 
-  async function withdraw(client: SignedInClient, requestId: string, reason?: string) {
+  // Drives approve and asserts the exact refusal. Asserting the CODE (not just a 4xx) is what
+  // makes the namespace tests meaningful: each one has to fail at its own gate, not at a
+  // neighbouring one that happens to also say no.
+  async function approveExpectingError(
+    client: SignedInClient,
+    requestId: string,
+    status: number,
+    code: string,
+    body: Record<string, unknown> = {},
+  ) {
+    const response = await client.request(
+      `/api/publish-requests/${encodeURIComponent(requestId)}/approve`,
+      { method: "POST", csrfToken: client.csrfToken, body },
+    );
+    const text = await response.text();
+    expect(response.status, text).toBe(status);
+    const payload = JSON.parse(text) as { error: { code: string; message: string } };
+    expect(payload.error.code, text).toBe(code);
+    return payload.error;
+  }
+
+  async function withdraw(
+    client: SignedInClient,
+    requestId: string,
+    reason?: string,
+    options: { releaseNameClaim?: boolean } = {},
+  ) {
     const res = await client.json<{ publishRequest: PublishRequestRow }>(
       `/api/publish-requests/${encodeURIComponent(requestId)}/withdraw`,
-      { method: "POST", csrfToken: client.csrfToken, body: reason ? { reason } : {} },
+      {
+        method: "POST",
+        csrfToken: client.csrfToken,
+        body: { ...(reason ? { reason } : {}), ...options },
+      },
     );
     expect(res.publishRequest.status).toBe("withdrawn");
     return res.publishRequest;
@@ -659,6 +1138,7 @@ async function createPublishHarness() {
     dbUrl: testDb?.url,
     publicClient,
     createPack,
+    seedApprovedPublish,
     signIn,
     publishWithSession,
     publishWithPersonalToken,
@@ -669,6 +1149,7 @@ async function createPublishHarness() {
     publishWithGitHubImport,
     approve,
     approveExpectingOwnershipError,
+    approveExpectingError,
     withdraw,
     async close() {
       server.stop(true);
@@ -705,19 +1186,43 @@ function testConfig(): ServerConfig {
   };
 }
 
+// Serves the fixture tree for ANY owner/repo/commit. That is not laziness: a fork exposes
+// byte-identical public content, so validation can never be an ownership check — which is exactly
+// why the namespace gate has to be. Tests that need a hostile repo just point at one.
 function localRawGitHubFetch(repoRoot: string) {
   return async (input: string | URL | Request) => {
     const rawUrl = typeof input === "string" || input instanceof URL ? String(input) : input.url;
     const parsed = new URL(rawUrl);
     if (parsed.hostname !== "raw.githubusercontent.com") return new Response("not found", { status: 404 });
     const [rawOwner, rawRepo, rawCommit, ...pathParts] = parsed.pathname.split("/").filter(Boolean);
-    if (rawOwner !== owner || rawRepo !== repo || rawCommit !== commit) {
+    if (!rawOwner || !rawRepo || !/^[0-9a-f]{40}$/.test(rawCommit ?? "")) {
       return new Response("not found", { status: 404 });
     }
     const file = Bun.file(join(repoRoot, ...pathParts));
     if (!(await file.exists())) return new Response("not found", { status: 404 });
     return new Response(file, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
   };
+}
+
+// GitHub's numeric ids for a fixture repo. Stable per repo (and per owner) so the OIDC and import
+// paths agree about the same repo — a fixture that stamped two different repository ids for one
+// repo would make the claim-pin comparison fail for reasons the production code never would.
+function repoIdentityFor(fullName: string) {
+  if (fullName === `${owner}/${repo}`) return { repositoryId: "repo_123", ownerId: "owner_123" };
+  const [repoOwner = "", repoName = ""] = fullName.split("/");
+  // A repo TRANSFER keeps GitHub's numeric repository id while the repo moves to a different
+  // account. Every `*/transferred-pack` therefore shares one repository id here, which is the only
+  // way to exercise the claim pin's owner-login check — the id alone would say "same repo".
+  if (repoName === "transferred-pack") {
+    return { repositoryId: "repo_transferred", ownerId: `owner_${repoOwner}` };
+  }
+  return { repositoryId: `repo_${repoOwner}_${repoName}`, ownerId: `owner_${repoOwner}` };
+}
+
+// The same ids in the shape a repo-proven publish request stores them.
+function sourceIdentityFor(fullName: string): PublishSourceIdentity {
+  const ids = repoIdentityFor(fullName);
+  return { githubRepositoryId: ids.repositoryId, githubOwnerId: ids.ownerId };
 }
 
 function packHash(request: Pick<PublishRequestRow, "requestedName" | "requestedVersion" | "commit" | "packPath">) {
@@ -727,14 +1232,16 @@ function packHash(request: Pick<PublishRequestRow, "requestedName" | "requestedV
 }
 
 function githubCandidateFor(pack: TestPack): GitHubPublishCandidate {
+  const fullName = new URL(pack.repoUrl).pathname.slice(1);
+  const [candidateOwner = owner, candidateRepo = repo] = fullName.split("/");
   return {
     id: `candidate-${pack.slug}`,
     repository: {
-      id: "repo_123",
-      fullName: `${owner}/${repo}`,
-      owner,
-      name: repo,
-      htmlUrl: repoUrl,
+      id: repoIdentityFor(fullName).repositoryId,
+      fullName,
+      owner: candidateOwner,
+      name: candidateRepo,
+      htmlUrl: pack.repoUrl,
       defaultBranch: "main",
       permission: "push",
     },
@@ -758,7 +1265,10 @@ function publishRequestFromResponse(response: { publishRequest: PublishRequestRo
 class TestHttpClient {
   private readonly cookies = new Map<string, string>();
 
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly clientIp?: string,
+  ) {}
 
   async text(path: string, init: TestRequestInit = {}) {
     const response = await this.request(path, init);
@@ -782,6 +1292,7 @@ class TestHttpClient {
     }
     if (init.csrfToken) headers.set("X-CSRF-Token", init.csrfToken);
     if (init.bearerToken) headers.set("Authorization", `Bearer ${init.bearerToken}`);
+    if (this.clientIp) headers.set("X-Real-Ip", this.clientIp);
     if (this.cookies.size > 0) {
       headers.set(
         "Cookie",

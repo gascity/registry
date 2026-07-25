@@ -339,7 +339,7 @@ export interface paths {
         put?: never;
         /**
          * Approve a publish request
-         * @description Session + CSRF + staff.
+         * @description Session + CSRF + staff. Runs the merge gate: validated, source-repository control, the namespace rules (unscoped names are reserved; a scoped name's scope must be the proven repository owner; the name's existing claim must point at the source repository), the withdrawn-version guard, and an aggregate dry run.
          */
         post: operations["approvePublishRequest"];
         delete?: never;
@@ -1151,7 +1151,16 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description Audited justification for approving a claim-only publish with no proof of source-repository control. Does NOT authorize re-pinning a pack name. */
+                    ownershipOverrideReason?: string;
+                    /** @description Audited justification for re-pointing an existing pack-name claim at this request's repository (the repository-migration path). Recorded with both the previous and the new binding. */
+                    namePinOverrideReason?: string;
+                };
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -1171,7 +1180,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiError"];
                 };
             };
-            /** @description Forbidden. */
+            /** @description Forbidden. `FORBIDDEN` (not staff), `OWNERSHIP_NOT_VERIFIED` (no proof of source-repository control), `PUBLISH_NAME_RESERVED` (unscoped pack names are reserved for ingested packs and cannot be minted by a publish), or `PUBLISH_SCOPE_MISMATCH` (the name's scope is not the source repository's owner). The two name codes have no staff override. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1182,6 +1191,24 @@ export interface operations {
             };
             /** @description Not found. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict. `PUBLISH_NAME_OWNER_MISMATCH` (the pack name is claimed by another repository; a `namePinOverrideReason` re-pins it instead), `PUBLISH_VERSION_WITHDRAWN` (this lineage's name@version was withdrawn and can only be reinstated with identical commit, hash and ref), or `PUBLISH_CONFLICT` (the approval would not merge into the served catalog). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable. `PUBLISH_NOT_VALIDATED` (the request must be validated before approval) or `VALIDATION_ERROR` (an override reason is too long). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1254,6 +1281,8 @@ export interface operations {
                 "application/json": {
                     /** @description Audited takedown reason. */
                     reason?: string;
+                    /** @description Also unclaim the pack name, in the same transaction as the takedown. Off by default: a content takedown must leave the name pinned to the repository that owns it. Releasing an unscoped name does not make it publishable again — unscoped names stay reserved. */
+                    releaseNameClaim?: boolean;
                 };
             };
         };
@@ -1287,6 +1316,15 @@ export interface operations {
             };
             /** @description Not found. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable. `VALIDATION_ERROR` when `releaseNameClaim` cannot be honoured: the name is unscoped (bare names stay reserved, so releasing the claim would make the name permanently unpublishable), or another approved release of the same name is still served (releasing would unclaim a live name, and the next boot's grandfather backfill would silently re-mint the claim against the first-approved repo). Nothing is withdrawn when the release is refused. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

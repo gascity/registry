@@ -13,6 +13,9 @@ import type { PublishRequestRow } from "../server/types";
 const PORT = 48278; // distinct from Playwright's 48177
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO = "e2e-fixture/demo-pack";
+// Direct publishes are SCOPED `owner/pack`, and the scope must be the GitHub owner of the proven
+// source repo. An unscoped name would be refused at approve with PUBLISH_NAME_RESERVED.
+const PACK_NAME = "e2e-fixture/e2e-demo";
 
 let dir: string;
 let fixture: string;
@@ -47,9 +50,12 @@ beforeAll(async () => {
   await mkdir(join(fixture, "packs/demo"), { recursive: true });
   await writeFile(
     join(fixture, "packs/demo/pack.toml"),
-    '[pack]\nname = "e2e-demo"\nversion = "0.1.0"\ndescription = "E2E demo pack."\n',
+    `[pack]\nname = "${PACK_NAME}"\nversion = "0.1.0"\ndescription = "E2E demo pack."\n`,
   );
-  await writeFile(join(fixture, "packs/demo/README.md"), "# e2e-demo\n\nFixture pack for the registry real-gc e2e.\n");
+  await writeFile(
+    join(fixture, "packs/demo/README.md"),
+    `# ${PACK_NAME}\n\nFixture pack for the registry real-gc e2e.\n`,
+  );
 
   const git = (...args: string[]) =>
     run(["git", "-c", "user.email=e2e@test", "-c", "user.name=e2e", ...args], { cwd: fixture });
@@ -124,7 +130,7 @@ test(
         headers: { Cookie: cookie, "X-CSRF-Token": csrfToken },
       })
     ).json()) as { publishRequests: PublishRequestRow[] };
-    const request = queue.publishRequests.find((row) => row.requestedName === "e2e-demo");
+    const request = queue.publishRequests.find((row) => row.requestedName === PACK_NAME);
     expect(request?.status).toBe("pending_review"); // real server-side gc validation ran
     expect(request?.commit).toBe(commit);
     expect(request?.registryEntry?.release.hash).toBe(expectedHash); // server hash == real gc hash
@@ -144,9 +150,9 @@ test(
     const catalog = (await (await fetch(`${BASE}/catalog.json`)).json()) as {
       packs: Array<{ name: string; latest: string }>;
     };
-    expect(catalog.packs).toContainEqual(expect.objectContaining({ name: "e2e-demo", latest: "0.1.0" }));
+    expect(catalog.packs).toContainEqual(expect.objectContaining({ name: PACK_NAME, latest: "0.1.0" }));
     const toml = await (await fetch(`${BASE}/registry.toml`)).text();
-    expect(toml).toContain('name = "e2e-demo"');
+    expect(toml).toContain(`name = "${PACK_NAME}"`);
   },
   120_000,
 );
