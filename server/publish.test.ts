@@ -10,6 +10,7 @@ import {
   normalizePackPath,
   normalizePublishRequestInput,
   parseGitHubRepositoryUrl,
+  PublishRequestValidationError,
 } from "./publish";
 import { computePackHash, validatePublishRequestForRegistry } from "./publish-validation";
 import { createStore, StoreConflictError } from "./store";
@@ -396,6 +397,87 @@ describe("dynamic aggregate rendering", () => {
       await store.close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("pack name grammar", () => {
+  const withName = (requestedName: string) => ({
+    repoUrl: "https://github.com/acme/tools",
+    commit,
+    requestedName,
+    requestedVersion: "1.0",
+    packPath: "packs/tools",
+  });
+  const accepts = (name: string) =>
+    expect(normalizePublishRequestInput(withName(name)).requestedName).toBe(name);
+
+  test("accepts a bare name and a one-slash scoped name", () => {
+    for (const name of ["a", "example-pack", "acme/a", "acme/example-pack"]) accepts(name);
+  });
+
+  // A literal list, NOT a read of public/catalog.json. Ingest deliberately admits names this
+  // grammar rejects (`--`, trailing dash), so asserting the submit grammar over the catalog
+  // couples the two lanes: an upstream author naming a pack `runtime--cloudflare` would ingest
+  // cleanly, pass generate:check, and fail test:unit — which fails CI, which leaves the hourly
+  // refresh PR unmerged and freezes public/ for EVERY pack. A skip degrades one pack; a stall
+  // degrades all of them.
+  //
+  // Bare names are also not a product invariant: H1a reserves them with no staff bypass, so every
+  // ingested bare name is unpublishable by construction. The only bare names that must keep
+  // submitting are the grandfathered claims, and those live in the DB, not in any artifact.
+  test("accepts every grandfathered bare claim", () => {
+    for (const name of ["cacc-twin-team"]) accepts(name);
+  });
+
+  test("rejects consecutive dashes in either segment so the / -> -- flattening stays injective", () => {
+    for (const name of ["a--b", "acme/a--b", "a--b/tool", "acme/tool--kit"]) {
+      expect(() => normalizePublishRequestInput(withName(name))).toThrow(/consecutive dashes/);
+    }
+  });
+
+  test("still accepts a trailing dash, which grandfathered claims may rely on", () => {
+    for (const name of ["alpha-", "acme/alpha-", "acme-/tool"]) accepts(name);
+  });
+
+  test("rejects a segment longer than 64 characters and accepts 64 in both segments", () => {
+    const long = "a".repeat(65);
+    const max = "a".repeat(64);
+    for (const name of [long, `acme/${long}`, `${long}/tool`]) {
+      expect(() => normalizePublishRequestInput(withName(name))).toThrow(/64 characters/);
+    }
+    accepts(`${max}/${max}`);
+  });
+
+  test("rejects extra slashes, uppercase, and a leading dash in either segment", () => {
+    for (const name of ["a/b/c", "Acme/Tools", "ACME", "acme/Tools", "-lead", "acme/-lead", "/tool"]) {
+      expect(() => normalizePublishRequestInput(withName(name))).toThrow(PublishRequestValidationError);
+    }
+  });
+
+  test("admits no two accepted names that flatten to the same pack_key component", () => {
+    const flattened = new Map<string, string>();
+    let accepted = 0;
+    const walk = (prefix: string) => {
+      if (prefix.length > 0) {
+        let ok = true;
+        try {
+          normalizePublishRequestInput(withName(prefix));
+        } catch {
+          ok = false;
+        }
+        if (ok) {
+          accepted += 1;
+          const flat = prefix.replaceAll("/", "--");
+          expect(flattened.get(flat) ?? prefix).toBe(prefix);
+          flattened.set(flat, prefix);
+        }
+      }
+      if (prefix.length === 6) return;
+      for (const character of ["a", "b", "-", "/"]) walk(prefix + character);
+    };
+    walk("");
+    expect(accepted).toBeGreaterThan(100);
+    expect(flattened.size).toBe(accepted);
   });
 });
 
