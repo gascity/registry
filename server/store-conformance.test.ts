@@ -28,6 +28,7 @@ import { createTestDatabase } from "./test-db";
 import type {
   IdentityClaims,
   PackNameClaim,
+  PublishApprovalDecision,
   PublishRegistryEntry,
   PublishRequestInput,
   PublishRequestRow,
@@ -214,10 +215,20 @@ async function approvedPublishRequest(
   submitterId: string,
   name: string,
   over: Partial<PublishRequestInput> = {},
+  decision?: PublishApprovalDecision,
 ) {
   const created = await validatedPublishRequest(store, submitterId, name, over);
-  return store.approvePublishRequest(adminId, created.id);
+  return store.approvePublishRequest(adminId, created.id, decision);
 }
+
+// Approve a SECOND, differently-owned release of a name that is already claimed. Since the
+// approve transaction re-checks the claim, the only way to reach that state is the documented
+// staff re-pin — which is also the only way it happens in production. The backfill tests below use
+// this purely to stand up two approved rows for one name; they drop the claims afterwards, so
+// which repo the intermediate claim pointed at is irrelevant to what they assert.
+const seedRepinDecision: PublishApprovalDecision = {
+  namePinOverrideReason: "conformance: seeding a second approved release of this name",
+};
 
 // Approval is left to the caller so a test can approve requests in an order that differs from
 // the order they were submitted in — which is the whole point of the pin-ordering cases.
@@ -874,9 +885,26 @@ for (const lane of lanes) {
       expect(Date.parse(claim!.createdAt)).toBeGreaterThan(0);
       expect(Date.parse(claim!.updatedAt)).toBeGreaterThan(0);
 
-      // Another submitter publishing the same name from a DIFFERENT repo is only recorded as a
-      // match: the claim keeps pointing at the repo that earned it (rejecting the mismatch is
-      // the enforcement gate's job, not the store's).
+      // A later release from the SAME repo (a teammate, even) is recorded as a match and leaves the
+      // binding untouched: the claim pins a repository, not a person.
+      const teammate = await store.ensureUser(identity());
+      const sameRepo = await store.createPublishRequest(
+        teammate.id,
+        publishInput(name, { requestedVersion: "0.2.0" }),
+        "github_actions_oidc",
+        { githubRepositoryId: "repo_claim", githubOwnerId: "owner_claim" },
+      );
+      await store.markPublishRequestValidated(sameRepo.id, entry(name));
+      expect((await store.approvePublishRequest(admin.id, sameRepo.id)).status).toBe("approved");
+      expect(await store.getPackNameClaim(name)).toEqual(claim);
+
+      // Another submitter publishing the same name from a DIFFERENT repo is REFUSED by the approve
+      // transaction itself, not merely recorded as a match. The merge gate refuses this first in
+      // normal operation, but the gate's claim read is not serialized against this transaction —
+      // two approvals racing on one name both pass the gate, and without this re-check the loser
+      // merges anyway and its audit row claims namePin "matched" for a binding it does not hold.
+      // Reverting the re-check alone leaves every API-level test green, so this is the only place
+      // it can be killed.
       const stranger = await store.ensureUser(identity());
       const second = await store.createPublishRequest(
         stranger.id,
@@ -884,8 +912,23 @@ for (const lane of lanes) {
         "web_session",
       );
       await store.markPublishRequestValidated(second.id, entry(name));
-      expect((await store.approvePublishRequest(admin.id, second.id)).status).toBe("approved");
+      await expect(store.approvePublishRequest(admin.id, second.id)).rejects.toBeInstanceOf(
+        StoreConflictError,
+      );
+      // Refused atomically: the claim did not move AND the request was not served. (A file-lane
+      // regression that mutated before checking would leave this row approved.)
       expect(await store.getPackNameClaim(name)).toEqual(claim);
+      expect((await store.getPublishRequest(second.id))?.status).toBe("pending_review");
+
+      // ...and staff can still authorize it explicitly, which is the re-pin path.
+      expect(
+        (await store.approvePublishRequest(admin.id, second.id, { namePinOverrideReason: "ticket #9" }))
+          .status,
+      ).toBe("approved");
+      expect(await store.getPackNameClaim(name)).toMatchObject({
+        repoFullName: "stranger/fork",
+        sourceRequestId: second.id,
+      });
 
       // A name nobody has published is unclaimed.
       expect(await store.getPackNameClaim(uid("unpublished"))).toBeNull();
@@ -905,9 +948,17 @@ for (const lane of lanes) {
         repoUrl: "https://github.com/acme/first-owner",
       });
       await Bun.sleep(2); // distinct created_at, so "earliest" is unambiguous on both lanes
-      const later = await approvedPublishRequest(store, admin.id, laterSubmitter.id, scoped, {
-        repoUrl: "https://github.com/stranger/later-fork",
-      });
+      const later = await approvedPublishRequest(
+        store,
+        admin.id,
+        laterSubmitter.id,
+        scoped,
+        { repoUrl: "https://github.com/stranger/later-fork" },
+        // seedRepinDecision: the approve transaction now refuses a second, differently-owned
+        // release of a claimed name. The claim is dropped below before init() runs, so what it
+        // pointed at in between is not what this test measures.
+        seedRepinDecision,
+      );
       const legacy = await approvedPublishRequest(store, admin.id, firstSubmitter.id, bare, {
         repoUrl: "https://github.com/wespd/cacc-twin-team",
       });
@@ -965,10 +1016,13 @@ for (const lane of lanes) {
         repoUrl: "https://github.com/acme/real-owner",
       });
 
-      // ...but approved FIRST, so it is the request that earned the name.
+      // ...but approved FIRST, so it is the request that earned the name. The second approve needs
+      // the seeding re-pin authorization (see seedRepinDecision): it is a differently-owned release
+      // of a now-claimed name, which a plain approve refuses. Both claims are dropped below, so the
+      // only thing this test reads back is what init() derives from the two APPROVED rows.
       await store.approvePublishRequest(admin.id, submittedSecond.id);
       await Bun.sleep(2);
-      await store.approvePublishRequest(admin.id, submittedFirst.id);
+      await store.approvePublishRequest(admin.id, submittedFirst.id, seedRepinDecision);
 
       await dropNameClaimsForConformance(store, dbUrl, [name]);
       await store.init();
@@ -996,9 +1050,14 @@ for (const lane of lanes) {
       const upper = await approvedPublishRequest(store, admin.id, upperSubmitter.id, name, {
         repoUrl: "https://github.com/acme/upper-id",
       });
-      const lower = await approvedPublishRequest(store, admin.id, lowerSubmitter.id, name, {
-        repoUrl: "https://github.com/stranger/lower-id",
-      });
+      const lower = await approvedPublishRequest(
+        store,
+        admin.id,
+        lowerSubmitter.id,
+        name,
+        { repoUrl: "https://github.com/stranger/lower-id" },
+        seedRepinDecision, // see above: a plain approve refuses a differently-owned second release
+      );
 
       // Identical instants; ids chosen so byte order ("B" = 0x42 < "a" = 0x61) and a case-folding
       // locale collation ("a" before "B") disagree about the winner.
@@ -1041,13 +1100,17 @@ for (const lane of lanes) {
       const claim = await store.getPackNameClaim(name);
       expect(claim).toMatchObject({ repoFullName: "acme/original-repo", sourceRequestId: original.id });
 
-      // A plain approve of the same name from another repo leaves the claim exactly as it is.
+      // A plain approve of the same name from another repo is refused inside the approve
+      // transaction and changes nothing: not the claim, and not the request's status.
       const unauthorized = await validatedPublishRequest(store, migrated.id, name, {
         repoUrl: "https://github.com/acme/new-repo",
         requestedVersion: "0.2.0",
       });
-      await store.approvePublishRequest(admin.id, unauthorized.id);
+      await expect(store.approvePublishRequest(admin.id, unauthorized.id)).rejects.toBeInstanceOf(
+        StoreConflictError,
+      );
       expect(await store.getPackNameClaim(name)).toEqual(claim);
+      expect((await store.getPublishRequest(unauthorized.id))?.status).toBe("pending_review");
 
       await Bun.sleep(2); // so an updatedAt bump is observable on both lanes
       const authorized = await validatedPublishRequest(store, migrated.id, name, {
@@ -1160,6 +1223,125 @@ for (const lane of lanes) {
       expect(await store.getPackNameClaim(bare)).toMatchObject({ name: bare });
     });
 
+    // ENRICHMENT. A claim minted by a claim-only publish knows no rename-stable ids, so it can only
+    // be matched by repo full name — which a repo RENAME breaks, 409ing the real owner. A later
+    // repo-proven release of the SAME claim teaches it the ids it lacked. Monotonic: the claim goes
+    // from admitting "any repo currently named F" to admitting "numeric repo I owned by O", so the
+    // admitted set only ever shrinks.
+    test("a matched repo-proven approve fills a claim's NULL github ids", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      // Claim-only first release: no ids at all.
+      const claimOnly = await approvedPublishRequest(store, admin.id, submitter.id, name);
+      const before = await store.getPackNameClaim(name);
+      expect(before?.githubRepositoryId).toBeUndefined();
+      expect(before?.githubOwnerId).toBeUndefined();
+      expect(claimOnly.status).toBe("approved");
+      await Bun.sleep(2); // so an updatedAt bump is observable on both lanes
+
+      // A repo-proven release from the SAME repo matches on the full name, and teaches the ids.
+      const proven = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { requestedVersion: "0.2.0" }),
+        "github_actions_oidc",
+        { githubRepositoryId: "repo_enrich", githubOwnerId: "owner_enrich" },
+      );
+      await store.markPublishRequestValidated(proven.id, entry(name));
+      expect((await store.approvePublishRequest(admin.id, proven.id)).status).toBe("approved");
+
+      const after = await store.getPackNameClaim(name);
+      expect(after).toMatchObject({
+        githubRepositoryId: "repo_enrich",
+        githubOwnerId: "owner_enrich",
+      });
+      // Enrichment refines the binding; it does not move it. Everything else is byte-identical,
+      // including which request earned the name.
+      expect(after?.repoFullName).toBe(before?.repoFullName);
+      expect(after?.claimedByUserId).toBe(before?.claimedByUserId);
+      expect(after?.sourceRequestId).toBe(claimOnly.id);
+      expect(after?.createdAt).toBe(before?.createdAt);
+      expect(Date.parse(after!.updatedAt)).toBeGreaterThan(Date.parse(before!.updatedAt));
+    });
+
+    // Trust-model condition (2), in the direction that actually bites. For a request that MATCHED,
+    // any id the claim already knows and the request also proves is necessarily equal — so the real
+    // hazard is not overwriting, it is ERASING an id the claim knows and the request does not. A
+    // naive "write both ids from the request" enrichment would blank the repository id here and
+    // demote the claim back to a full-name match, undoing the very hardening this exists for.
+    test("enrichment fills only the NULL id and never erases the known one", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      // A half-stamped claim: repository id known, owner id NULL (the github_import shape before
+      // the owner id was captured).
+      const half = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name),
+        "github_import",
+        { githubRepositoryId: "repo_half" },
+      );
+      await store.markPublishRequestValidated(half.id, entry(name));
+      await store.approvePublishRequest(admin.id, half.id);
+      expect(await store.getPackNameClaim(name)).toMatchObject({ githubRepositoryId: "repo_half" });
+      expect((await store.getPackNameClaim(name))?.githubOwnerId).toBeUndefined();
+
+      // A request proving the OWNER id but not the repository id. It matches (owner login, then repo
+      // full name), so it may fill the owner id — and must leave the repository id alone.
+      const ownerOnly = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { requestedVersion: "0.2.0" }),
+        "github_actions_oidc",
+        { githubOwnerId: "owner_half" },
+      );
+      await store.markPublishRequestValidated(ownerOnly.id, entry(name));
+      await store.approvePublishRequest(admin.id, ownerOnly.id);
+
+      expect(await store.getPackNameClaim(name)).toMatchObject({
+        githubRepositoryId: "repo_half",
+        githubOwnerId: "owner_half",
+      });
+    });
+
+    // Trust-model condition (1): enrichment never participates in an admission decision. A request
+    // the claim does NOT admit must teach it nothing — otherwise whoever turns up rewrites the pin
+    // to point at themselves, which is a direct H2 takeover. Structurally guaranteed by placing the
+    // enrichment inside the `matched` branch, after the refusal; asserted here because the
+    // consequence of getting it wrong is a namespace takeover, not a bug.
+    test("a refused approve teaches the claim nothing", async () => {
+      const holder = await store.ensureUser(identity());
+      const attacker = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      await approvedPublishRequest(store, admin.id, holder.id, name, {
+        repoUrl: "https://github.com/acme/enrich-holder",
+      });
+      const before = await store.getPackNameClaim(name);
+      expect(before?.githubRepositoryId).toBeUndefined();
+      expect(before?.githubOwnerId).toBeUndefined();
+
+      // Fully repo-proven, for a DIFFERENT repo. Repo proof is not name ownership.
+      const hostile = await store.createPublishRequest(
+        attacker.id,
+        publishInput(name, {
+          repoUrl: "https://github.com/acme/enrich-attacker",
+          requestedVersion: "0.2.0",
+        }),
+        "github_actions_oidc",
+        { githubRepositoryId: "repo_attacker", githubOwnerId: "owner_attacker" },
+      );
+      await store.markPublishRequestValidated(hostile.id, entry(name));
+      await expect(store.approvePublishRequest(admin.id, hostile.id)).rejects.toBeInstanceOf(
+        StoreConflictError,
+      );
+      // Not merely "the claim did not move" — it learned nothing at all, so it did not become
+      // matchable by the attacker's ids on some later approve either.
+      expect(await store.getPackNameClaim(name)).toEqual(before);
+    });
+
     // Documented divergence (store.ts): the file store keeps no audit_logs. This asserts the
     // Postgres audit trail — the ownership-override justification is a security/compliance record.
     if (lane.name === "postgres") {
@@ -1225,9 +1407,11 @@ for (const lane of lanes) {
         const name = uid("pack");
 
         const first = await approvedPublishRequest(store, admin.id, submitter.id, name);
-        const second = await approvedPublishRequest(store, admin.id, stranger.id, name, {
-          repoUrl: "https://github.com/stranger/fork",
-        });
+        // "matched" is the same-REPO case (the claim pins a repository, not a person), so the
+        // second release comes from the same repo as a different submitter. A differently-owned
+        // repo would be refused by the approve transaction's claim re-check, not recorded as
+        // matched — that case is covered by the re-pin audit test below.
+        const second = await approvedPublishRequest(store, admin.id, stranger.id, name);
 
         const sql = postgres(dbUrl!, { max: 1 });
         try {
@@ -1317,6 +1501,135 @@ for (const lane of lanes) {
           expect(keptRow!.metadata.releasedNameClaim ?? null).toBeNull();
         } finally {
           await sql.end();
+        }
+      });
+
+      // Enrichment is a binding change, so it has to be reconstructable from the audit alone.
+      // A separate key, not a fourth namePin value: it refines "matched" rather than replacing it.
+      test("the approve audit records which NULL ids an enrichment filled, and nothing when none did", async () => {
+        const submitter = await store.ensureUser(identity());
+        const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+        const name = `${uid("scope")}/${uid("pack")}`;
+
+        const claimOnly = await approvedPublishRequest(store, admin.id, submitter.id, name);
+        const enriching = await store.createPublishRequest(
+          submitter.id,
+          publishInput(name, { requestedVersion: "0.2.0" }),
+          "github_actions_oidc",
+          { githubRepositoryId: "repo_audited", githubOwnerId: "owner_audited" },
+        );
+        await store.markPublishRequestValidated(enriching.id, entry(name));
+        await store.approvePublishRequest(admin.id, enriching.id);
+        // A third release from the same repo with the same ids has nothing left to teach.
+        const inert = await store.createPublishRequest(
+          submitter.id,
+          publishInput(name, { requestedVersion: "0.3.0" }),
+          "github_actions_oidc",
+          { githubRepositoryId: "repo_audited", githubOwnerId: "owner_audited" },
+        );
+        await store.markPublishRequestValidated(inert.id, entry(name));
+        await store.approvePublishRequest(admin.id, inert.id);
+
+        const sql = postgres(dbUrl!, { max: 1 });
+        try {
+          const rows = await sql`
+            SELECT target_id, metadata FROM audit_logs
+            WHERE action = 'publish_request.approve'
+              AND target_id IN ${sql([claimOnly.id, enriching.id, inert.id])}`;
+          const metadataFor = (id: string) => rows.find((row) => row.target_id === id)!.metadata;
+          // Minting a claim is not an enrichment.
+          expect(metadataFor(claimOnly.id).namePin).toBe("created");
+          expect(metadataFor(claimOnly.id).nameClaimEnriched ?? null).toBeNull();
+          // The enrichment: still "matched", plus exactly what it filled.
+          expect(metadataFor(enriching.id).namePin).toBe("matched");
+          expect(metadataFor(enriching.id).nameClaimEnriched).toEqual({
+            githubRepositoryId: "repo_audited",
+            githubOwnerId: "owner_audited",
+          });
+          // Nothing to fill -> no key at all, so the audit never implies a write that did not happen.
+          expect(metadataFor(inert.id).namePin).toBe("matched");
+          expect(metadataFor(inert.id).nameClaimEnriched ?? null).toBeNull();
+        } finally {
+          await sql.end();
+        }
+      });
+
+      // F7. approve(Y) and withdraw(X, releaseNameClaim) race on ONE name. Both transactions read
+      // pack_name_claims and then write it, and under READ COMMITTED neither sees the other's
+      // uncommitted status flip — so without the per-name advisory lock the interleaving
+      //
+      //   T1 approve locks the claim row -> T2's survivor check sees no survivor -> T2 blocks on
+      //   the row lock -> T1 commits (approved, "matched") -> T2 deletes the claim and commits
+      //
+      // leaves Y approved and SERVED with no claim at all, and T1's audit row describing a pin
+      // that no longer exists. A row lock cannot fix it (and cannot even apply when the claim row
+      // does not exist yet). Both orderings are legal; what must never happen is "served with no
+      // claim". Fired repeatedly because a lost race is a scheduling accident, not a certainty.
+      test("concurrent approve and claim-releasing withdraw on one name never leave a served release unclaimed", async () => {
+        const holder = await store.ensureUser(identity());
+        const next = await store.ensureUser(identity());
+        const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          const name = `${uid("scope")}/${uid("pack")}`;
+          // X is served and holds the claim; Y is validated and awaiting approval from a DIFFERENT
+          // repo, so it can only be approved with a re-pin authorization — which is exactly the
+          // shape that produced a bogus "repinned" audit row against a deleted claim.
+          const served = await approvedPublishRequest(store, admin.id, holder.id, name, {
+            repoUrl: "https://github.com/acme/racing-holder",
+          });
+          const pending = await validatedPublishRequest(store, next.id, name, {
+            repoUrl: "https://github.com/acme/racing-next",
+            requestedVersion: "0.2.0",
+          });
+
+          const [approveResult, withdrawResult] = await Promise.allSettled([
+            store.approvePublishRequest(admin.id, pending.id, {
+              namePinOverrideReason: `race attempt ${attempt}`,
+            }),
+            store.withdrawPublishRequest(admin.id, served.id, "takedown: race", {
+              releaseNameClaim: true,
+            }),
+          ]);
+
+          const claim = await store.getPackNameClaim(name);
+          const approvedNow =
+            (await store.getPublishRequest(pending.id))?.status === "approved";
+          // The invariant: a name that is currently served must have a claim, and that claim must
+          // point at the repo of the release serving it.
+          if (approvedNow) {
+            expect(claim, `attempt ${attempt}: approved but unclaimed`).not.toBeNull();
+            expect(claim?.repoFullName).toBe("acme/racing-next");
+            // Then the release had to lose — either refused outright, or (withdraw-first) it freed
+            // the claim before the approve re-minted it.
+            if (withdrawResult.status === "fulfilled") {
+              expect(claim?.sourceRequestId).toBe(pending.id);
+            }
+          } else {
+            // The approve lost. Whatever the withdraw did, no half state: either the claim is gone
+            // (release succeeded) or it still points at the original holder (release refused).
+            expect(approveResult.status).toBe("rejected");
+            if (claim) expect(claim.repoFullName).toBe("acme/racing-holder");
+          }
+
+          // And the audit trail cannot describe a move it did not make: a "repinned" row must
+          // carry both ends of the move, and no approve row may exist for a request that is not
+          // approved.
+          const sql = postgres(dbUrl!, { max: 1 });
+          try {
+            const rows = await sql`
+              SELECT metadata FROM audit_logs
+              WHERE action = 'publish_request.approve' AND target_id = ${pending.id}`;
+            expect(rows.length, `attempt ${attempt}: approve audit rows`).toBe(approvedNow ? 1 : 0);
+            for (const row of rows) {
+              if (row.metadata.namePin === "repinned") {
+                expect(row.metadata.namePinFrom, `attempt ${attempt}`).toBeTruthy();
+                expect(row.metadata.namePinTo, `attempt ${attempt}`).toBeTruthy();
+              }
+            }
+          } finally {
+            await sql.end();
+          }
         }
       });
     }

@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import postgres, { type ISql, type Sql } from "postgres";
 import { hashCliDeviceCode, hashCliUserCode, normalizeCliUserCode } from "./cli-auth";
 import { randomToken, sha256 } from "./crypto";
-import { normalizePublishRequestInput, packNameScope } from "./publish";
+import { nameClaimMatchesRequest, normalizePublishRequestInput, packNameScope } from "./publish";
 import { generateApiToken, hashApiToken } from "./tokens";
 import type {
   AccountReview,
@@ -363,6 +363,56 @@ function assertNameClaimReleasable(name: string) {
       "Unscoped pack names stay reserved; releasing the claim would make the name permanently unpublishable.",
     );
   }
+}
+
+// The previously-NULL ids an approval taught a name claim.
+type NameClaimEnrichment = { githubRepositoryId?: string; githubOwnerId?: string };
+
+// Which of a claim's NULL id columns this approval may fill, or undefined for none.
+//
+// THE TRUST MODEL, and this is the dangerous part of the feature. Who may teach a claim its ids:
+// ONLY a publish request that has ALREADY satisfied that claim under the unchanged
+// nameClaimMatchesRequest rule, and ONLY from ids the trusted auth context stamped.
+//
+//  1. Only on a MATCH. Enforced structurally by where the two call sites put it — inside the
+//     `matched` branch, after the mismatch branch has thrown. Enriching on a mismatch IS the
+//     takeover: whoever turned up would teach the claim their own ids and the claim would then
+//     point at them, a direct bypass of the H2 pin.
+//  2. Only into NULL columns (`incoming.github*Id` falsy). Overwriting a KNOWN id is a re-pin, and
+//     a re-pin requires an explicit staff namePinOverrideReason plus its own from/to audit row. A
+//     silent overwrite would be an unaudited binding change. Note the direction that actually
+//     bites: for a request that MATCHED, any id the claim already knows and the request also proves
+//     is necessarily equal — so the real hazard is ERASING an id the claim knows and the request
+//     does not, which the NULL-only rule prevents.
+//  3. Only from the request's own server-stamped columns. `proven` is always
+//     nameClaimBindingFromPublishRequest(request), whose ids come from source_github_repository_id
+//     / source_github_owner_id — set from a verified OIDC claim or a GitHub App installation, never
+//     from the request body. Sourcing them from anywhere else (the body; pack_ownerships) would let
+//     the caller choose the pin.
+//  4. Audited, as `nameClaimEnriched` on the approve row.
+//
+// MONOTONICITY is the safety property. Before, the claim admitted "any repo whose case-folded full
+// name is F". After, it admits "the numeric repo I, whose owner id is O". The admitted set strictly
+// SHRINKS; nothing is ever newly admitted. The pre-existing weak link (occupy full name F and you
+// match) is untouched by enrichment and is closed going forward by it.
+function nameClaimEnrichment(
+  incoming: NameClaimEnrichment,
+  proven: NameClaimEnrichment,
+): NameClaimEnrichment | undefined {
+  const githubRepositoryId = incoming.githubRepositoryId ? undefined : proven.githubRepositoryId;
+  const githubOwnerId = incoming.githubOwnerId ? undefined : proven.githubOwnerId;
+  if (!githubRepositoryId && !githubOwnerId) return undefined;
+  return {
+    ...(githubRepositoryId ? { githubRepositoryId } : {}),
+    ...(githubOwnerId ? { githubOwnerId } : {}),
+  };
+}
+
+// The per-name advisory lock key. Every transaction that reads-then-writes pack_name_claims takes
+// it as its FIRST statement, so approve and withdraw are strictly ordered against each other for a
+// given name and each sees the other's committed effect rather than a stale snapshot.
+function nameClaimLockKey(name: string) {
+  return `registry-name-claim:${name}`;
 }
 
 // The binding fields of a claim, for an audit record of a re-pin or a release. Timestamps are
@@ -1858,6 +1908,16 @@ export class PostgresRegistryStore implements RegistryStore {
     // The UPDATE is atomic on the validated state — it closes the approve/approve (and
     // approve/withdraw) TOCTOU between the precheck above and this write.
     const approved = await this.sql.begin(async (sql) => {
+      // Serialize the whole claim critical section per NAME, approve and withdraw alike. Row locks
+      // alone cannot do this. Two reasons: (1) when the claim row does not exist yet there is
+      // nothing to lock, so approve-INSERTs-while-withdraw-DELETEs is unreachable by row locking
+      // by construction; (2) even when it does exist, a withdraw's survivor check
+      // (`status='approved' AND id <> …`) cannot see a concurrent approve's uncommitted status flip
+      // under READ COMMITTED, so it decides "no survivor", then blocks on the row lock, then
+      // deletes the claim a just-committed approval is relying on — leaving a served release with
+      // no claim and an audit row that misreports the pin. requested_name is never updated, so the
+      // pre-read name below is a stable lock key.
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${nameClaimLockKey(current.requestedName)}, 0))`;
       const [approvedRow] = await sql`
         UPDATE pack_publish_requests
         SET status = 'approved',
@@ -1870,47 +1930,81 @@ export class PostgresRegistryStore implements RegistryStore {
         RETURNING id
       `;
       if (!approvedRow) return false;
-      // First approval of this name mints the claim. A name already on file is normally only
-      // reported as matched (the merge gate has already proved the request belongs to the claim);
-      // it is re-pointed here ONLY under an explicit staff namePinOverrideReason, which is the
-      // audited repo-migration path.
+      // Read-then-write, under the lock above. FOR UPDATE is redundant while every writer takes
+      // the advisory lock and is kept only as a second line of defence for a future caller that
+      // forgets it.
       const claim = nameClaimBindingFromPublishRequest(current);
-      const claimed = await sql`
-        INSERT INTO pack_name_claims (
-          name, scope, repo_full_name, github_repository_id, github_owner_id, github_owner_login,
-          claimed_by_user_id, source_request_id
-        )
-        VALUES (
-          ${claim.name}, ${claim.scope ?? null}, ${claim.repoFullName},
-          ${claim.githubRepositoryId ?? null}, ${claim.githubOwnerId ?? null},
-          ${claim.githubOwnerLogin}, ${claim.claimedByUserId ?? null}, ${claim.sourceRequestId ?? null}
-        )
-        ON CONFLICT (name) DO NOTHING
-        RETURNING name
+      const [existing] = await sql`
+        SELECT * FROM pack_name_claims WHERE name = ${claim.name} FOR UPDATE
       `;
-      let namePin: NonNullable<PublishApprovalDecision["namePin"]> =
-        claimed.length > 0 ? "created" : "matched";
+      let namePin: NonNullable<PublishApprovalDecision["namePin"]>;
       let previousBinding: PackNameClaim | undefined;
-      if (namePin === "matched" && options?.namePinOverrideReason) {
-        // Read the outgoing binding first (FOR UPDATE, inside this transaction) so the audit row
-        // can reconstruct exactly what moved from where to where.
-        const [before] = await sql`
-          SELECT * FROM pack_name_claims WHERE name = ${claim.name} FOR UPDATE
+      let enriched: NameClaimEnrichment | undefined;
+      if (!existing) {
+        // First approval of this name mints the claim.
+        await sql`
+          INSERT INTO pack_name_claims (
+            name, scope, repo_full_name, github_repository_id, github_owner_id, github_owner_login,
+            claimed_by_user_id, source_request_id
+          )
+          VALUES (
+            ${claim.name}, ${claim.scope ?? null}, ${claim.repoFullName},
+            ${claim.githubRepositoryId ?? null}, ${claim.githubOwnerId ?? null},
+            ${claim.githubOwnerLogin}, ${claim.claimedByUserId ?? null}, ${claim.sourceRequestId ?? null}
+          )
         `;
-        if (before) {
-          previousBinding = nameClaimFromRow(before as any);
+        namePin = "created";
+      } else if (options?.namePinOverrideReason) {
+        // The audited repo-migration path. The outgoing binding is read first so the audit row can
+        // reconstruct exactly what moved from where to where.
+        previousBinding = nameClaimFromRow(existing as any);
+        await sql`
+          UPDATE pack_name_claims
+          SET repo_full_name = ${claim.repoFullName},
+              github_repository_id = ${claim.githubRepositoryId ?? null},
+              github_owner_id = ${claim.githubOwnerId ?? null},
+              github_owner_login = ${claim.githubOwnerLogin},
+              claimed_by_user_id = ${claim.claimedByUserId ?? null},
+              source_request_id = ${claim.sourceRequestId ?? null},
+              updated_at = now()
+          WHERE name = ${claim.name}
+        `;
+        namePin = "repinned";
+      } else if (!nameClaimMatchesRequest(nameClaimFromRow(existing as any), current)) {
+        // The merge gate already checked this, but its read is NOT serialized against this
+        // transaction: two approvals of the same scoped name from two sibling repos of one owner
+        // both passed the gate, and the loser would previously merge anyway and record
+        // namePin: "matched" for a claim that belongs to the sibling. Re-checking the identical
+        // predicate here, under the lock, is what makes the pin authoritative rather than advisory.
+        throw new StoreConflictError(
+          `${claim.name} is claimed by ${String(existing.repo_full_name)}; the claim changed while this approval was in review. Re-open the request and approve again.`,
+        );
+      } else {
+        namePin = "matched";
+        // ENRICHMENT. Teach a claim the rename-stable ids it never proved, but only from a request
+        // that has ALREADY satisfied that claim under the unchanged rule. See
+        // nameClaimEnrichment() for the full trust model; the two structural halves of it are here:
+        // this sits inside the `matched` branch (so it can never participate in an admission
+        // decision), and the values come from `claim`, which is derived only from the request's
+        // server-stamped columns.
+        const fill = nameClaimEnrichment(
+          {
+            githubRepositoryId: existing.github_repository_id ?? undefined,
+            githubOwnerId: existing.github_owner_id ?? undefined,
+          },
+          claim,
+        );
+        if (fill) {
+          // COALESCE is a write-level restatement of "NULL columns only": even if the read above
+          // were stale, the UPDATE physically cannot overwrite or erase a known id.
           await sql`
             UPDATE pack_name_claims
-            SET repo_full_name = ${claim.repoFullName},
-                github_repository_id = ${claim.githubRepositoryId ?? null},
-                github_owner_id = ${claim.githubOwnerId ?? null},
-                github_owner_login = ${claim.githubOwnerLogin},
-                claimed_by_user_id = ${claim.claimedByUserId ?? null},
-                source_request_id = ${claim.sourceRequestId ?? null},
+            SET github_repository_id = COALESCE(github_repository_id, ${fill.githubRepositoryId ?? null}),
+                github_owner_id = COALESCE(github_owner_id, ${fill.githubOwnerId ?? null}),
                 updated_at = now()
             WHERE name = ${claim.name}
           `;
-          namePin = "repinned";
+          enriched = fill;
         }
       }
       await this.audit(
@@ -1935,6 +2029,11 @@ export class PostgresRegistryStore implements RegistryStore {
           namePinOverrideReason: namePin === "repinned" ? options?.namePinOverrideReason : undefined,
           namePinFrom: previousBinding ? nameClaimAuditBinding(previousBinding) : undefined,
           namePinTo: namePin === "repinned" ? nameClaimAuditBinding(claim) : undefined,
+          // Which previously-NULL ids this approval taught the claim. Present only when the write
+          // actually happened. Deliberately a separate key rather than a fourth namePin value:
+          // enrichment is a refinement OF "matched", not an alternative to it, and an audit
+          // consumer switching on namePin must not meet an unknown case.
+          nameClaimEnriched: enriched,
         },
         sql,
       );
@@ -1982,12 +2081,25 @@ export class PostgresRegistryStore implements RegistryStore {
     options?: PublishWithdrawOptions,
   ): Promise<PublishRequestRow> {
     const cleanReason = normalizeStatusReason(reason, "Withdrawn by registry staff.");
+    // The lock key has to be known BEFORE the transaction opens, and requested_name is immutable
+    // (nothing in this file ever SETs it), so this unlocked read is safe. A missing row short-
+    // circuits to the same error the atomic UPDATE below would have produced.
+    const [named] = await this.sql`
+      SELECT requested_name FROM pack_publish_requests WHERE id = ${id} LIMIT 1
+    `;
+    if (!named) throw await this.publishRequestActionError(id, "withdrawn");
+    const name = String(named.requested_name);
     // One transaction for the status flip, the optional claim release and the audit rows: an
     // operator who asked to free the name must not end up with a takedown and a stale claim (or
     // the reverse). Only an approved (currently-served) request can be withdrawn, and the UPDATE
     // is atomic on that state so it can't race a concurrent re-approve. registry_entry is
     // intentionally KEPT as takedown evidence + input to the post-withdraw version guard.
     const withdrawn = await this.sql.begin(async (sql) => {
+      // Same per-name advisory lock approve takes, and for the same reason: without it the
+      // survivor check below runs against a snapshot that cannot see a concurrent approve's
+      // uncommitted status flip, so a release can delete the claim of a release that is about to
+      // be served. See approvePublishRequest for the full interleaving.
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${nameClaimLockKey(name)}, 0))`;
       const [row] = await sql`
         UPDATE pack_publish_requests
         SET status = 'withdrawn',
@@ -1997,10 +2109,9 @@ export class PostgresRegistryStore implements RegistryStore {
             updated_at = now()
         WHERE id = ${id}
           AND status = 'approved'
-        RETURNING id, requested_name
+        RETURNING id
       `;
       if (!row) return false;
-      const name = String(row.requested_name);
       let released: PackNameClaim | undefined;
       if (options?.releaseNameClaim) {
         assertNameClaimReleasable(name);
@@ -2926,6 +3037,27 @@ class FileRegistryStore implements RegistryStore {
     }
     const reviewer = this.users.get(actorUserId);
     if (!reviewer) throw new Error("Reviewer not found.");
+    // The claim decision is taken BEFORE anything mutates, mirroring the Postgres lane where the
+    // same three-way branch sits inside the approve transaction: a refused approval must leave the
+    // request pending_review, which Postgres gets from rollback and this lane has to get from
+    // ordering. Same predicate (nameClaimMatchesRequest) as the merge gate, so the two cannot drift.
+    const existing = this.nameClaims.get(request.requestedName);
+    let namePin: NonNullable<PublishApprovalDecision["namePin"]>;
+    let enriched: NameClaimEnrichment | undefined;
+    if (!existing) {
+      namePin = "created";
+    } else if (options?.namePinOverrideReason) {
+      namePin = "repinned";
+    } else if (!nameClaimMatchesRequest(existing, request)) {
+      throw new StoreConflictError(
+        `${request.requestedName} is claimed by ${existing.repoFullName}; the claim changed while this approval was in review. Re-open the request and approve again.`,
+      );
+    } else {
+      namePin = "matched";
+      // Same enrichment, same trust model, same position: inside `matched`, after the refusal.
+      // The file store keeps no audit_logs, so only the claim EFFECT is mirrored here.
+      enriched = nameClaimEnrichment(existing, nameClaimBindingFromPublishRequest(request));
+    }
     const now = new Date().toISOString();
     const next: PublishRequestRow = {
       ...request,
@@ -2936,22 +3068,25 @@ class FileRegistryStore implements RegistryStore {
       updatedAt: now,
     };
     this.publishRequests.set(id, next);
-    // Mirrors the Postgres claim upsert: mint on first approval of the name, and otherwise leave
-    // an existing claim exactly as it is UNLESS staff supplied a namePinOverrideReason, which
-    // re-points it (keeping the original createdAt — the claim's identity is the name).
-    const existing = this.nameClaims.get(next.requestedName);
-    if (!existing) {
+    // Mirrors the Postgres claim write: mint on first approval of the name, re-point under an
+    // explicit staff namePinOverrideReason (keeping the original createdAt — the claim's identity
+    // is the name), otherwise leave the matched claim exactly as it is.
+    if (namePin === "created") {
       this.nameClaims.set(next.requestedName, {
         ...nameClaimBindingFromPublishRequest(next),
         createdAt: now,
         updatedAt: now,
       });
-    } else if (options?.namePinOverrideReason) {
+    } else if (namePin === "repinned") {
       this.nameClaims.set(next.requestedName, {
         ...nameClaimBindingFromPublishRequest(next),
-        createdAt: existing.createdAt,
+        createdAt: existing!.createdAt,
         updatedAt: now,
       });
+    } else if (enriched) {
+      // Spread `existing` first so every other binding field is carried through untouched — only
+      // the columns nameClaimEnrichment picked are written.
+      this.nameClaims.set(next.requestedName, { ...existing!, ...enriched, updatedAt: now });
     }
     await this.save();
     return next;

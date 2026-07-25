@@ -595,6 +595,146 @@ describe("local registry publish integration", () => {
     }
   });
 
+  // H4's lineage filter is an OR of two independent predicates (same source repo, OR same
+  // submitter). ATTACK (d) above is the negative control — it differs on BOTH, so it holds for
+  // either disjunct alone and pins neither. The next two tests are the positive controls, one per
+  // disjunct: each satisfies exactly one side of the OR, so deleting that side alone lets the
+  // withdrawn version be re-published with different bits.
+
+  // Pins `w.submittedBy.id === publishRequest.submittedBy.id`. One publisher, two repos: they
+  // cannot launder a takedown of their own release by moving it to a sibling repo.
+  test("a withdrawn version cannot be re-published with different bits by the same submitter from another repo", async () => {
+    const harness = await createPublishHarness();
+    try {
+      // orgMember so the claim-only (web_session) submissions clear the ownership gate without an
+      // override — the withdrawn-version guard is the only thing under test here.
+      const publisher = await harness.signIn("lineage-submitter", undefined, { orgMember: true });
+      const admin = await harness.signIn("admin", "admin");
+      const name = `${owner}/integration-lineage-submitter`;
+
+      const first = await harness.publishWithSession(
+        publisher,
+        await harness.createPack("lineage-submitter-a", "1.0.0", {
+          name,
+          repoUrl: `https://github.com/${owner}/lineage-repo-a`,
+        }),
+      );
+      await harness.approve(admin, first.id);
+      // Release the claim as well: without it the SECOND approve dies at H2 (the claim pins
+      // acme/lineage-repo-a, and neither claim-only side proved ids so the compare is on the repo
+      // full name) and the test would assert the wrong refusal code.
+      await harness.withdraw(admin, first.id, "takedown: content", { releaseNameClaim: true });
+
+      // Same person, different repo, same name@version, DIFFERENT bits.
+      const second = await harness.publishWithSession(
+        publisher,
+        await harness.createPack("lineage-submitter-b", "1.0.0", {
+          name,
+          repoUrl: `https://github.com/${owner}/lineage-repo-b`,
+          commit: secondCommit,
+        }),
+      );
+      expect(second.submittedBy.id).toBe(first.submittedBy.id);
+      expect(second.repository.fullName).not.toBe(first.repository.fullName);
+      expect(second.registryEntry?.release.hash).not.toBe(first.registryEntry?.release.hash);
+
+      await harness.approveExpectingError(admin, second.id, 409, "PUBLISH_VERSION_WITHDRAWN");
+      const catalog = await harness.publicClient.json<{ packs: Array<{ name: string }> }>("/catalog.json");
+      expect(catalog.packs.some((pack) => pack.name === name)).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // Pins `sameSourceRepository(w, publishRequest)`. One repo, two people: a teammate cannot
+  // re-publish a taken-down version with different bits just by being a different account. This
+  // is also the only coverage of sameSourceRepository's ids-first branch — both sides here are
+  // repo-proven, so they carry GitHub's numeric repository id rather than falling back to the
+  // repo full name.
+  test("a withdrawn version cannot be re-published with different bits by a teammate from the same repo", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const teammate = await harness.signIn("lineage-teammate", undefined, { orgMember: true });
+      const admin = await harness.signIn("admin", "admin");
+      const name = `${owner}/integration-lineage-repo`;
+
+      // Machine submitter (the repo's GitHub Actions identity), ids stamped from the OIDC claim.
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("lineage-repo-ci", "1.0.0", { name }),
+      );
+      expect(first.sourceGithubRepositoryId).toBe(repoIdentityFor(`${owner}/${repo}`).repositoryId);
+      await harness.approve(admin, first.id);
+      // No releaseNameClaim: the claim pins the REPO, and the second publish comes from that same
+      // repo, so H2 passes on its own. That is what leaves H4 as the only possible refusal.
+      await harness.withdraw(admin, first.id, "takedown: content");
+
+      // Human submitter on the same repo (GitHub App import), same name@version, DIFFERENT bits.
+      const second = await harness.publishWithGitHubImport(
+        teammate,
+        await harness.createPack("lineage-repo-human", "1.0.0", { name, commit: secondCommit }),
+      );
+      expect(second.submittedBy.id).not.toBe(first.submittedBy.id);
+      expect(second.sourceGithubRepositoryId).toBe(first.sourceGithubRepositoryId);
+      expect(second.registryEntry?.release.hash).not.toBe(first.registryEntry?.release.hash);
+
+      await harness.approveExpectingError(admin, second.id, 409, "PUBLISH_VERSION_WITHDRAWN");
+      const catalog = await harness.publicClient.json<{ packs: Array<{ name: string }> }>("/catalog.json");
+      expect(catalog.packs.some((pack) => pack.name === name)).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // Pins sameSourceRepository's IDS-FIRST branch, which the two tests above cannot: they compare
+  // repos that share both an id and a full name, so the repo-full-name fallback answers
+  // identically and deleting the id branch changes nothing. A repo RENAME is the one shape where
+  // the two disagree in the direction that matters — same numeric repository id, different full
+  // name — so only here does "ids first" decide that this is still the same lineage.
+  test("a withdrawn version cannot be re-published with different bits after the source repo is renamed", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const maintainer = await harness.signIn("lineage-renamed-maintainer");
+      const admin = await harness.signIn("admin", "admin");
+      const name = `${owner}/integration-lineage-renamed`;
+      const before = `${owner}/renamed-before`;
+      const after = `${owner}/renamed-after`;
+
+      // Machine submitter (CI) before the rename...
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("lineage-renamed-v1", "1.0.0", {
+          name,
+          repoUrl: `https://github.com/${before}`,
+        }),
+      );
+      await harness.approve(admin, first.id);
+      await harness.withdraw(admin, first.id, "takedown: content");
+
+      // ...human submitter (GitHub App import) after it. Both repo-proven, so both carry the
+      // numeric repository id the rename preserved.
+      const second = await harness.publishWithGitHubImport(
+        maintainer,
+        await harness.createPack("lineage-renamed-v2", "1.0.0", {
+          name,
+          repoUrl: `https://github.com/${after}`,
+          commit: secondCommit,
+        }),
+      );
+      // The rename shape: one repository id, two full names, two different submitters. So neither
+      // the repo-full-name fallback nor the submitter disjunct can refuse this — sameSourceRepository's
+      // id compare is the only thing that can.
+      expect(second.sourceGithubRepositoryId).toBe(first.sourceGithubRepositoryId);
+      expect(second.repository.fullName).not.toBe(first.repository.fullName);
+      expect(second.submittedBy.id).not.toBe(first.submittedBy.id);
+      expect(second.registryEntry?.release.hash).not.toBe(first.registryEntry?.release.hash);
+
+      await harness.approveExpectingError(admin, second.id, 409, "PUBLISH_VERSION_WITHDRAWN");
+      const catalog = await harness.publicClient.json<{ packs: Array<{ name: string }> }>("/catalog.json");
+      expect(catalog.packs.some((pack) => pack.name === name)).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
   // BACKWARD-COMPAT GUARANTEE the whole design rests on: the live bare-named community pack keeps
   // working. No rename and no alias (either would break its installers) — its grandfathered claim
   // is what makes the reserved-bare-name rule survivable.
@@ -694,6 +834,96 @@ describe("local registry publish integration", () => {
       expect(third.submittedBy.id).not.toBe(first.submittedBy.id);
       expect((await harness.approve(admin, third.id)).status).toBe("approved");
       expect(await harness.store.getPackNameClaim(name)).toEqual(claim);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // Enrichment trust-model condition (3): the ids may come ONLY from what the trusted auth context
+  // stamped on the request. A personal token proves a bearer, not a repository, so its publishes
+  // must teach the claim nothing — even though the pack HAS a verified pack_ownerships row carrying
+  // both real GitHub ids. Sourcing ids from anywhere but PublishSourceIdentity (the body; the
+  // ownership table) would let the caller choose the pin. This is also the honest statement of
+  // enrichment's limits: it does nothing for the live bare community pack, whose releases arrive by
+  // personal token. That pack's only cure is the staff re-pin.
+  test("a claim-only publish never teaches the name claim any github ids", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const maintainer = await harness.signIn("wespd");
+      const admin = await harness.signIn("admin", "admin");
+      const legacyRepo = "wespd/cacc-twin-team";
+
+      await harness.seedApprovedPublish(
+        maintainer.userId,
+        admin.userId,
+        await harness.createPack("enrich-cacc-v1", "1.0.0", {
+          name: "cacc-twin-team",
+          repoUrl: `https://github.com/${legacyRepo}`,
+        }),
+      );
+      const claim = await harness.store.getPackNameClaim("cacc-twin-team");
+      expect(claim?.githubRepositoryId).toBeUndefined();
+      expect(claim?.githubOwnerId).toBeUndefined();
+
+      // A verified ownership record for the very same repo, WITH both numeric ids. Enrichment must
+      // not reach for it: pack_ownerships is keyed by catalog pack_key + immutable source_url and is
+      // structurally empty for direct publishes in production, so an enrichment sourced from it
+      // would be tested-dead code guarding a security binding.
+      await harness.store.upsertVerifiedPackOwnership(maintainer.userId, {
+        packKey: "wespd--cacc-twin-team",
+        sourceUrl: `https://github.com/${legacyRepo}/tree/main`,
+        githubRepositoryId: "repo_wespd_cacc-twin-team",
+        githubRepositoryFullName: legacyRepo,
+        githubRepositoryName: "cacc-twin-team",
+        githubOwnerId: "owner_wespd",
+        githubOwnerLogin: "wespd",
+        githubOwnerType: "User",
+        verificationMethod: "github_app_user_token",
+      });
+
+      const next = await harness.publishWithPersonalToken(
+        maintainer,
+        await harness.createPack("enrich-cacc-v2", "1.1.0", {
+          name: "cacc-twin-team",
+          repoUrl: `https://github.com/${legacyRepo}`,
+          commit: secondCommit,
+        }),
+      );
+      expect(next.submissionMethod).toBe("api_token");
+      expect(next.sourceGithubRepositoryId).toBeUndefined();
+      expect((await harness.approve(admin, next.id)).status).toBe("approved");
+      expect(await harness.store.getPackNameClaim("cacc-twin-team")).toEqual(claim);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The import path's end-to-end id capture: installation listing -> candidate.repository.ownerId
+  // -> createPublishRequest's PublishSourceIdentity -> the request columns -> the minted claim's
+  // binding. Every link was already wired; none of it was asserted, so deleting either stamp left
+  // the suite green while silently downgrading the claim comparison to a case-folded login compare.
+  test("a github_import publish stamps both GitHub ids and pins the claim by them", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const maintainer = await harness.signIn("import-ids-maintainer");
+      const admin = await harness.signIn("admin", "admin");
+      const name = `${owner}/integration-import-ids`;
+      const ids = repoIdentityFor(`${owner}/${repo}`);
+
+      const imported = await harness.publishWithGitHubImport(
+        maintainer,
+        await harness.createPack("import-ids", "1.0.0", { name }),
+      );
+      expect(imported.submissionMethod).toBe("github_import");
+      expect(imported.sourceGithubRepositoryId).toBe(ids.repositoryId);
+      expect(imported.sourceGithubOwnerId).toBe(ids.ownerId);
+
+      await harness.approve(admin, imported.id);
+      expect(await harness.store.getPackNameClaim(name)).toMatchObject({
+        repoFullName: `${owner}/${repo}`,
+        githubRepositoryId: ids.repositoryId,
+        githubOwnerId: ids.ownerId,
+      });
     } finally {
       await harness.close();
     }
@@ -1216,6 +1446,14 @@ function repoIdentityFor(fullName: string) {
   if (repoName === "transferred-pack") {
     return { repositoryId: "repo_transferred", ownerId: `owner_${repoOwner}` };
   }
+  // A repo RENAME keeps the numeric repository id while the full name changes. Every
+  // `{owner}/renamed-*` shares one repository id per owner, which is the only way to make the
+  // ids-first comparisons disagree with the repo-full-name fallback in the direction that matters
+  // (same repo, different name) — without it, every fixture pair that shares an id also shares a
+  // full name and the fallback silently answers identically.
+  if (repoName.startsWith("renamed-")) {
+    return { repositoryId: `repo_${repoOwner}_renamed`, ownerId: `owner_${repoOwner}` };
+  }
   return { repositoryId: `repo_${repoOwner}_${repoName}`, ownerId: `owner_${repoOwner}` };
 }
 
@@ -1238,6 +1476,11 @@ function githubCandidateFor(pack: TestPack): GitHubPublishCandidate {
     id: `candidate-${pack.slug}`,
     repository: {
       id: repoIdentityFor(fullName).repositoryId,
+      // Both ids, matching what discoverGitHubPublishCandidates actually returns from the
+      // installation listing. This fixture used to omit ownerId, so every github_import test
+      // silently exercised the DEGRADED path (repo id present, owner id NULL) and the owner-id
+      // stamp had no coverage at all.
+      ownerId: repoIdentityFor(fullName).ownerId,
       fullName,
       owner: candidateOwner,
       name: candidateRepo,

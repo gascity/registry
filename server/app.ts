@@ -25,9 +25,12 @@ import {
 import { requireCatalogPackSource } from "./catalog";
 import {
   PublishRequestValidationError,
+  nameClaimMatchesRequest,
   normalizePublishRequestInput,
   packNameScope,
+  packRoutePath,
   parseGitHubRepositoryUrl,
+  sameSourceRepository,
 } from "./publish";
 import { validatePublishRequestForRegistry } from "./publish-validation";
 import { StoreConflictError, StoreValidationError } from "./store";
@@ -62,7 +65,6 @@ import type {
   ApiTokenAuthResult,
   ApiTokenPublishConstraints,
   GitHubPublishImportCreateInput,
-  PackNameClaim,
   PublishApprovalDecision,
   PublishRegistryEntry,
   PublishRequestInput,
@@ -411,7 +413,7 @@ async function handleApi(request: Request) {
       userId: session!.user.id,
       packKey,
       sourceUrl,
-      redirectTo: `/packs/${encodeURIComponent(pack.name)}#trust`,
+      redirectTo: `${packRoutePath(pack.name)}#trust`,
     });
     return json({ authorizationUrl: githubAuthorizationUrl(config, state) });
   }
@@ -932,36 +934,6 @@ async function assertPublishRequestCanMerge(
     throw new RequestError(409, "PUBLISH_CONFLICT", message);
   }
   return { ...ownershipDecision, ...namePinDecision };
-}
-
-// Does an incoming publish come from the repo a name claim is pinned to? Compares GitHub's
-// numeric repository id when BOTH sides know it (rename-stable), and otherwise falls back to the
-// case-folded repo full name — claim-only publishes and grandfathered claims prove no ids. The
-// owner login is checked too: a repo TRANSFER keeps its id while moving to a different account,
-// and that account must not inherit the name.
-function nameClaimMatchesRequest(claim: PackNameClaim, request: PublishRequestRow) {
-  // Owner identity by numeric id when both sides know it, because that is what survives an account
-  // RENAME — comparing logins alone would 409 a publisher who simply renamed their GitHub account
-  // and force a staff re-pin. A TRANSFER still fails here, which is the point: it changes the owner
-  // id. Falls back to the login when either side proved no owner id (claim-only, grandfathered).
-  if (claim.githubOwnerId && request.sourceGithubOwnerId) {
-    if (claim.githubOwnerId !== request.sourceGithubOwnerId) return false;
-  } else if (claim.githubOwnerLogin.toLowerCase() !== request.repository.owner.toLowerCase()) {
-    return false;
-  }
-  if (claim.githubRepositoryId && request.sourceGithubRepositoryId) {
-    return claim.githubRepositoryId === request.sourceGithubRepositoryId;
-  }
-  return claim.repoFullName.toLowerCase() === request.repository.fullName.toLowerCase();
-}
-
-// Same rule as above, between two publish requests: the lineage filter on the withdrawn-version
-// guard. Ids first when both are stamped, else the case-folded repo full name.
-function sameSourceRepository(left: PublishRequestRow, right: PublishRequestRow) {
-  if (left.sourceGithubRepositoryId && right.sourceGithubRepositoryId) {
-    return left.sourceGithubRepositoryId === right.sourceGithubRepositoryId;
-  }
-  return left.repository.fullName.toLowerCase() === right.repository.fullName.toLowerCase();
 }
 
 // Readiness probe: /health resolves only if the backing store can serve queries, so a

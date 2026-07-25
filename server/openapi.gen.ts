@@ -1198,7 +1198,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApiError"];
                 };
             };
-            /** @description Conflict. `PUBLISH_NAME_OWNER_MISMATCH` (the pack name is claimed by another repository; a `namePinOverrideReason` re-pins it instead), `PUBLISH_VERSION_WITHDRAWN` (this lineage's name@version was withdrawn and can only be reinstated with identical commit, hash and ref), or `PUBLISH_CONFLICT` (the approval would not merge into the served catalog). */
+            /** @description Conflict. `PUBLISH_NAME_OWNER_MISMATCH` (the pack name is claimed by another repository; a `namePinOverrideReason` re-pins it instead), `PUBLISH_VERSION_WITHDRAWN` (this lineage's name@version was withdrawn and can only be reinstated with identical commit, hash and ref), `PUBLISH_CONFLICT` (the approval would not merge into the served catalog), or `CONFLICT` (the name's claim changed while this approval was in review — a concurrent approval or claim release won the race; re-open the request and approve again). `CONFLICT` is a retry, NOT a re-pin: the claim is authoritative and the request was not merged. */
             409: {
                 headers: {
                     [name: string]: unknown;

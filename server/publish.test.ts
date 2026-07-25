@@ -9,6 +9,9 @@ import {
 import {
   normalizePackPath,
   normalizePublishRequestInput,
+  packNameScope,
+  packNameSegments,
+  packRoutePath,
   parseGitHubRepositoryUrl,
   PublishRequestValidationError,
 } from "./publish";
@@ -18,6 +21,34 @@ import type { ServerConfig } from "./config";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
 const hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+// Pins the server's copy of the pack-name/URL helpers to the SPA's. These expectations are
+// byte-identical to the ones in src/lib/urlState.test.ts and src/lib/packName.test.ts — the two
+// copies exist because tsconfig.app.json (src) and tsconfig.server.json (server) are separate
+// composite projects that cannot import from each other, so this table is the only thing holding
+// them together. Change one side and this test (or its twin) fails.
+describe("pack name URL helpers (pinned to src/lib)", () => {
+  test("packRoutePath emits one real path segment per name segment", () => {
+    expect(packRoutePath("gascity")).toBe("/packs/gascity");
+    expect(packRoutePath("cacc-twin-team")).toBe("/packs/cacc-twin-team");
+    expect(packRoutePath("wespd/cacc-twin-team")).toBe("/packs/wespd/cacc-twin-team");
+    expect(packRoutePath("acme/tools")).toBe("/packs/acme/tools");
+    expect(packRoutePath("acme/a b")).toBe("/packs/acme/a%20b");
+  });
+
+  test("packNameSegments splits on the scope separator only", () => {
+    expect(packNameSegments("gascity")).toEqual(["gascity"]);
+    expect(packNameSegments("wespd/cacc-twin-team")).toEqual(["wespd", "cacc-twin-team"]);
+  });
+
+  test("packNameScope reports a scope only for a scoped name", () => {
+    expect(packNameScope("wespd/cacc-twin-team")).toBe("wespd");
+    expect(packNameScope("acme/tools")).toBe("acme");
+    expect(packNameScope("gascity")).toBeUndefined();
+    expect(packNameScope("cacc-twin-team")).toBeUndefined();
+    expect(packNameScope("gascity/")).toBeUndefined();
+  });
+});
 
 describe("publish request normalization", () => {
   test("normalizes GitHub repo URLs and source URLs", () => {

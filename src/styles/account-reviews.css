@@ -276,6 +276,49 @@
   min-width: 180px;
 }
 
+/* The consequential name levers (re-pin / release the claim). Set apart from the action grid on
+   purpose: these move or free a global pack name, so they read as a decision rather than as one
+   more button in a row. */
+.requestLever {
+  display: grid;
+  gap: var(--gc-space-2);
+  border: 1px solid var(--color-status-warn);
+  border-radius: var(--radius-surface);
+  background: var(--color-status-warn-surface);
+  padding: var(--gc-space-3);
+}
+
+.requestLever > strong {
+  color: var(--color-text-bright);
+}
+
+.requestLeverToggle {
+  display: flex;
+  align-items: start;
+  gap: var(--gc-space-2);
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
+  cursor: pointer;
+}
+
+.requestLeverToggle input {
+  margin-top: 3px;
+}
+
+.requestLeverWarning {
+  font-size: var(--gc-text-sm);
+}
+
+.requestLever code {
+  font-family: var(--font-code);
+}
+
+.requestLeverActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gc-space-2);
+}
+
 .publishFormPanel {
   display: grid;
   align-content: start;
