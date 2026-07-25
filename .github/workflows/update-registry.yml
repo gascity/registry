@@ -9,7 +9,7 @@ permissions:
   contents: write
   packages: read # the @gascity/* deps live on GitHub Packages (org-internal)
   pull-requests: write # the refresh lands via a PR, not a direct push to main
-  actions: write # to dispatch CI on the PR branch (see the merge step)
+  actions: write # only for the built-in-token fallback, which must dispatch CI itself
 
 jobs:
   update:
@@ -71,6 +71,7 @@ jobs:
         # head — the PR's head SHA — which is exactly what protection evaluates.
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.AGGREGATE_PUSH_TOKEN || github.token }}
+          NON_DEFAULT_IDENTITY: ${{ steps.app-token.outputs.token && 'app' || secrets.AGGREGATE_PUSH_TOKEN && 'pat' || '' }}
         run: |
           set -euo pipefail
 
@@ -104,32 +105,39 @@ jobs:
           pr=$(gh pr list --head "$branch" --json number --jq '.[0].number')
           echo "opened PR #$pr on $branch"
 
-          # Always creates a run, unlike the auto-queued pull_request run.
-          gh workflow run ci.yml --ref "$branch"
-
-          # Watch OUR dispatched run by id, not `gh pr checks --watch`: the PR also carries an
-          # approval-gated pull_request run that stays action_required forever, and waiting on
-          # every check would hang on it.
-          run_id=""
-          for _ in $(seq 1 30); do
-            sleep 10
-            run_id=$(gh run list --workflow=ci.yml --branch "$branch" \
-              --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-            [ -n "$run_id" ] && break
-          done
-          if [ -z "$run_id" ]; then
-            echo "::error::dispatched CI run never appeared for $branch; PR #$pr left open"
-            exit 1
+          # Only the built-in token needs the dispatch workaround: its PR's own run is
+          # queued approval-gated and nothing would approve it unattended. An App/PAT identity
+          # starts that run normally, so dispatching would just duplicate CI — and the App
+          # deliberately has no Actions:write, so it could not dispatch anyway.
+          if [ -n "${NON_DEFAULT_IDENTITY:-}" ]; then
+            echo "non-default identity: relying on the PR's own CI run"
+            if ! gh pr checks "$pr" --watch --interval 20 --fail-fast; then
+              echo "::error::CI failed on the aggregate refresh; PR #$pr left open for inspection"
+              exit 1
+            fi
+          else
+            gh workflow run ci.yml --ref "$branch"
+            # Watch OUR dispatched run by id: the PR also carries the approval-gated run that
+            # stays action_required forever, so waiting on every check would hang.
+            run_id=""
+            for _ in $(seq 1 30); do
+              sleep 10
+              run_id=$(gh run list --workflow=ci.yml --branch "$branch" \
+                --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+              [ -n "$run_id" ] && break
+            done
+            if [ -z "$run_id" ]; then
+              echo "::error::dispatched CI run never appeared for $branch; PR #$pr left open"
+              exit 1
+            fi
+            echo "watching dispatched CI run $run_id"
+            if ! gh run watch "$run_id" --exit-status --interval 20; then
+              echo "::error::CI failed on the aggregate refresh; PR #$pr left open for inspection"
+              exit 1
+            fi
           fi
-          echo "watching dispatched CI run $run_id"
-          if ! gh run watch "$run_id" --exit-status --interval 20; then
-            echo "::error::CI failed on the aggregate refresh; PR #$pr left open for inspection"
-            exit 1
-          fi
 
-          # A plain merge — protection is satisfied by that run's "CI / required" check on this
-          # head SHA. Nothing is bypassed. If GitHub still refuses, surface it loudly rather
-          # than leaving a silently stale catalog.
+          # A plain merge — protection is satisfied, nothing is bypassed.
           if ! gh pr merge "$pr" --squash --delete-branch; then
             echo "::error::CI passed but merging PR #$pr was refused; check branch protection"
             exit 1
