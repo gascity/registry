@@ -65,6 +65,7 @@ import type {
   PublishRegistryEntry,
   PublishRequestInput,
   PublishRequestRow,
+  PublishSourceIdentity,
   PublishSubmissionMethod,
   ReviewInput,
   SourceRepository,
@@ -326,6 +327,10 @@ async function handleApi(request: Request) {
       packPath: normalized.packPath,
       requestedName: normalized.requestedName,
       requestedVersion: normalized.requestedVersion,
+      // Carried from the verified OIDC claims so the submit path can stamp rename-stable
+      // source ids on the publish request without trusting its body.
+      githubRepositoryId: identity.repositoryId,
+      githubOwnerId: identity.repositoryOwnerId,
     };
     const token = await store.createApiToken(user.id, {
       label: `GitHub Actions ${normalized.requestedName} ${normalized.requestedVersion}`,
@@ -508,6 +513,10 @@ async function handleApi(request: Request) {
       session!.user.id,
       publishInputFromGitHubCandidate(candidate, body),
       "github_import",
+      {
+        githubRepositoryId: candidate.repository.id,
+        githubOwnerId: candidate.repository.ownerId,
+      },
     );
     return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
   }
@@ -523,6 +532,7 @@ async function handleApi(request: Request) {
       actor.user.id,
       body,
       publishSubmissionMethodForActor(actor),
+      publishSourceIdentityForActor(actor),
     );
     if (url.searchParams.get("validate") === "1" || url.searchParams.get("validate") === "true") {
       return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
@@ -691,6 +701,19 @@ function publishSubmissionMethodForActor(
     return "github_actions_oidc";
   }
   return "api_token";
+}
+
+// The rename-stable GitHub ids to stamp on the request, taken from the same trusted context.
+// Only an OIDC-minted CI token carries them; a browser session or personal token asserts a
+// repo URL and nothing more, so it pins nothing.
+function publishSourceIdentityForActor(
+  actor: ReturnType<typeof requirePublishRequestActor>,
+): PublishSourceIdentity {
+  if (actor.kind === "session" || actor.token.kind !== "github_actions_publish") return {};
+  return {
+    githubRepositoryId: actor.token.constraints?.githubRepositoryId,
+    githubOwnerId: actor.token.constraints?.githubOwnerId,
+  };
 }
 
 function assertPublishTokenAllows(

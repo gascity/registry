@@ -4,9 +4,10 @@
 // in CI (a fresh database per suite, exercising init()'s migrate-on-boot DDL every run).
 //
 // Covered surfaces: users/roles, sessions, api tokens, cli device codes, the publish-request
-// lifecycle (create/validate/approve/reject incl. terminal-state guard), ownership, dedup, and
-// audit. NOT yet covered on both lanes (file-only today, tracked as follow-up): reviews, stars,
-// profile edits, github publish imports, and expiry semantics — do not read this suite as
+// lifecycle (create/validate/approve/reject incl. terminal-state guard), ownership, dedup,
+// pack name claims (approve-time pin + init() backfill), and audit. NOT yet covered on both
+// lanes (file-only today, tracked as follow-up): reviews, stars, profile edits, github
+// publish imports, and expiry semantics — do not read this suite as
 // proving those. Known observable divergence (dev-only, tracked): FileRegistryStore returns its
 // internal user object from ensureUser/getSession, so file-mode /api/me carries extra internal
 // fields (gascityUserId, orgMember, ...) that PostgresRegistryStore projects away via
@@ -26,8 +27,10 @@ import { StoreConflictError, StoreValidationError, createStore } from "./store";
 import { createTestDatabase } from "./test-db";
 import type {
   IdentityClaims,
+  PackNameClaim,
   PublishRegistryEntry,
   PublishRequestInput,
+  PublishRequestRow,
   RegistryStore,
   VerifiedPackOwnershipInput,
 } from "./types";
@@ -173,6 +176,101 @@ async function disableUserForConformance(store: RegistryStore, dbUrl: string | u
   try {
     const rows = await sql`UPDATE users SET status = 'disabled' WHERE id = ${userId} RETURNING id`;
     if (rows.length !== 1) throw new Error(`Postgres conformance user ${userId} not found.`);
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+// Puts the store back in its pre-claim world (approved rows, no claims) so init()'s backfill
+// has something to grandfather. The file lane has to persist the deletion too, because its
+// init() re-reads state from disk.
+async function dropNameClaimsForConformance(
+  store: RegistryStore,
+  dbUrl: string | undefined,
+  names: string[],
+) {
+  if (store.kind === "file") {
+    const internals = store as unknown as {
+      nameClaims: Map<string, PackNameClaim>;
+      save: () => Promise<void>;
+    };
+    for (const name of names) internals.nameClaims.delete(name);
+    await internals.save();
+    return;
+  }
+
+  if (!dbUrl) throw new Error("Postgres conformance lane is missing its database URL.");
+  const sql = postgres(dbUrl, { max: 1 });
+  try {
+    await sql`DELETE FROM pack_name_claims WHERE name IN ${sql(names)}`;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+async function approvedPublishRequest(
+  store: RegistryStore,
+  adminId: string,
+  submitterId: string,
+  name: string,
+  over: Partial<PublishRequestInput> = {},
+) {
+  const created = await validatedPublishRequest(store, submitterId, name, over);
+  return store.approvePublishRequest(adminId, created.id);
+}
+
+// Approval is left to the caller so a test can approve requests in an order that differs from
+// the order they were submitted in — which is the whole point of the pin-ordering cases.
+async function validatedPublishRequest(
+  store: RegistryStore,
+  submitterId: string,
+  name: string,
+  over: Partial<PublishRequestInput> = {},
+) {
+  const created = await store.createPublishRequest(submitterId, publishInput(name, over), "web_session");
+  await store.markPublishRequestValidated(created.id, entry(name));
+  return created;
+}
+
+// Rewrites a stored request's id and pin-order timestamps in place. Needed to force an exact
+// (reviewed_at, created_at) tie with chosen ids: request ids are random base64url, so a tie's
+// winner is decided by the id tiebreak, and that is precisely where a locale-collated comparison
+// diverges from a byte-wise one. Reaches past the public API on purpose — no supported call can
+// manufacture a same-instant tie.
+async function rewritePublishRequestForConformance(
+  store: RegistryStore,
+  dbUrl: string | undefined,
+  currentId: string,
+  patch: { id: string; createdAt: string; reviewedAt: string },
+) {
+  if (store.kind === "file") {
+    const internals = store as unknown as {
+      publishRequests: Map<string, PublishRequestRow>;
+      save: () => Promise<void>;
+    };
+    const request = internals.publishRequests.get(currentId);
+    if (!request) throw new Error(`File conformance publish request ${currentId} not found.`);
+    internals.publishRequests.delete(currentId);
+    internals.publishRequests.set(patch.id, {
+      ...request,
+      id: patch.id,
+      createdAt: patch.createdAt,
+      reviewedAt: patch.reviewedAt,
+    });
+    await internals.save();
+    return;
+  }
+
+  if (!dbUrl) throw new Error("Postgres conformance lane is missing its database URL.");
+  const sql = postgres(dbUrl, { max: 1 });
+  try {
+    const rows = await sql`
+      UPDATE pack_publish_requests
+      SET id = ${patch.id}, created_at = ${patch.createdAt}, reviewed_at = ${patch.reviewedAt}
+      WHERE id = ${currentId}
+      RETURNING id
+    `;
+    if (rows.length !== 1) throw new Error(`Postgres conformance publish request ${currentId} not found.`);
   } finally {
     await sql.end({ timeout: 5 });
   }
@@ -680,6 +778,238 @@ for (const lane of lanes) {
       expect(await store.hasVerifiedRepoOwnership(ownerUser.id, repoFull)).toBe(false);
     });
 
+    test("publish requests round-trip the server-derived github source ids, including NULL", async () => {
+      const submitter = await store.ensureUser(identity());
+
+      const stamped = await store.createPublishRequest(
+        submitter.id,
+        publishInput(uid("pack")),
+        "github_actions_oidc",
+        { githubRepositoryId: "repo_777", githubOwnerId: "owner_777" },
+      );
+      expect(stamped.sourceGithubRepositoryId).toBe("repo_777");
+      expect(stamped.sourceGithubOwnerId).toBe("owner_777");
+      expect(await store.getPublishRequest(stamped.id)).toMatchObject({
+        sourceGithubRepositoryId: "repo_777",
+        sourceGithubOwnerId: "owner_777",
+      });
+      expect(
+        (await store.listAccountPublishRequests(submitter.id)).find((r) => r.id === stamped.id),
+      ).toMatchObject({ sourceGithubRepositoryId: "repo_777", sourceGithubOwnerId: "owner_777" });
+
+      // A GitHub import proves the repository id but not always the owner id — half-stamped
+      // rows must round-trip as half-stamped, not as an empty string.
+      const partial = await store.createPublishRequest(
+        submitter.id,
+        publishInput(uid("pack")),
+        "github_import",
+        { githubRepositoryId: "repo_778" },
+      );
+      expect(partial.sourceGithubRepositoryId).toBe("repo_778");
+      expect(partial.sourceGithubOwnerId).toBeUndefined();
+
+      // Claim-only paths pass no identity at all: both columns stay NULL and read back undefined.
+      const unstamped = await store.createPublishRequest(submitter.id, publishInput(uid("pack")), "web_session");
+      expect(unstamped.sourceGithubRepositoryId).toBeUndefined();
+      expect(unstamped.sourceGithubOwnerId).toBeUndefined();
+      const rereadUnstamped = await store.getPublishRequest(unstamped.id);
+      expect(rereadUnstamped?.sourceGithubRepositoryId).toBeUndefined();
+      expect(rereadUnstamped?.sourceGithubOwnerId).toBeUndefined();
+    });
+
+    test("name claims: the first approve pins the name, and a later approve never re-points it", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const scope = uid("scope");
+      const name = `${scope}/${uid("pack")}`;
+      expect(await store.getPackNameClaim(name)).toBeNull();
+
+      // An approve that cannot happen must not leave a claim behind — the pin and the status
+      // flip are one atomic step.
+      const unvalidated = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { requestedVersion: "0.0.1" }),
+        "web_session",
+      );
+      await expect(store.approvePublishRequest(admin.id, unvalidated.id)).rejects.toBeInstanceOf(StoreValidationError);
+      expect(await store.getPackNameClaim(name)).toBeNull();
+
+      const first = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name),
+        "github_actions_oidc",
+        { githubRepositoryId: "repo_claim", githubOwnerId: "owner_claim" },
+      );
+      await store.markPublishRequestValidated(first.id, entry(name));
+      await store.approvePublishRequest(admin.id, first.id);
+
+      const claim = await store.getPackNameClaim(name);
+      expect(claim).toMatchObject({
+        name,
+        scope,
+        repoFullName: "acme/registry-fixtures",
+        githubOwnerLogin: "acme",
+        githubRepositoryId: "repo_claim",
+        githubOwnerId: "owner_claim",
+        claimedByUserId: submitter.id,
+        sourceRequestId: first.id,
+      });
+      expect(Date.parse(claim!.createdAt)).toBeGreaterThan(0);
+      expect(Date.parse(claim!.updatedAt)).toBeGreaterThan(0);
+
+      // Another submitter publishing the same name from a DIFFERENT repo is only recorded as a
+      // match: the claim keeps pointing at the repo that earned it (rejecting the mismatch is
+      // the enforcement gate's job, not the store's).
+      const stranger = await store.ensureUser(identity());
+      const second = await store.createPublishRequest(
+        stranger.id,
+        publishInput(name, { repoUrl: "https://github.com/stranger/fork" }),
+        "web_session",
+      );
+      await store.markPublishRequestValidated(second.id, entry(name));
+      expect((await store.approvePublishRequest(admin.id, second.id)).status).toBe("approved");
+      expect(await store.getPackNameClaim(name)).toEqual(claim);
+
+      // A name nobody has published is unclaimed.
+      expect(await store.getPackNameClaim(uid("unpublished"))).toBeNull();
+    });
+
+    test("init() backfills one claim per approved name from its FIRST-APPROVED request", async () => {
+      const firstSubmitter = await store.ensureUser(identity());
+      const laterSubmitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const scope = uid("scope");
+      const scoped = `${scope}/${uid("pack")}`;
+      // Shaped like the live community pack this backfill has to grandfather: bare name,
+      // published from a repo whose name matches it.
+      const bare = uid("cacc-twin-team");
+
+      const earliest = await approvedPublishRequest(store, admin.id, firstSubmitter.id, scoped, {
+        repoUrl: "https://github.com/acme/first-owner",
+      });
+      await Bun.sleep(2); // distinct created_at, so "earliest" is unambiguous on both lanes
+      const later = await approvedPublishRequest(store, admin.id, laterSubmitter.id, scoped, {
+        repoUrl: "https://github.com/stranger/later-fork",
+      });
+      const legacy = await approvedPublishRequest(store, admin.id, firstSubmitter.id, bare, {
+        repoUrl: "https://github.com/wespd/cacc-twin-team",
+      });
+      expect(later.status).toBe("approved");
+
+      await dropNameClaimsForConformance(store, dbUrl, [scoped, bare]);
+      expect(await store.getPackNameClaim(scoped)).toBeNull();
+      expect(await store.getPackNameClaim(bare)).toBeNull();
+
+      await store.init();
+
+      // The earliest approved request wins the name — the later fork gets nothing.
+      const scopedClaim = await store.getPackNameClaim(scoped);
+      expect(scopedClaim).toMatchObject({
+        name: scoped,
+        scope,
+        repoFullName: "acme/first-owner",
+        githubOwnerLogin: "acme",
+        claimedByUserId: firstSubmitter.id,
+        sourceRequestId: earliest.id,
+      });
+      const bareClaim = await store.getPackNameClaim(bare);
+      expect(bareClaim).toMatchObject({
+        name: bare,
+        repoFullName: "wespd/cacc-twin-team",
+        githubOwnerLogin: "wespd",
+        claimedByUserId: firstSubmitter.id,
+        sourceRequestId: legacy.id,
+      });
+      expect(bareClaim!.scope).toBeUndefined(); // a bare name has no scope segment
+
+      // Idempotent: booting again re-derives nothing and rewrites nothing.
+      await store.init();
+      expect(await store.getPackNameClaim(scoped)).toEqual(scopedClaim);
+      expect(await store.getPackNameClaim(bare)).toEqual(bareClaim);
+    });
+
+    // The backfill has to pin by the SAME rule approvePublishRequest applies at runtime (first
+    // approval mints the claim). If it pinned by submission time instead, then for a pair whose
+    // submission and approval orders disagree the two rules pick different owners — so which one
+    // the claim froze would depend on the day the migration ran. The claim is never re-pointed,
+    // so that is permanent.
+    test("init() pins by approval order, not submission order, when the two disagree", async () => {
+      const earlySubmitter = await store.ensureUser(identity());
+      const lateSubmitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      // Submitted first, approved second.
+      const submittedFirst = await validatedPublishRequest(store, earlySubmitter.id, name, {
+        repoUrl: "https://github.com/stranger/opportunist",
+      });
+      await Bun.sleep(2);
+      const submittedSecond = await validatedPublishRequest(store, lateSubmitter.id, name, {
+        repoUrl: "https://github.com/acme/real-owner",
+      });
+
+      // ...but approved FIRST, so it is the request that earned the name.
+      await store.approvePublishRequest(admin.id, submittedSecond.id);
+      await Bun.sleep(2);
+      await store.approvePublishRequest(admin.id, submittedFirst.id);
+
+      await dropNameClaimsForConformance(store, dbUrl, [name]);
+      await store.init();
+
+      expect(await store.getPackNameClaim(name)).toMatchObject({
+        name,
+        repoFullName: "acme/real-owner",
+        githubOwnerLogin: "acme",
+        claimedByUserId: lateSubmitter.id,
+        sourceRequestId: submittedSecond.id,
+      });
+    });
+
+    // Guards the id tiebreak's comparison rule. Request ids are random base64url, so they contain
+    // both cases: byte order puts every uppercase letter before every lowercase one, while a
+    // locale collation interleaves them case-insensitively. On an exact timestamp tie the two
+    // rules therefore hand the name to DIFFERENT repos. Postgres compares COLLATE "C" and the file
+    // store compares code units so they agree; without both, the lanes silently diverge here.
+    test("init() breaks an exact pin-order tie byte-wise, identically on both lanes", async () => {
+      const upperSubmitter = await store.ensureUser(identity());
+      const lowerSubmitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      const upper = await approvedPublishRequest(store, admin.id, upperSubmitter.id, name, {
+        repoUrl: "https://github.com/acme/upper-id",
+      });
+      const lower = await approvedPublishRequest(store, admin.id, lowerSubmitter.id, name, {
+        repoUrl: "https://github.com/stranger/lower-id",
+      });
+
+      // Identical instants; ids chosen so byte order ("B" = 0x42 < "a" = 0x61) and a case-folding
+      // locale collation ("a" before "B") disagree about the winner.
+      const tie = "2026-01-01T00:00:00.000Z";
+      const upperId = `prq_B${uid("tie")}`;
+      const lowerId = `prq_a${uid("tie")}`;
+      await rewritePublishRequestForConformance(store, dbUrl, upper.id, {
+        id: upperId,
+        createdAt: tie,
+        reviewedAt: tie,
+      });
+      await rewritePublishRequestForConformance(store, dbUrl, lower.id, {
+        id: lowerId,
+        createdAt: tie,
+        reviewedAt: tie,
+      });
+
+      await dropNameClaimsForConformance(store, dbUrl, [name]);
+      await store.init();
+
+      // Byte order wins: the uppercase id, regardless of the server's locale.
+      expect(await store.getPackNameClaim(name)).toMatchObject({
+        name,
+        repoFullName: "acme/upper-id",
+        sourceRequestId: upperId,
+      });
+    });
+
     // Documented divergence (store.ts): the file store keeps no audit_logs. This asserts the
     // Postgres audit trail — the ownership-override justification is a security/compliance record.
     if (lane.name === "postgres") {
@@ -733,6 +1063,30 @@ for (const lane of lanes) {
           expect(String(withdrawRows[0]!.metadata.reason)).toContain("conformance takedown");
           // The approve audit row remains — withdraw appends, never erases the approval record.
           expect(approveRows).toHaveLength(1);
+        } finally {
+          await sql.end();
+        }
+      });
+
+      test("the approve audit records how the name was pinned (created, then matched)", async () => {
+        const submitter = await store.ensureUser(identity());
+        const stranger = await store.ensureUser(identity());
+        const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+        const name = uid("pack");
+
+        const first = await approvedPublishRequest(store, admin.id, submitter.id, name);
+        const second = await approvedPublishRequest(store, admin.id, stranger.id, name, {
+          repoUrl: "https://github.com/stranger/fork",
+        });
+
+        const sql = postgres(dbUrl!, { max: 1 });
+        try {
+          const rows = await sql`
+            SELECT target_id, metadata FROM audit_logs
+            WHERE action = 'publish_request.approve' AND target_id IN ${sql([first.id, second.id])}`;
+          expect(rows).toHaveLength(2);
+          expect(rows.find((row) => row.target_id === first.id)!.metadata.namePin).toBe("created");
+          expect(rows.find((row) => row.target_id === second.id)!.metadata.namePin).toBe("matched");
         } finally {
           await sql.end();
         }

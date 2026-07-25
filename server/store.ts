@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import postgres, { type Sql } from "postgres";
+import postgres, { type ISql, type Sql } from "postgres";
 import { hashCliDeviceCode, hashCliUserCode, normalizeCliUserCode } from "./cli-auth";
 import { randomToken, sha256 } from "./crypto";
 import { normalizePublishRequestInput } from "./publish";
@@ -17,11 +17,13 @@ import type {
   GitHubPublishImportCreateInput,
   GitHubPublishImportRow,
   IdentityClaims,
+  PackNameClaim,
   PackOwnership,
   PublisherSummary,
   PublishRegistryEntry,
   PublishRequestInput,
   PublishRequestRow,
+  PublishSourceIdentity,
   PublishSubmissionMethod,
   PublicUser,
   RegistryStore,
@@ -174,6 +176,8 @@ function normalizeApiTokenConstraints(value: unknown): ApiTokenPublishConstraint
     packPath: raw.packPath,
     requestedName: raw.requestedName,
     requestedVersion: raw.requestedVersion,
+    githubRepositoryId: typeof raw.githubRepositoryId === "string" ? raw.githubRepositoryId : undefined,
+    githubOwnerId: typeof raw.githubOwnerId === "string" ? raw.githubOwnerId : undefined,
   };
 }
 
@@ -324,6 +328,58 @@ function publishRequestFromRows(row: any, user: PublicUser): PublishRequestRow {
     updatedAt: toIso(row.updated_at),
     submittedBy: user,
     submissionMethod: publishSubmissionMethod(row.submission_method),
+    sourceGithubRepositoryId: row.source_github_repository_id ?? undefined,
+    sourceGithubOwnerId: row.source_github_owner_id ?? undefined,
+  };
+}
+
+// The scope segment of a pack name (`acme` of `acme/tools`); undefined for a bare name.
+function packNameScope(name: string) {
+  const [scope, rest] = name.split("/");
+  return rest ? scope : undefined;
+}
+
+// The durable binding a name claim records, derived from the approved publish request that
+// earns it. Comes from the request's own columns, so it holds for direct publishes too (which
+// have no pack_ownerships row and structurally cannot). Each store stamps its own timestamps.
+function nameClaimBindingFromPublishRequest(
+  request: PublishRequestRow,
+): Omit<PackNameClaim, "createdAt" | "updatedAt"> {
+  return {
+    name: request.requestedName,
+    scope: packNameScope(request.requestedName),
+    repoFullName: request.repository.fullName,
+    githubRepositoryId: request.sourceGithubRepositoryId,
+    githubOwnerId: request.sourceGithubOwnerId,
+    githubOwnerLogin: request.repository.owner,
+    claimedByUserId: request.submittedBy.id,
+    sourceRequestId: request.id,
+  };
+}
+
+function nameClaimFromRow(row: {
+  name: string;
+  scope?: string | null;
+  repo_full_name: string;
+  github_repository_id?: string | null;
+  github_owner_id?: string | null;
+  github_owner_login: string;
+  claimed_by_user_id?: string | null;
+  source_request_id?: string | null;
+  created_at: Date | string | number;
+  updated_at: Date | string | number;
+}): PackNameClaim {
+  return {
+    name: row.name,
+    scope: row.scope ?? undefined,
+    repoFullName: row.repo_full_name,
+    githubRepositoryId: row.github_repository_id ?? undefined,
+    githubOwnerId: row.github_owner_id ?? undefined,
+    githubOwnerLogin: row.github_owner_login,
+    claimedByUserId: row.claimed_by_user_id ?? undefined,
+    sourceRequestId: row.source_request_id ?? undefined,
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
   };
 }
 
@@ -461,6 +517,8 @@ function normalizeGitHubPublishCandidate(value: unknown): GitHubPublishCandidate
       id: candidate.repository.id,
       fullName: candidate.repository.fullName,
       owner: candidate.repository.owner,
+      ownerId:
+        typeof candidate.repository.ownerId === "string" ? candidate.repository.ownerId : undefined,
       name: candidate.repository.name,
       htmlUrl: candidate.repository.htmlUrl,
       defaultBranch: candidate.repository.defaultBranch,
@@ -503,7 +561,28 @@ export class PostgresRegistryStore implements RegistryStore {
     await this.sql`SELECT 1`;
   }
 
+  // Migrate-on-boot runs on EVERY app start, and instances boot concurrently, so the DDL below
+  // has to be serialized across processes: `IF NOT EXISTS` is checked before the statement runs,
+  // not atomically with it, so two instances creating the same table both pass the check and the
+  // loser fails on pg_type's unique index. init() is awaited at top level in server/index.ts, so
+  // that failure takes the instance down before it binds. A session-level advisory lock on a
+  // reserved connection makes the whole migration one-at-a-time; it is released if the process
+  // dies, so a crashed deploy can't wedge the next boot.
   async init() {
+    const migration = await this.sql.reserve();
+    try {
+      await migration`SELECT pg_advisory_lock(hashtextextended('registry-migrate-on-boot', 0))`;
+      await this.migrate();
+    } finally {
+      // Best-effort: releasing the connection drops the lock anyway.
+      await migration`SELECT pg_advisory_unlock(hashtextextended('registry-migrate-on-boot', 0))`.catch(
+        () => {},
+      );
+      migration.release();
+    }
+  }
+
+  private async migrate() {
     await this.sql`
       CREATE TABLE IF NOT EXISTS users (
         id text PRIMARY KEY,
@@ -751,9 +830,58 @@ export class PostgresRegistryStore implements RegistryStore {
     // Repo-proof provenance for the publish-approval merge gate. Nullable: rows that
     // predate this column read back as undefined and are treated as claim-only.
     await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS submission_method text`;
+    // GitHub's numeric source ids, stamped from the trusted auth context at create time (see
+    // PublishSourceIdentity). Nullable: claim-only submissions prove neither id.
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS source_github_repository_id text`;
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS source_github_owner_id text`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_submitter_idx ON pack_publish_requests (submitter_user_id, created_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_review_idx ON pack_publish_requests (status, created_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_pack_version_idx ON pack_publish_requests (requested_name, requested_version)`;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS pack_name_claims (
+        name text PRIMARY KEY,
+        scope text,
+        repo_full_name text NOT NULL,
+        github_repository_id text,
+        github_owner_id text,
+        github_owner_login text NOT NULL,
+        claimed_by_user_id text REFERENCES users(id) ON DELETE SET NULL,
+        source_request_id text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `;
+    await this.sql`CREATE INDEX IF NOT EXISTS pack_name_claims_repo_idx ON pack_name_claims (lower(repo_full_name))`;
+    // Grandfather every already-served name from the FIRST-APPROVED request that used it, which
+    // is the same rule approvePublishRequest applies at runtime (first approval mints the claim).
+    // Ordering by submission time instead would disagree with it: for two requests where the
+    // earlier submission was approved later, the two rules pick different owners, so the claim
+    // this deploy freezes would depend on when the deploy happened. That is unrecoverable — the
+    // backfill effectively runs once, and nothing re-points a claim afterwards.
+    //
+    // reviewed_at is NULL only on rows approved before that column existed; those fall back to
+    // submission order. `id COLLATE "C"` forces byte-wise comparison so the tiebreak cannot vary
+    // with the server's collation (the FileRegistryStore mirror compares code units, not locale).
+    // Idempotent, so it is safe on every boot.
+    await this.sql`
+      INSERT INTO pack_name_claims (
+        name, scope, repo_full_name, github_repository_id, github_owner_id, github_owner_login,
+        claimed_by_user_id, source_request_id
+      )
+      SELECT DISTINCT ON (requested_name)
+        requested_name,
+        CASE WHEN strpos(requested_name, '/') > 0 THEN split_part(requested_name, '/', 1) END,
+        repo_full_name,
+        source_github_repository_id,
+        source_github_owner_id,
+        repo_owner,
+        submitter_user_id,
+        id
+      FROM pack_publish_requests
+      WHERE status = 'approved'
+      ORDER BY requested_name, reviewed_at ASC NULLS LAST, created_at ASC, id COLLATE "C" ASC
+      ON CONFLICT (name) DO NOTHING
+    `;
     await this.sql`
       CREATE TABLE IF NOT EXISTS audit_logs (
         id text PRIMARY KEY,
@@ -1460,6 +1588,7 @@ export class PostgresRegistryStore implements RegistryStore {
     userId: string,
     input: PublishRequestInput,
     submissionMethod: PublishSubmissionMethod,
+    sourceIdentity?: PublishSourceIdentity,
   ): Promise<PublishRequestRow> {
     const normalized = normalizePublishRequestInput(input);
     // Dedup is scoped to the submitter: a user's own re-submit is idempotent, but two
@@ -1507,14 +1636,17 @@ export class PostgresRegistryStore implements RegistryStore {
       INSERT INTO pack_publish_requests (
         id, submitter_user_id, status, repo_host, repo_owner, repo_name, repo_full_name,
         repo_url, source_url, pack_path, commit_sha, requested_name, requested_version,
-        requested_ref, requested_description, submission_method, created_at, updated_at
+        requested_ref, requested_description, submission_method, source_github_repository_id,
+        source_github_owner_id, created_at, updated_at
       )
       VALUES (
         ${newId("publishRequest")}, ${userId}, 'pending_validation', 'github.com',
         ${normalized.repository.owner}, ${normalized.repository.name}, ${normalized.repository.fullName},
         ${normalized.repoUrl}, ${normalized.sourceUrl}, ${normalized.packPath}, ${normalized.commit},
         ${normalized.requestedName}, ${normalized.requestedVersion}, ${normalized.requestedRef ?? null},
-        ${normalized.requestedDescription ?? null}, ${submissionMethod}, ${now}, ${now}
+        ${normalized.requestedDescription ?? null}, ${submissionMethod},
+        ${sourceIdentity?.githubRepositoryId ?? null}, ${sourceIdentity?.githubOwnerId ?? null},
+        ${now}, ${now}
       )
       RETURNING *
     `;
@@ -1700,31 +1832,62 @@ export class PostgresRegistryStore implements RegistryStore {
     if (!current.registryEntry || current.status !== "pending_review") {
       throw new StoreValidationError("Publish request must be validated before approval.");
     }
-    // Atomic on the validated state — closes the approve/approve (and approve/withdraw) TOCTOU
-    // between the precheck above and this write.
-    const [approvedRow] = await this.sql`
-      UPDATE pack_publish_requests
-      SET status = 'approved',
-          status_reason = NULL,
-          reviewed_by_user_id = ${actorUserId},
-          reviewed_at = now(),
-          updated_at = now()
-      WHERE id = ${id}
-        AND status = 'pending_review'
-      RETURNING id
-    `;
-    if (!approvedRow) throw await this.publishRequestActionError(id, "approved");
-    await this.audit(actorUserId, "publish_request.approve", "publish_request", id, {
-      requestedName: current.requestedName,
-      requestedVersion: current.requestedVersion,
-      submissionMethod: current.submissionMethod,
-      // Present only when staff approved a claim-only request without repo proof —
-      // the audited justification for the ownership override.
-      ownershipOverrideReason: options?.ownershipOverrideReason,
-      // How the merge gate was satisfied (repo_proven / verified_repo_ownership / org_member /
-      // override) — recorded because org_member is live-synced and can change post-approval.
-      ownershipBasis: options?.ownershipBasis,
+    // One transaction for the status flip, the name claim and the audit row: a name must never
+    // become served without its claim (or with a claim recorded for an approval that failed).
+    // The UPDATE is atomic on the validated state — it closes the approve/approve (and
+    // approve/withdraw) TOCTOU between the precheck above and this write.
+    const approved = await this.sql.begin(async (sql) => {
+      const [approvedRow] = await sql`
+        UPDATE pack_publish_requests
+        SET status = 'approved',
+            status_reason = NULL,
+            reviewed_by_user_id = ${actorUserId},
+            reviewed_at = now(),
+            updated_at = now()
+        WHERE id = ${id}
+          AND status = 'pending_review'
+        RETURNING id
+      `;
+      if (!approvedRow) return false;
+      // First approval of this name mints the claim; a name already on file is only reported
+      // as matched — the claim is never re-pointed here (enforcing the match is a later slice).
+      const claim = nameClaimBindingFromPublishRequest(current);
+      const claimed = await sql`
+        INSERT INTO pack_name_claims (
+          name, scope, repo_full_name, github_repository_id, github_owner_id, github_owner_login,
+          claimed_by_user_id, source_request_id
+        )
+        VALUES (
+          ${claim.name}, ${claim.scope ?? null}, ${claim.repoFullName},
+          ${claim.githubRepositoryId ?? null}, ${claim.githubOwnerId ?? null},
+          ${claim.githubOwnerLogin}, ${claim.claimedByUserId ?? null}, ${claim.sourceRequestId ?? null}
+        )
+        ON CONFLICT (name) DO NOTHING
+        RETURNING name
+      `;
+      await this.audit(
+        actorUserId,
+        "publish_request.approve",
+        "publish_request",
+        id,
+        {
+          requestedName: current.requestedName,
+          requestedVersion: current.requestedVersion,
+          submissionMethod: current.submissionMethod,
+          // Present only when staff approved a claim-only request without repo proof —
+          // the audited justification for the ownership override.
+          ownershipOverrideReason: options?.ownershipOverrideReason,
+          // How the merge gate was satisfied (repo_proven / verified_repo_ownership /
+          // org_member / override) — recorded because org_member is live-synced and can
+          // change post-approval.
+          ownershipBasis: options?.ownershipBasis,
+          namePin: claimed.length > 0 ? "created" : "matched",
+        },
+        sql,
+      );
+      return true;
     });
+    if (!approved) throw await this.publishRequestActionError(id, "approved");
     const request = await this.getPublishRequest(id);
     if (!request) throw new Error("Publish request not found after approval.");
     return request;
@@ -1824,6 +1987,11 @@ export class PostgresRegistryStore implements RegistryStore {
     );
   }
 
+  async getPackNameClaim(name: string): Promise<PackNameClaim | null> {
+    const rows = await this.sql`SELECT * FROM pack_name_claims WHERE name = ${name} LIMIT 1`;
+    return rows[0] ? nameClaimFromRow(rows[0] as any) : null;
+  }
+
   private async resolveHandle(rawHandle: string | undefined, userId: string) {
     const base = normalizeHandle(rawHandle) ?? "user";
     for (let index = 1; index <= 50; index += 1) {
@@ -1883,16 +2051,19 @@ export class PostgresRegistryStore implements RegistryStore {
     return publicPublisher(created as any);
   }
 
+  // `executor` lets a caller inside sql.begin write its audit row in the same transaction as
+  // the action it records (approve), instead of on a separate connection that could commit alone.
   private async audit(
     actorUserId: string,
     action: string,
     targetType: string,
     targetId: string,
     metadata: Record<string, unknown>,
+    executor: ISql = this.sql,
   ) {
-    await this.sql`
+    await executor`
       INSERT INTO audit_logs (id, actor_user_id, action, target_type, target_id, metadata)
-      VALUES (${newId("audit")}, ${actorUserId}, ${action}, ${targetType}, ${targetId}, ${this.sql.json(
+      VALUES (${newId("audit")}, ${actorUserId}, ${action}, ${targetType}, ${targetId}, ${executor.json(
         metadata as any,
       )})
     `;
@@ -1927,6 +2098,7 @@ type FileState = {
   publisherMembers?: Array<{ publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>;
   ownerships?: PackOwnership[];
   publishRequests?: PublishRequestRow[];
+  nameClaims?: PackNameClaim[];
   githubPublishImports?: GitHubPublishImportRow[];
 };
 
@@ -1976,6 +2148,7 @@ class FileRegistryStore implements RegistryStore {
   private publisherMembers = new Map<string, { publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>();
   private ownerships = new Map<string, PackOwnership>();
   private publishRequests = new Map<string, PublishRequestRow>();
+  private nameClaims = new Map<string, PackNameClaim>();
   private githubPublishImports = new Map<string, GitHubPublishImportRow>();
   private readonly filePath: string;
 
@@ -2026,6 +2199,7 @@ class FileRegistryStore implements RegistryStore {
           status: publishRequestStatus(request.status),
         });
       }
+      for (const claim of raw.nameClaims ?? []) this.nameClaims.set(claim.name, claim);
       for (const imported of raw.githubPublishImports ?? []) {
         if (Date.parse(imported.expiresAt) > Date.now()) {
           this.githubPublishImports.set(imported.id, {
@@ -2038,6 +2212,9 @@ class FileRegistryStore implements RegistryStore {
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error;
     }
+    // Same grandfathering as the Postgres lane: every already-approved name gets a claim from the
+    // first-approved request that used it, so no existing pack has to race for its own name.
+    if (this.backfillNameClaims()) await this.save();
   }
 
   async close() {}
@@ -2530,6 +2707,7 @@ class FileRegistryStore implements RegistryStore {
     userId: string,
     input: PublishRequestInput,
     submissionMethod: PublishSubmissionMethod,
+    sourceIdentity?: PublishSourceIdentity,
   ): Promise<PublishRequestRow> {
     const normalized = normalizePublishRequestInput(input);
     const user = this.users.get(userId);
@@ -2568,6 +2746,8 @@ class FileRegistryStore implements RegistryStore {
       updatedAt: now,
       submittedBy: user,
       submissionMethod,
+      sourceGithubRepositoryId: sourceIdentity?.githubRepositoryId,
+      sourceGithubOwnerId: sourceIdentity?.githubOwnerId,
     };
     this.publishRequests.set(request.id, request);
     await this.save();
@@ -2661,6 +2841,15 @@ class FileRegistryStore implements RegistryStore {
       updatedAt: now,
     };
     this.publishRequests.set(id, next);
+    // Mirrors the Postgres claim upsert: mint on first approval of the name, leave an existing
+    // claim exactly as it is (a matched name is never re-pointed here).
+    if (!this.nameClaims.has(next.requestedName)) {
+      this.nameClaims.set(next.requestedName, {
+        ...nameClaimBindingFromPublishRequest(next),
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
     await this.save();
     return next;
   }
@@ -2721,6 +2910,44 @@ class FileRegistryStore implements RegistryStore {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
+  async getPackNameClaim(name: string): Promise<PackNameClaim | null> {
+    const claim = this.nameClaims.get(name);
+    // Snapshot, not the live map entry: PostgresRegistryStore builds a fresh object per call, and
+    // handing out a reference lets a caller mutate stored state (and makes any test that re-reads
+    // to prove a claim did NOT change compare an object with itself).
+    return claim ? { ...claim } : null;
+  }
+
+  // Mirror of the Postgres backfill: first-APPROVED request per name wins, tie-broken by
+  // submission time then byte-wise id. `localeCompare` is deliberately avoided — its ordering is
+  // ICU/locale-dependent, so it can disagree with the SQL lane's `COLLATE "C"` on the same data.
+  private backfillNameClaims() {
+    const now = new Date().toISOString();
+    let derived = false;
+    const byCodeUnit = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
+    const approved = [...this.publishRequests.values()]
+      .filter((request) => request.status === "approved")
+      .sort(
+        (left, right) =>
+          // `reviewed_at ASC NULLS LAST`: a row with a recorded review time always sorts ahead of
+          // one without, rather than falling back to its submission time and interleaving.
+          Number(!left.reviewedAt) - Number(!right.reviewedAt) ||
+          byCodeUnit(left.reviewedAt ?? "", right.reviewedAt ?? "") ||
+          byCodeUnit(left.createdAt, right.createdAt) ||
+          byCodeUnit(left.id, right.id),
+      );
+    for (const request of approved) {
+      if (this.nameClaims.has(request.requestedName)) continue;
+      this.nameClaims.set(request.requestedName, {
+        ...nameClaimBindingFromPublishRequest(request),
+        createdAt: now,
+        updatedAt: now,
+      });
+      derived = true;
+    }
+    return derived;
+  }
+
   private async save() {
     await mkdir(dirname(this.filePath), { recursive: true });
     const state: FileState = {
@@ -2741,6 +2968,7 @@ class FileRegistryStore implements RegistryStore {
       publisherMembers: [...this.publisherMembers.values()],
       ownerships: [...this.ownerships.values()],
       publishRequests: [...this.publishRequests.values()],
+      nameClaims: [...this.nameClaims.values()],
       githubPublishImports: [...this.githubPublishImports.values()].filter(
         (imported) => Date.parse(imported.expiresAt) > Date.now(),
       ),
