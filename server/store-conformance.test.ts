@@ -1010,6 +1010,51 @@ for (const lane of lanes) {
       expect(await store.getServedPublishPrecedent(uid("pack"))).toBeNull();
     });
 
+    // The precedent decides which pack_path a repeat release is held to, so a coin flip here means a
+    // staff-approved monorepo move silently reverts to the stale directory on a fast machine and
+    // works on a slow one. Ordering by SUBMISSION made it exactly that: two releases created in the
+    // same millisecond fall through to a byte-wise compare of random ids. Approval order is both
+    // deterministic here and the semantically right answer — a human blessing the move is what
+    // establishes the new path.
+    test("auto-approve: the precedent follows APPROVAL order, not submission order", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      const older = await validatedPublishRequest(store, submitter.id, name, {
+        packPath: "packs/original",
+      });
+      const newer = await validatedPublishRequest(store, submitter.id, name, {
+        requestedVersion: "0.2.0",
+        packPath: "packs/moved",
+      });
+      // Force the exact submission tie the flake needed, so the outcome cannot depend on machine
+      // speed: identical createdAt, and ids chosen so a byte-wise id tiebreak would pick the OLDER
+      // row ("b" > "a"), i.e. the wrong one.
+      const tie = "2026-02-01T00:00:00.000Z";
+      const olderId = `prq_b${uid("tie")}`;
+      const newerId = `prq_a${uid("tie")}`;
+      await rewritePublishRequestForConformance(store, dbUrl, older.id, {
+        id: olderId,
+        createdAt: tie,
+        reviewedAt: tie,
+      });
+      await rewritePublishRequestForConformance(store, dbUrl, newer.id, {
+        id: newerId,
+        createdAt: tie,
+        reviewedAt: tie,
+      });
+
+      // Approve the MOVE second, which is what a legitimate monorepo move looks like.
+      await store.approvePublishRequest(admin.id, olderId);
+      await Bun.sleep(2);
+      await store.approvePublishRequest(admin.id, newerId);
+
+      const precedent = await store.getServedPublishPrecedent(name);
+      expect(precedent?.id).toBe(newerId);
+      expect(precedent?.packPath).toBe("packs/moved");
+    });
+
     test("auto-approve: listStaffRefusedPublishRequestsForName spans every version", async () => {
       // Mutation killed: scoping it to one version, which collapses the takedown clause into H4 —
       // a takedown of 1.0.0 for malware would then stop nothing but a re-publish of 1.0.0.
@@ -1216,6 +1261,42 @@ for (const lane of lanes) {
       const rereadUnstamped = await store.getPublishRequest(unstamped.id);
       expect(rereadUnstamped?.sourceGithubRepositoryId).toBeUndefined();
       expect(rereadUnstamped?.sourceGithubOwnerId).toBeUndefined();
+    });
+
+    // The batch read the catalog render depends on (server/aggregate.ts's claim precedence). It
+    // runs on every /catalog.json + /registry.toml request, so it has to answer many names in ONE
+    // round trip rather than degrade into a query per approved pack — and both lanes have to agree
+    // on order, deduplication and what an unclaimed name looks like, or the file double would
+    // "prove" behaviour Postgres does not have.
+    test("name claims: many names resolve in one read, deduplicated, unclaimed names omitted", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const scope = uid("scope");
+      const first = `${scope}/aaa-${uid("pack")}`;
+      const second = `${scope}/zzz-${uid("pack")}`;
+      const unclaimed = `${scope}/never-${uid("pack")}`;
+      await approvedPublishRequest(store, admin.id, submitter.id, first);
+      const secondRequest = await approvedPublishRequest(store, admin.id, submitter.id, second);
+
+      expect(await store.listPackNameClaims([])).toEqual([]);
+      expect(await store.listPackNameClaims([unclaimed])).toEqual([]);
+
+      // Ordered by name (byte-wise on both lanes), one row per distinct name however often it is
+      // asked for, and the unclaimed name simply absent — never a null placeholder.
+      const batch = await store.listPackNameClaims([second, unclaimed, first, first]);
+      expect(batch.map((claim) => claim.name)).toEqual([first, second]);
+      // ...and byte-identical to what the single-name read returns for each of them.
+      expect(batch).toEqual([
+        (await store.getPackNameClaim(first))!,
+        (await store.getPackNameClaim(second))!,
+      ]);
+
+      // A released claim disappears from the batch read too (the takedown path staff use to hand
+      // a name back to ingest, which is what makes claim precedence reversible).
+      await store.withdrawPublishRequest(admin.id, secondRequest.id, "handing the name back", {
+        releaseNameClaim: true,
+      });
+      expect((await store.listPackNameClaims([first, second])).map((claim) => claim.name)).toEqual([first]);
     });
 
     test("name claims: the first approve pins the name, and a later approve never re-points it", async () => {

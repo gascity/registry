@@ -503,6 +503,127 @@ describe("local registry publish integration", () => {
     }
   });
 
+  // registry-7sn (P0), the mirror image of ATTACK (a): the takeover coming from INGEST rather than
+  // from a publish. An upstream source in sources.toml declares a bare name a community publisher
+  // already holds the claim on — the plausible copy-paste mistake, since every grandfathered
+  // community name is bare. The base-collision check was exact-name only and always resolved for
+  // the ingested pack, so the served pack kept the name while pointing at UPSTREAM's git source and
+  // the claim holder's approved release was dropped fail-soft. That is content substitution under a
+  // name a third party proved control of: pinned clients following it get upstream's bits.
+  test("an ingested pack cannot take a claimed name from the publisher who holds it", async () => {
+    const claimed = "cacc-twin-team";
+    // A SECOND squatted name, because the operator signal is deduped per name. With only one, a
+    // regression collapsing the dedupe key to the surface alone reports the first squat and silently
+    // drops every later one forever — and `ignored.length > 0` cannot see the difference.
+    const alsoClaimed = "oversight-rig";
+    // `bmad` is the control: an ingested pack whose name nobody claims must be untouched.
+    const harness = await createPublishHarness({ basePackSlugs: [claimed, alsoClaimed, "bmad"] });
+    const errors: string[] = [];
+    const consoleErrorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map((value) => String(value)).join(" "));
+    });
+    try {
+      const incumbent = await harness.signIn("twin-maintainer");
+      const admin = await harness.signIn("admin", "admin");
+
+      // The live community pack: bare name, claimed from wespd/cacc-twin-team in the pre-gate world.
+      await harness.seedApprovedPublish(
+        incumbent.userId,
+        admin.userId,
+        await harness.createPack("twin", "1.2.0", {
+          name: claimed,
+          repoUrl: `https://github.com/wespd/${claimed}`,
+        }),
+      );
+      await harness.seedApprovedPublish(
+        incumbent.userId,
+        admin.userId,
+        await harness.createPack("rig", "2.0.0", {
+          name: alsoClaimed,
+          repoUrl: `https://github.com/wespd/${alsoClaimed}`,
+        }),
+      );
+      // ...and the mistake: those bare names are now ALSO declared by the first-party source.
+      expect(baseCatalogPack(claimed).name).toBe(claimed);
+      expect(baseCatalogPack(alsoClaimed).name).toBe(alsoClaimed);
+
+      const catalog = await harness.publicClient.json<{
+        sources: Array<{ name: string; pack_count: number }>;
+        packs: Array<{ pack_key: string; name: string; registry: string; source: string; latest: string }>;
+      }>("/catalog.json");
+      const served = catalog.packs.filter((pack) => pack.name === claimed);
+      expect(served).toHaveLength(1); // one name, one pack
+      expect(served[0]).toMatchObject({
+        pack_key: `direct--${claimed}`,
+        registry: "direct",
+        latest: "1.2.0",
+      });
+      expect(served[0].source).toContain(`wespd/${claimed}`); // the claim holder's repo, not upstream's
+      expect(catalog.packs.some((pack) => pack.pack_key === `gascity-packs--${claimed}`)).toBe(false);
+      // The control pack, and the source count that no longer includes the dropped pack.
+      expect(catalog.packs.find((pack) => pack.name === "bmad")).toMatchObject({
+        registry: "gascity-packs",
+        pack_key: "gascity-packs--bmad",
+      });
+      expect(catalog.sources.find((source) => source.name === "gascity-packs")?.pack_count).toBe(1);
+      // The second squat resolved the same way, so the fix is not first-entry-only.
+      expect(catalog.packs.find((pack) => pack.name === alsoClaimed)).toMatchObject({
+        pack_key: `direct--${alsoClaimed}`,
+        registry: "direct",
+      });
+
+      // registry.toml — what `gc` actually resolves — agrees.
+      const toml = await harness.publicClient.text("/registry.toml");
+      expect(toml).toContain(`wespd/${claimed}`);
+      expect(toml).not.toContain(`gascity-packs/tree/main/${claimed}`);
+
+      // Nothing moved the pin, and the ingested entry was NOT ignored silently: this log line and
+      // /health's counter are the only channels a first-party operator has, because the ingest lane
+      // that wrote the entry has no database and cannot see name claims.
+      expect(await harness.store.getPackNameClaim(claimed)).toMatchObject({
+        repoFullName: `wespd/${claimed}`,
+      });
+      const ignored = errors.filter((line) => line.includes(`IGNORING ingested pack ${claimed}`));
+      expect(ignored[0]).toContain("from source gascity-packs");
+      expect(ignored[0]).toContain(`claimed by wespd/${claimed}`);
+      expect(ignored[0]).toMatch(/remove the pack from that source's registry\.toml/i);
+
+      // EXACT counts, not `> 0`. The signal is deduped per (surface, name), and both halves of that
+      // key matter in opposite directions: drop the name and the second squat is never reported at
+      // all; drop the dedupe and a permanent condition floods the log at request rate. Re-request
+      // both surfaces so a missing dedupe shows up as growth.
+      const squatLines = () =>
+        errors.filter((line) => line.includes("IGNORING ingested pack")).length;
+      const afterFirstPass = squatLines();
+      expect(afterFirstPass).toBe(4); // 2 names x 2 public surfaces
+      await harness.publicClient.json("/catalog.json");
+      await harness.publicClient.text("/registry.toml");
+      expect(squatLines()).toBe(afterFirstPass); // once per name per surface, however often it is asked
+      expect(errors.some((line) => line.includes(`IGNORING ingested pack ${alsoClaimed}`))).toBe(true);
+      const health = await harness.publicClient.json<{ catalogRenderIssues: number }>("/health");
+      expect(health.catalogRenderIssues).toBe(4);
+
+      // And the holder can still CUT releases: the approve-time dry run has to model the serve path
+      // exactly. Reading no claims there would 409 PUBLISH_CONFLICT on the very merge the serve path
+      // performs, so an upstream copy-paste would silently freeze this pack's releases forever.
+      const next = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("twin-next", "1.3.0", {
+          name: claimed,
+          repoUrl: `https://github.com/wespd/${claimed}`,
+          commit: secondCommit,
+        }),
+      );
+      expect((await harness.approve(admin, next.id)).status).toBe("approved");
+      const after = await harness.publicClient.json<{ packs: Array<{ name: string; latest: string }> }>(
+        "/catalog.json",
+      );
+      expect(after.packs.find((pack) => pack.name === claimed)?.latest).toBe("1.3.0");
+    } finally {
+      consoleErrorSpy.mockRestore();
+      await harness.close();
+    }
+  });
+
   // ATTACK (b) — minting a NEW bare name. Bare names are the ingested half of the namespace; the
   // only publishable ones are those already claimed when the gate shipped.
   test("a new bare (unscoped) name is refused even from a fully proven repo", async () => {
@@ -2384,6 +2505,26 @@ function baseCatalogPack(slug: string) {
   };
 }
 
+function baseRegistryTomlPack(pack: ReturnType<typeof baseCatalogPack>) {
+  return [
+    "",
+    "[[pack]]",
+    `  name = ${JSON.stringify(pack.name)}`,
+    `  description = ${JSON.stringify(pack.description)}`,
+    `  source = ${JSON.stringify(pack.source)}`,
+    `  source_kind = ${JSON.stringify(pack.source_kind)}`,
+    ...pack.releases.flatMap((release) => [
+      "",
+      "  [[pack.release]]",
+      `    version = ${JSON.stringify(release.version)}`,
+      `    ref = ${JSON.stringify(release.ref)}`,
+      `    commit = ${JSON.stringify(release.commit)}`,
+      `    hash = ${JSON.stringify(release.hash)}`,
+      `    description = ${JSON.stringify(release.description)}`,
+    ]),
+  ].join("\n");
+}
+
 async function createPublishHarness(
   options: { basePackSlugs?: string[]; autoApprove?: boolean } = {},
 ) {
@@ -2393,8 +2534,14 @@ async function createPublishHarness(
   await mkdir(distRoot, { recursive: true });
   await mkdir(repoRoot, { recursive: true });
   await writeFile(join(distRoot, "index.html"), "<!doctype html><title>Registry integration shell</title>");
-  await writeFile(join(distRoot, "registry.toml"), "schema = 1\n");
   const basePacks = (options.basePackSlugs ?? []).map(baseCatalogPack);
+  // BOTH artifacts carry the base packs, in the shape `bun run generate` emits. registry.toml is
+  // what `gc` resolves, so a base pack present only in catalog.json would make every assertion
+  // about the served TOML vacuous.
+  await writeFile(
+    join(distRoot, "registry.toml"),
+    ["schema = 1", ...basePacks.map(baseRegistryTomlPack), ""].join("\n"),
+  );
   await writeFile(
     join(distRoot, "catalog.json"),
     `${JSON.stringify({

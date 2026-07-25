@@ -2384,9 +2384,12 @@ export class PostgresRegistryStore implements RegistryStore {
   }
 
   async getServedPublishPrecedent(name: string): Promise<PublishRequestRow | null> {
-    // MOST RECENT, not any: the row's pack_path is what a repeat release is held to, so answering
-    // with an older release would let a publisher revert an established name to a stale directory
-    // unattended. `id COLLATE "C"` breaks a same-instant tie byte-wise, matching the file lane's
+    // MOST RECENTLY APPROVED, not any: the row's pack_path is what a repeat release is held to, so
+    // answering with an older release would let a publisher revert an established name to a stale
+    // directory unattended. Ordered by reviewed_at because a staff-approved monorepo move is what
+    // re-establishes the path; created_at made this a coin flip for two releases submitted in the
+    // same millisecond, since the id tiebreak is byte-wise over random ids.
+    // `id COLLATE "C"` breaks a genuine same-instant tie byte-wise, matching the file lane's
     // comparator — localeCompare is ICU-dependent and could disagree with SQL on the same data.
     const rows = await this.sql`
       SELECT
@@ -2401,7 +2404,9 @@ export class PostgresRegistryStore implements RegistryStore {
       JOIN users ON users.id = pack_publish_requests.submitter_user_id
       WHERE pack_publish_requests.status = 'approved'
         AND pack_publish_requests.requested_name = ${name}
-      ORDER BY pack_publish_requests.created_at DESC, pack_publish_requests.id COLLATE "C" DESC
+      ORDER BY COALESCE(pack_publish_requests.reviewed_at, pack_publish_requests.created_at) DESC,
+               pack_publish_requests.created_at DESC,
+               pack_publish_requests.id COLLATE "C" DESC
       LIMIT 1
     `;
     return rows[0]
@@ -2422,6 +2427,17 @@ export class PostgresRegistryStore implements RegistryStore {
   async getPackNameClaim(name: string): Promise<PackNameClaim | null> {
     const rows = await this.sql`SELECT * FROM pack_name_claims WHERE name = ${name} LIMIT 1`;
     return rows[0] ? nameClaimFromRow(rows[0] as any) : null;
+  }
+
+  async listPackNameClaims(names: string[]): Promise<PackNameClaim[]> {
+    const wanted = [...new Set(names)];
+    // Not a guard: postgres.js renders an empty array safely (it comes back with zero rows), so
+    // this only skips a pointless round trip on the common "nothing to look up" call.
+    if (wanted.length === 0) return [];
+    const rows = await this.sql`
+      SELECT * FROM pack_name_claims WHERE name IN ${this.sql(wanted)} ORDER BY name COLLATE "C"
+    `;
+    return rows.map((row) => nameClaimFromRow(row as any));
   }
 
   private async resolveHandle(rawHandle: string | undefined, userId: string) {
@@ -3446,15 +3462,24 @@ class FileRegistryStore implements RegistryStore {
   }
 
   async getServedPublishPrecedent(name: string) {
-    // Byte-wise comparison for BOTH keys, matching the Postgres lane's `COLLATE "C"` tiebreak —
+    // Ordered by APPROVAL, not submission: "the established pack_path" is the one a human most
+    // recently blessed, which is exactly what a staff-approved monorepo move re-establishes. Ordering
+    // by createdAt made the answer a coin flip whenever two releases of a name were submitted in the
+    // same millisecond, because the id tiebreak below is byte-wise over random ids — so a legitimate
+    // move could revert to the stale directory on a fast machine and pass on a slow one.
+    //
+    // Byte-wise comparison for every key, matching the Postgres lane's `COLLATE "C"` tiebreak —
     // localeCompare is ICU/locale-dependent and can order the same two ids differently from SQL.
     const byCodeUnit = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
+    const approvedAt = (request: PublishRequestRow) => request.reviewedAt ?? request.createdAt;
     return (
       [...this.publishRequests.values()]
         .filter((request) => request.status === "approved" && request.requestedName === name)
         .sort(
           (left, right) =>
-            byCodeUnit(right.createdAt, left.createdAt) || byCodeUnit(right.id, left.id),
+            byCodeUnit(approvedAt(right), approvedAt(left)) ||
+            byCodeUnit(right.createdAt, left.createdAt) ||
+            byCodeUnit(right.id, left.id),
         )[0] ?? null
     );
   }
@@ -3465,6 +3490,17 @@ class FileRegistryStore implements RegistryStore {
     // handing out a reference lets a caller mutate stored state (and makes any test that re-reads
     // to prove a claim did NOT change compare an object with itself).
     return claim ? { ...claim } : null;
+  }
+
+  async listPackNameClaims(names: string[]): Promise<PackNameClaim[]> {
+    // Byte-wise sort to match the Postgres lane's `COLLATE "C"` — localeCompare is ICU/locale
+    // dependent and would order the same two names differently from SQL. Snapshots, for the same
+    // reason getPackNameClaim copies.
+    return [...new Set(names)]
+      .map((name) => this.nameClaims.get(name))
+      .filter((claim): claim is PackNameClaim => claim != null)
+      .map((claim) => ({ ...claim }))
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
   }
 
   // Mirror of the Postgres backfill: first-APPROVED request per name wins, tie-broken by

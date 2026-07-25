@@ -104,6 +104,37 @@ const releaseVersionPattern = /^[0-9]+\.[0-9]+(\.[0-9]+)?$/;
 const commitPattern = /^[0-9a-f]{40}$/;
 const hashPattern = /^sha256:[0-9a-f]{64}$/;
 
+// The site-wide social card, and the ONE og/ file renderOgFiles emits that is not derived from a
+// pack name. It is written first, so a pack whose og filename equals it silently replaced it: the
+// site card became a pack card, and every pack that falls back to `/og/registry.svg` (which is
+// every direct publish — server/aggregate.ts) rendered the wrong image. `bun run generate:check`
+// could not catch it, because the resulting tree is internally self-consistent.
+const siteOgFilename = "registry.svg";
+// Enumerated ONCE, here. renderOgFiles emits this set, and both name lanes (ingest and the
+// committed-artifact reconstruction) refuse to produce a filename in it. `registry.toml` and
+// `catalog.json` need no entry: they are written to outDir, not to og/, so no `<name>.svg` can
+// ever collide with them. A future non-pack og file belongs in this set, and nowhere else.
+const reservedOgFilenames: ReadonlySet<string> = new Set([siteOgFilename]);
+
+// Exported so a test can pin the enumeration against what renderOgFiles actually emits — a new
+// reserved file added to the renderer but not to the set would otherwise be squattable again.
+export function reservedOgFilenameList() {
+  return [...reservedOgFilenames];
+}
+
+// Rejects a pack name that would overwrite a reserved og file. Both call sites are deliberate and
+// independently load-bearing: normalizePack (ingest — demoted to skip-and-warn, so one squatting
+// upstream entry cannot freeze the hourly refresh of every other pack) and reconstructPack (the
+// offline check — fatal, because a committed artifact must never contain one).
+function assertUnreservedOgFilename(label: string, name: string) {
+  const filename = packOgFilename(name);
+  if (reservedOgFilenames.has(filename)) {
+    throw new Error(
+      `${label}: pack name ${JSON.stringify(name)} is reserved; its og card og/${filename} is the registry's own`,
+    );
+  }
+}
+
 const root = new URL("../", import.meta.url);
 export const defaultSourcesPath = new URL("sources.toml", root);
 export const defaultOutDir = new URL("public/", root);
@@ -210,10 +241,12 @@ export async function aggregateSources(
   // reviews and ownership — source `x--a` + pack `b` and source `x` + pack `a--b` both flatten to
   // `x--a--b`. Keep the first in canonical order, skip later colliders with a warning.
   //
-  // There is no og-filename check here on purpose. Ingested names are bare, so `packOgFilename` is
-  // the name plus a suffix and therefore injective, and equal names are already rejected by the
-  // cross-source dedupe above — so such a branch could never fire. A future scoped-ingest lane
-  // will need one, and will need to decide then whether to reject at ingest or skip fail-soft.
+  // There is no pack-vs-pack og-filename check here on purpose. Ingested names are bare, so
+  // `packOgFilename` is the name plus a suffix and therefore injective, and equal names are already
+  // rejected by the cross-source dedupe above — so such a branch could never fire. A future
+  // scoped-ingest lane will need one, and will need to decide then whether to reject at ingest or
+  // skip fail-soft. The pack-vs-RESERVED case is the reachable one, and it is handled per-pack in
+  // normalizePack (assertUnreservedOgFilename) so it warns and skips like any other bad pack.
   const keyOwners = new Map<string, string>();
   const unique: CatalogPack[] = [];
   for (const pack of packs) {
@@ -410,6 +443,8 @@ function normalizePack(
         : `${registry}: invalid pack name ${JSON.stringify(name)}`,
     );
   }
+  // Reachable on a name the grammar above ACCEPTS: `registry` is a perfectly legal bare name.
+  assertUnreservedOgFilename(registry, name);
 
   const sourceKind = requireString(raw.source_kind, `${registry}.${name}.source_kind`);
   if (sourceKind !== "git") {
@@ -617,7 +652,7 @@ export function renderOgFiles(
   sources: Array<{ name: string; url: string; packCount: number }>,
 ): Array<{ filename: string; content: string }> {
   return [
-    { filename: "registry.svg", content: renderRegistryOgSvg(packs, sources) },
+    { filename: siteOgFilename, content: renderRegistryOgSvg(packs, sources) },
     ...packs.map((pack) => ({
       filename: packOgFilename(pack.name),
       content: renderPackOgSvg(pack),
@@ -931,8 +966,9 @@ export async function readCatalogJson(path: URL): Promise<{ packs: CatalogPack[]
       throw new Error(`catalog.json: duplicate pack ${JSON.stringify(pack.name)}`);
     }
     seenNames.add(pack.name);
-    // No og-filename check: reconstructPack accepts bare names only, so the og filename is the
-    // name plus a suffix and the duplicate-name throw above already covers it.
+    // No pack-vs-pack og-filename check: reconstructPack accepts bare names only, so the og
+    // filename is the name plus a suffix and the duplicate-name throw above already covers it.
+    // Pack-vs-reserved is checked per pack in reconstructPack (assertUnreservedOgFilename).
     const packKey = packKeyFor(pack);
     const keyOwner = keyOwners.get(packKey);
     if (keyOwner) {
@@ -954,6 +990,9 @@ function reconstructPack(raw: RawJsonPack): CatalogPack {
   if (!ingestedPackNamePattern.test(name) || name.length > maxPackNameSegment) {
     throw new Error(`catalog.json: invalid pack name ${JSON.stringify(name)}`);
   }
+  // Fatal here, unlike the ingest lane: nothing recovers from a committed artifact that squats a
+  // reserved og filename, and blessing one would let the next `generate` overwrite the site card.
+  assertUnreservedOgFilename("catalog.json", name);
 
   const sourceKind = requireString(raw.source_kind, `catalog.json ${name}.source_kind`);
   if (sourceKind !== "git") {
