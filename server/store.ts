@@ -2424,6 +2424,17 @@ export class PostgresRegistryStore implements RegistryStore {
     return rows[0] ? nameClaimFromRow(rows[0] as any) : null;
   }
 
+  async listPackNameClaims(names: string[]): Promise<PackNameClaim[]> {
+    const wanted = [...new Set(names)];
+    // Not a guard: postgres.js renders an empty array safely (it comes back with zero rows), so
+    // this only skips a pointless round trip on the common "nothing to look up" call.
+    if (wanted.length === 0) return [];
+    const rows = await this.sql`
+      SELECT * FROM pack_name_claims WHERE name IN ${this.sql(wanted)} ORDER BY name COLLATE "C"
+    `;
+    return rows.map((row) => nameClaimFromRow(row as any));
+  }
+
   private async resolveHandle(rawHandle: string | undefined, userId: string) {
     const base = normalizeHandle(rawHandle) ?? "user";
     for (let index = 1; index <= 50; index += 1) {
@@ -3465,6 +3476,17 @@ class FileRegistryStore implements RegistryStore {
     // handing out a reference lets a caller mutate stored state (and makes any test that re-reads
     // to prove a claim did NOT change compare an object with itself).
     return claim ? { ...claim } : null;
+  }
+
+  async listPackNameClaims(names: string[]): Promise<PackNameClaim[]> {
+    // Byte-wise sort to match the Postgres lane's `COLLATE "C"` — localeCompare is ICU/locale
+    // dependent and would order the same two names differently from SQL. Snapshots, for the same
+    // reason getPackNameClaim copies.
+    return [...new Set(names)]
+      .map((name) => this.nameClaims.get(name))
+      .filter((claim): claim is PackNameClaim => claim != null)
+      .map((claim) => ({ ...claim }))
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
   }
 
   // Mirror of the Postgres backfill: first-APPROVED request per name wins, tie-broken by

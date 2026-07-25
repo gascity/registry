@@ -496,6 +496,11 @@ export interface RegistryStore {
   // a staff namePinOverrideReason) and by the init() backfill; dropped by a withdraw that asked to
   // release it. Read by the publish merge gate, which measures every incoming release against it.
   getPackNameClaim(name: string): Promise<PackNameClaim | null>;
+  // The same bindings for MANY names in one round trip, ordered by name, deduplicated, omitting
+  // names that are unclaimed. Read by the catalog render path (server/aggregate.ts), which needs
+  // every approved bare name's claim on a single request and must not degrade into one query per
+  // approved pack. Never null-padded: absent means unclaimed.
+  listPackNameClaims(names: string[]): Promise<PackNameClaim[]>;
   markPublishRequestValidated(
     id: string,
     entry: PublishRegistryEntry,

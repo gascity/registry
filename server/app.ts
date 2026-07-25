@@ -1244,11 +1244,14 @@ async function assertPublishRequestCanMerge(
 
   const baseToml = await readRuntimeText("registry.toml");
   const approved = await store.listApprovedPublishRequests();
+  const merging = [...approved, { ...publishRequest, status: "approved" as const }];
   try {
-    renderRegistryTomlWithApprovedPublishes(baseToml, [
-      ...approved,
-      { ...publishRequest, status: "approved" },
-    ]);
+    renderRegistryTomlWithApprovedPublishes(baseToml, merging, {
+      // The dry run has to model the SERVE path exactly. Without the claims the serve path reads,
+      // a claim holder whose name an upstream source also declares would 409 here while the merge
+      // it is predicting succeeds — an upstream edit silently freezing that pack's releases.
+      nameClaims: await nameClaimsForMerge(merging),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Publish request conflicts with the aggregate.";
     throw new RequestError(409, "PUBLISH_CONFLICT", message);
@@ -1296,11 +1299,20 @@ function reportCatalogIssue(surface: "registry.toml" | "catalog.json") {
     const key =
       issue.kind === "base"
         ? `${surface}:base:${issue.error.message}`
-        : `${surface}:${issue.requestId}:${issue.error.message}`;
+        : issue.kind === "base-ignored"
+          ? `${surface}:base-ignored:${issue.name}`
+          : `${surface}:${issue.requestId}:${issue.error.message}`;
     if (reportedCatalogIssues.has(key)) return;
     reportedCatalogIssues.add(key);
     if (issue.kind === "base") {
       console.error(`[registry] ${surface} fail-soft: serving base artifact unmerged`, issue.error);
+    } else if (issue.kind === "base-ignored") {
+      // The ONLY channel that tells a first-party operator their upstream entry is being ignored:
+      // the ingest lane that wrote it has no database and cannot see name claims. Logged at error
+      // level and counted in /health's catalogRenderIssues, with both remedies named.
+      console.error(
+        `[registry] ${surface}: IGNORING ingested pack ${issue.name} from source ${issue.baseRegistry} — that name is claimed by ${issue.claimedBy}, whose approved release is served under it instead (request ${issue.requestId}). Either remove the pack from that source's registry.toml, or hand the name back to ingest by taking the claimed release down (withdraw with releaseNameClaim).`,
+      );
     } else {
       console.error(
         `[registry] ${surface} fail-soft: skipped approved publish ${issue.name}@${issue.version} (request ${issue.requestId})`,
@@ -1310,6 +1322,27 @@ function reportCatalogIssue(surface: "registry.toml" | "catalog.json") {
   };
 }
 
+// The pack_name_claims rows the merge needs, in ONE round trip. Restricted to BARE entry names,
+// which is not an approximation: ingest only ever emits bare names (scripts/generate-registry.lib.ts)
+// and the committed artifact is re-validated as bare, so a scoped entry can never equal a base pack
+// name, and claim precedence is deliberately never applied to the pack_key collision. That bounds
+// this to the closed grandfathered set of bare publishes (H1a refuses new ones), so it stays a
+// single-row read as the catalog grows. A scoped-INGEST lane would have to widen this — and getting
+// it wrong fails closed (no claim found ⇒ the base pack keeps the name ⇒ the publish is refused),
+// never open. The filter is a COST BOUND, not a guard: widening it back to every name changes no
+// served byte, only how many rows each catalog request reads.
+async function nameClaimsForMerge(requests: PublishRequestRow[]) {
+  const names = [
+    ...new Set(
+      requests
+        .map((request) => request.registryEntry?.name)
+        .filter((name): name is string => typeof name === "string" && !packNameScope(name)),
+    ),
+  ];
+  if (names.length === 0) return undefined;
+  return new Map((await store.listPackNameClaims(names)).map((claim) => [claim.name, claim]));
+}
+
 async function serveRuntimeRegistryToml() {
   const baseToml = await readRuntimeText("registry.toml");
   const approved = await store.listApprovedPublishRequests();
@@ -1317,6 +1350,7 @@ async function serveRuntimeRegistryToml() {
     renderRegistryTomlWithApprovedPublishes(baseToml, approved, {
       mode: "fail-soft",
       onIssue: reportCatalogIssue("registry.toml"),
+      nameClaims: await nameClaimsForMerge(approved),
     }),
     { headers: runtimeCatalogHeaders("text/plain; charset=utf-8") },
   );
@@ -1329,6 +1363,7 @@ async function serveRuntimeCatalogJson() {
     renderCatalogJsonWithApprovedPublishes(baseJson, approved, {
       mode: "fail-soft",
       onIssue: reportCatalogIssue("catalog.json"),
+      nameClaims: await nameClaimsForMerge(approved),
     }),
     { headers: runtimeCatalogHeaders("application/json; charset=utf-8") },
   );

@@ -1218,6 +1218,42 @@ for (const lane of lanes) {
       expect(rereadUnstamped?.sourceGithubOwnerId).toBeUndefined();
     });
 
+    // The batch read the catalog render depends on (server/aggregate.ts's claim precedence). It
+    // runs on every /catalog.json + /registry.toml request, so it has to answer many names in ONE
+    // round trip rather than degrade into a query per approved pack — and both lanes have to agree
+    // on order, deduplication and what an unclaimed name looks like, or the file double would
+    // "prove" behaviour Postgres does not have.
+    test("name claims: many names resolve in one read, deduplicated, unclaimed names omitted", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const scope = uid("scope");
+      const first = `${scope}/aaa-${uid("pack")}`;
+      const second = `${scope}/zzz-${uid("pack")}`;
+      const unclaimed = `${scope}/never-${uid("pack")}`;
+      await approvedPublishRequest(store, admin.id, submitter.id, first);
+      const secondRequest = await approvedPublishRequest(store, admin.id, submitter.id, second);
+
+      expect(await store.listPackNameClaims([])).toEqual([]);
+      expect(await store.listPackNameClaims([unclaimed])).toEqual([]);
+
+      // Ordered by name (byte-wise on both lanes), one row per distinct name however often it is
+      // asked for, and the unclaimed name simply absent — never a null placeholder.
+      const batch = await store.listPackNameClaims([second, unclaimed, first, first]);
+      expect(batch.map((claim) => claim.name)).toEqual([first, second]);
+      // ...and byte-identical to what the single-name read returns for each of them.
+      expect(batch).toEqual([
+        (await store.getPackNameClaim(first))!,
+        (await store.getPackNameClaim(second))!,
+      ]);
+
+      // A released claim disappears from the batch read too (the takedown path staff use to hand
+      // a name back to ingest, which is what makes claim precedence reversible).
+      await store.withdrawPublishRequest(admin.id, secondRequest.id, "handing the name back", {
+        releaseNameClaim: true,
+      });
+      expect((await store.listPackNameClaims([first, second])).map((claim) => claim.name)).toEqual([first]);
+    });
+
     test("name claims: the first approve pins the name, and a later approve never re-points it", async () => {
       const submitter = await store.ensureUser(identity());
       const admin = await store.ensureUser(identity({ assertedAdmin: true }));

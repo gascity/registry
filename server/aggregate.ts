@@ -1,5 +1,6 @@
 import { parse } from "smol-toml";
-import type { PublishRegistryEntry, PublishRequestRow } from "./types";
+import { nameClaimMatchesRequest } from "./publish";
+import type { PackNameClaim, PublishRegistryEntry, PublishRequestRow } from "./types";
 
 type RuntimeRelease = {
   version: string;
@@ -67,7 +68,13 @@ type RawJsonPack = {
 
 export type CatalogRenderIssue =
   | { kind: "base"; error: Error }
-  | { kind: "entry"; requestId: string; name: string; version: string; error: Error };
+  | { kind: "entry"; requestId: string; name: string; version: string; error: Error }
+  // An INGESTED (first-party) pack was dropped from the served catalog because the name it
+  // declares belongs to the direct publisher whose approved release we served under it instead.
+  // Not a failure — nothing is retried and nothing is degraded — but it is reported in BOTH modes
+  // because the operator who added that upstream entry has no other channel that would ever tell
+  // them it is being ignored.
+  | { kind: "base-ignored"; requestId: string; name: string; baseRegistry: string; claimedBy: string };
 
 export type RenderOptions = {
   // "strict" (default): any un-mergeable approved entry throws — the approve-time dry run
@@ -77,9 +84,20 @@ export type RenderOptions = {
   // 500 /registry.toml + /catalog.json for everyone.
   mode?: "strict" | "fail-soft";
   onIssue?: (issue: CatalogRenderIssue) => void;
+  // pack_name_claims rows for the names being merged, keyed by name, read from the store by the
+  // CALLER — this module stays DB-free so both artifacts render from one pure function and every
+  // branch below is unit-testable. A name that is absent from the map is treated as UNCLAIMED,
+  // which keeps the base artifact's pack: the fail-closed direction, since the hazard being closed
+  // is serving OTHER bits under a claimed name.
+  nameClaims?: ReadonlyMap<string, PackNameClaim>;
 };
 
-type ApprovedEntry = { requestId: string; entry: PublishRegistryEntry };
+// The request row travels with the entry because claim precedence has to measure the SUBMISSION
+// against the name's pin (repo ids / owner login), not just the entry it produced.
+type ApprovedEntry = { requestId: string; request: PublishRequestRow; entry: PublishRegistryEntry };
+
+// One base (ingested) pack that claim precedence dropped from the served catalog.
+type IgnoredBasePack = { name: string; baseRegistry: string; claimedBy: string };
 
 export function renderRegistryTomlWithApprovedPublishes(
   baseToml: string,
@@ -118,7 +136,9 @@ export function renderCatalogJsonWithApprovedPublishes(
   }
   const packs = mergeApprovedEntries(basePacks, entries, options);
   const directPackCount = packs.filter((pack) => pack.registry === "direct").length;
-  const baseSources = Array.isArray(raw.sources) ? raw.sources : [];
+  const baseSources = (Array.isArray(raw.sources) ? raw.sources : []).map((source) =>
+    withServedPackCount(source, packs),
+  );
   const sources =
     directPackCount > 0
       ? [
@@ -148,7 +168,11 @@ export function renderCatalogJsonWithApprovedPublishes(
 function approvedEntries(requests: PublishRequestRow[]): ApprovedEntry[] {
   return requests
     .filter((request) => request.status === "approved" && request.registryEntry)
-    .map((request) => ({ requestId: request.id, entry: request.registryEntry as PublishRegistryEntry }));
+    .map((request) => ({
+      requestId: request.id,
+      request,
+      entry: request.registryEntry as PublishRegistryEntry,
+    }));
 }
 
 function mergeApprovedEntries(basePacks: RuntimePack[], entries: ApprovedEntry[], options: RenderOptions) {
@@ -156,16 +180,29 @@ function mergeApprovedEntries(basePacks: RuntimePack[], entries: ApprovedEntry[]
   // Identity is tracked structurally, not by trusting the base artifact's `registry` string:
   // normalizeJsonPack copies that field straight out of catalog.json, so a base pack claiming
   // registry "direct" would otherwise be treated as a merge target and re-open the graft hole.
-  // `basePackKeys` is every identity that existed before merging; `directPacks` holds only the
-  // packs THIS merge created, which are the sole legitimate targets for a later release.
+  // `baseByName` + `basePackKeys` are every identity that existed before merging, keyed the two
+  // ways a new entry can collide with one; `directPacks` holds only the packs THIS merge created,
+  // which are the sole legitimate targets for a later release. Both base maps are built once and
+  // maintained by the merge (claim precedence removes from them), rather than re-derived from an
+  // index range on `packs` — that arithmetic silently mis-identifies a base pack the moment the
+  // array can shrink.
+  const baseByName = new Map<string, RuntimePack>();
   const basePackKeys = new Map<string, RuntimePack>();
   for (const pack of packs) {
+    baseByName.set(pack.name, pack);
     basePackKeys.set(packKeyFor(pack), pack);
   }
   const directPacks = new Map<string, RuntimePack>();
-  for (const { requestId, entry } of entries) {
+  for (const { requestId, request, entry } of entries) {
     try {
-      mergeApprovedEntry(packs, entry, { basePacks: packs.slice(0, basePacks.length), basePackKeys, directPacks });
+      const ignored = mergeApprovedEntry(packs, entry, {
+        request,
+        baseByName,
+        basePackKeys,
+        directPacks,
+        nameClaims: options.nameClaims,
+      });
+      if (ignored) options.onIssue?.({ kind: "base-ignored", requestId, ...ignored });
     } catch (error) {
       if (options.mode !== "fail-soft") throw error;
       options.onIssue?.({
@@ -186,16 +223,19 @@ function mergeApprovedEntries(basePacks: RuntimePack[], entries: ApprovedEntry[]
 
 // Merge one approved direct-publish entry. Re-validates the stored registry_entry BEFORE any
 // mutation (a junk row must not reach the renderer — quote(undefined) would emit a literal
-// `undefined`), so a skipped entry in fail-soft mode leaves zero partial state.
+// `undefined`), so a skipped entry in fail-soft mode leaves zero partial state. Returns the base
+// pack claim precedence dropped, if any, for the caller to report.
 function mergeApprovedEntry(
   packs: RuntimePack[],
   entry: PublishRegistryEntry,
   ctx: {
-    basePacks: RuntimePack[];
+    request: PublishRequestRow;
+    baseByName: Map<string, RuntimePack>;
     basePackKeys: Map<string, RuntimePack>;
     directPacks: Map<string, RuntimePack>;
+    nameClaims?: ReadonlyMap<string, PackNameClaim>;
   },
-) {
+): IgnoredBasePack | undefined {
   const name = requireString(entry?.name, "approved entry name");
   assertClientParseablePackName(name);
   const release = entry?.release ?? ({} as PublishRegistryEntry["release"]);
@@ -213,17 +253,42 @@ function mergeApprovedEntry(
   // becoming `latest` while still advertising the first-party source.
   const pack = ctx.directPacks.get(name);
   const newKey = `direct--${flattenName(name)}`;
+  let shadowedBase: { pack: RuntimePack; claim: PackNameClaim } | undefined;
 
   if (!pack) {
     // No direct pack yet, so this entry wants to create `newKey`. It must not collide with any
-    // pre-existing identity, by name OR by flattened pack_key — `a/b` and `a--b` both flatten to
-    // `a--b`, and pack_key is what keys reviews and ownership, so a duplicate silently pools two
-    // packs under one identity. The generator treats this as fatal; the serve path must too.
-    const collision =
-      ctx.basePacks.find((candidate) => candidate.name === name) ?? ctx.basePackKeys.get(newKey);
-    if (collision) {
+    // pre-existing identity, by name OR by flattened pack_key. TWO hazards, deliberately resolved
+    // differently:
+    //
+    // (1) SAME NAME as a base (ingested) pack. Keeping the base pack here is CONTENT SUBSTITUTION
+    //     under a name a third party proved control of: pinned clients following that name get the
+    //     upstream source's bits, and the claim holder's approved release is dropped. So when this
+    //     release comes from the repo the name's claim is pinned to, the CLAIM HOLDER wins and the
+    //     base pack is dropped from the served catalog (reported, never silently). With no claim,
+    //     or a claim pinned to another repo, the base pack stands and this entry is refused —
+    //     exactly as before, and the only outcome the approve-time dry run can reach for a NEW
+    //     name, since a bare name with no claim is refused earlier by the namespace gate (H1a).
+    //
+    // (2) SAME flattened pack_key as a DIFFERENT base pack (`a/b` vs `a--b`; only reachable when a
+    //     base pack claims registry "direct"). pack_key keys reviews and ownership, so two packs
+    //     under one key silently pool two identities. NEVER resolved by claim precedence: a claim
+    //     on `a/b` proves nothing about the different name `a--b`, and dropping that pack would
+    //     evict a name clients pin. Checked independently of (1) — not as its `else` — because
+    //     dropping the same-NAMED pack would not free a key held by some other pack.
+    const sameName = ctx.baseByName.get(name);
+    const sameKey = ctx.basePackKeys.get(newKey);
+    if (sameName) {
+      const claim = heldNameClaim(ctx.nameClaims?.get(name), ctx.request);
+      if (!claim) {
+        throw new Error(
+          `approved publish ${name} collides with base pack ${sameName.name} from source ${sameName.registry}`,
+        );
+      }
+      shadowedBase = { pack: sameName, claim };
+    }
+    if (sameKey && sameKey !== sameName) {
       throw new Error(
-        `approved publish ${name} collides with base pack ${collision.name} from source ${collision.registry}`,
+        `approved publish ${name} collides with base pack ${sameKey.name} from source ${sameKey.registry}`,
       );
     }
     const twin = [...ctx.directPacks.values()].find((candidate) => packKeyFor(candidate) === newKey);
@@ -246,6 +311,15 @@ function mergeApprovedEntry(
     throw new Error(`approved publish conflicts with existing ${name} ${version}`);
   }
   // Validation passed — only now mutate.
+  if (shadowedBase) {
+    // Drop the ingested pack that held this name. Both base maps are updated so the name and its
+    // pack_key stop existing as pre-existing identities — after this the name behaves exactly as it
+    // would have if the upstream source had never declared it, which is the whole intent, and is
+    // why this introduces no merge shape that an unclaimed-by-upstream name does not already have.
+    packs.splice(packs.indexOf(shadowedBase.pack), 1);
+    ctx.baseByName.delete(shadowedBase.pack.name);
+    ctx.basePackKeys.delete(packKeyFor(shadowedBase.pack));
+  }
   const target =
     pack ??
     (() => {
@@ -263,6 +337,43 @@ function mergeApprovedEntry(
       return created;
     })();
   target.releases.push({ ...release });
+  return shadowedBase
+    ? {
+        name: shadowedBase.pack.name,
+        baseRegistry: shadowedBase.pack.registry,
+        claimedBy: shadowedBase.claim.repoFullName,
+      }
+    : undefined;
+}
+
+// Re-derive one base source's `pack_count` from the packs actually being served. The generator
+// computes it the same way (summarizeSources in scripts/generate-registry.lib.ts), so for an
+// untouched base artifact this is byte-identical to the value it carried — but a pack that claim
+// precedence dropped from a source must not still be counted in it. Anything that is not a
+// {name: string, pack_count: number} object is passed through untouched rather than guessed at.
+function withServedPackCount(source: unknown, packs: RuntimePack[]) {
+  if (!source || typeof source !== "object") return source;
+  const record = source as { name?: unknown; pack_count?: unknown };
+  if (typeof record.name !== "string" || typeof record.pack_count !== "number") return source;
+  const name = record.name;
+  return { ...record, pack_count: packs.filter((pack) => pack.registry === name).length };
+}
+
+// Keyed by the name being SERVED (entry.name), not by the row's requestedName — the question this
+// answers is who controls the name a client would resolve, and the two are only ever equal because
+// nothing re-writes an entry's name. A row whose two names disagree therefore has to prove control
+// of the served one, which is the conservative reading.
+//
+// The name's claim, but only when THIS approved request is the repo the pin names — otherwise
+// undefined, which keeps the base pack. Same predicate as the approve-time merge gate and the
+// approve transaction (server/publish.ts), so the three cannot drift into disagreeing about who
+// holds a name. Fails closed on a row that cannot answer the pin at all: nameClaimMatchesRequest
+// dereferences `repository`, and a row missing it must not become a TypeError that a strict-mode
+// caller (the approve dry run) turns into a 409 on an unrelated publish.
+function heldNameClaim(claim: PackNameClaim | undefined, request: PublishRequestRow) {
+  if (!claim) return undefined;
+  if (!request?.repository?.fullName || !request.repository.owner) return undefined;
+  return nameClaimMatchesRequest(claim, request) ? claim : undefined;
 }
 
 function asError(value: unknown): Error {

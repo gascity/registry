@@ -13,6 +13,7 @@ import {
   renderCatalogJson,
   renderOgFiles,
   renderRegistryToml,
+  reservedOgFilenameList,
 } from "./generate-registry.lib.ts";
 
 // Every fixture uses file:// sources and https://example.com pack sources, so nothing here
@@ -360,6 +361,37 @@ describe("ingest policy (skip-and-warn)", () => {
     expect(warnings).toEqual([]);
   });
 
+  // renderOgFiles writes the site-wide card FIRST and then one file per pack, so an upstream pack
+  // named `registry` used to overwrite it: 16 og files instead of 17, zero warnings, and
+  // generate:check green because the tree stayed self-consistent. Every pack that falls back to
+  // /og/registry.svg then rendered that pack's card.
+  it("skips an upstream pack that would overwrite the reserved site og card", async () => {
+    const src = await writeUpstream(
+      "squatter",
+      catalogToml(
+        packBlock("alpha", [releaseBlock("1.0")]),
+        packBlock("registry", [releaseBlock("1.0")]),
+      ),
+    );
+    const { packs, sourceSummaries, warnings } = await aggregate([src]);
+    expect(packs.map((p) => p.name)).toEqual(["alpha"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].scope).toBe("pack"); // skip-and-warn, NOT fatal: the refresh keeps running
+    expect(warnings[0].reason).toMatch(/reserved; its og card og\/registry\.svg/);
+
+    // ...and the site card is still the site card.
+    const og = renderOgFiles(packs, sourceSummaries);
+    expect(og.map((f) => f.filename)).toEqual(["registry.svg", "alpha.svg"]);
+    expect(og[0].content).toContain("Gas City Pack Registry"); // the site card's eyebrow, not a pack's
+  });
+
+  // The reserved set has to BE what the renderer emits beyond the per-pack files. With no packs,
+  // renderOgFiles emits exactly the reserved files — so a future non-pack card added to the
+  // renderer but not to the set fails here instead of becoming squattable.
+  it("the reserved og filename set is exactly what renderOgFiles emits for zero packs", () => {
+    expect(renderOgFiles([], []).map((file) => file.filename)).toEqual(reservedOgFilenameList());
+  });
+
   it("skips a release whose withdrawn is not a boolean", async () => {
     const badWithdrawn = [
       "  [[pack.release]]",
@@ -581,6 +613,16 @@ describe("catalog reconstruction validators (readCatalogJson)", () => {
   it("accepts a bare pack name of exactly 64 characters", async () => {
     const file = await writeCatalog([jsonPack("a".repeat(64))]);
     expect((await readCatalogJson(file)).packs.map((p) => p.name)).toEqual(["a".repeat(64)]);
+  });
+
+  // Fatal on this lane, unlike ingest's skip-and-warn: a committed catalog.json naming a pack
+  // `registry` is an artifact whose next `bun run generate` overwrites the site og card, and the
+  // offline check is the last gate before it is blessed.
+  it("rejects a pack name that squats the reserved site og filename", async () => {
+    const file = await writeCatalog([jsonPack("registry")]);
+    await expect(readCatalogJson(file)).rejects.toThrow(
+      /pack name "registry" is reserved; its og card og\/registry\.svg/,
+    );
   });
 
   it("rejects packs that share a pack_key across sources (distinct og filenames)", async () => {
