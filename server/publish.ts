@@ -5,7 +5,14 @@ import type {
   PublishRequestInput,
 } from "./types";
 
+// Bare or single-scoped, each segment starting alphanumeric. Ingest uses the bare-only half of
+// this grammar (scripts/generate-registry.lib.ts) — the two are deliberately different and
+// deliberately not shared, since `scripts/` and `server/` have no import coupling.
 const packNamePattern = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)?$/;
+// Mirrors ValidatePackName in internal/packregistry/catalog.go. `gc` rejects a segment over 64
+// characters and ValidateCatalog aborts on the FIRST bad name, so a single over-long approved
+// name would hide the whole catalog — all 15 first-party packs included — from every client.
+const maxPackNameSegment = 64;
 const releaseVersionPattern = /^[0-9]+\.[0-9]+(\.[0-9]+)?$/;
 const commitPattern = /^[0-9a-f]{40}$/;
 const safePathPattern = /^[A-Za-z0-9._/@+-]+$/;
@@ -20,6 +27,42 @@ export function packNameScope(name: string) {
   return rest ? scope : undefined;
 }
 
+// `owner/pack` flattens to `owner--pack` for pack_key and og filenames, so the flattening must
+// be injective or two names pool under one identity. Banning `--` inside a segment is what
+// makes it injective: a legal flattened name contains a `--` only where a `/` was, and it can
+// only be split there one way (any other split would put `--` inside a segment or start a
+// segment with `-`, and both are rejected). Both anchors are load-bearing.
+export function assertPublishablePackName(name: string) {
+  // Length first: requestedName is otherwise unbounded (`requested_name text` in the store), so
+  // this also keeps the pattern off a megabyte of dashes.
+  for (const segment of name.split("/")) {
+    if (segment.length > maxPackNameSegment) {
+      throw new PublishRequestValidationError(
+        `Pack name segments may be at most ${maxPackNameSegment} characters.`,
+      );
+    }
+  }
+  if (name.includes("--")) {
+    throw new PublishRequestValidationError(
+      "Pack name may not contain consecutive dashes; use single dashes between words.",
+    );
+  }
+  if (!packNamePattern.test(name)) {
+    throw new PublishRequestValidationError(
+      "Pack name must be lowercase words separated by dashes, optionally scoped with one slash.",
+    );
+  }
+}
+
+export function isPublishablePackName(name: string) {
+  try {
+    assertPublishablePackName(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function normalizePublishRequestInput(
   input: PublishRequestInput,
 ): NormalizedPublishRequestInput {
@@ -30,11 +73,7 @@ export function normalizePublishRequestInput(
   }
 
   const requestedName = stringField(input.requestedName, "requestedName");
-  if (!packNamePattern.test(requestedName)) {
-    throw new PublishRequestValidationError(
-      "Pack name must be lowercase words separated by dashes, optionally scoped with one slash.",
-    );
-  }
+  assertPublishablePackName(requestedName);
 
   const requestedVersion = stringField(input.requestedVersion, "requestedVersion");
   if (!releaseVersionPattern.test(requestedVersion)) {

@@ -600,6 +600,23 @@ for (const lane of lanes) {
       expect((await store.pollCliDeviceCode(deniedPair.deviceCode)).status).toBe("denied");
     });
 
+    // Both impls normalize through normalizePublishRequestInput, so the name grammar is a store
+    // invariant on both lanes and not just a route check: `requested_name` is otherwise unbounded
+    // text, and one approved over-long name makes `gc` reject the entire catalog.
+    test("publish create refuses a pack name no registry client could parse", async () => {
+      const submitter = await store.ensureUser(identity());
+      await expect(
+        store.createPublishRequest(submitter.id, publishInput(`acme/${"a".repeat(65)}`), "web_session"),
+      ).rejects.toThrow(/64 characters/);
+      await expect(
+        store.createPublishRequest(submitter.id, publishInput("acme/twin--team"), "web_session"),
+      ).rejects.toThrow(/consecutive dashes/);
+      // The cap is per segment, not on the whole name: 64 + 64 is a legal scoped name.
+      const maxLength = `acme/${"a".repeat(64)}`;
+      const created = await store.createPublishRequest(submitter.id, publishInput(maxLength), "web_session");
+      expect(created.requestedName).toBe(maxLength);
+    });
+
     test("publish lifecycle: create -> validated -> approved is observable served state", async () => {
       const submitter = await store.ensureUser(identity());
       const admin = await store.ensureUser(identity({ assertedAdmin: true }));

@@ -35,6 +35,21 @@ describe("GitHub publish discovery", () => {
     expect(calls).toContain(`/repos/acme/packs/git/trees/${tree}?recursive=1`);
   });
 
+  // The fixture repo also holds pack.toml manifests named `legacy--pack` and a 65-character
+  // name. Both would 422 on submit, so offering them as importable candidates would send the
+  // publisher into a dead end — and the long one would brick every `gc` client if approved.
+  test("drops candidates whose manifest name is not publishable", async () => {
+    const result = await discoverGitHubPublishCandidates("github-token", {
+      fetchGitHub: async (apiPath) => githubResponse(apiPath),
+    });
+
+    expect(result.candidates.map((candidate) => candidate.pack.name)).toEqual([
+      "root-pack",
+      "demo-pack",
+    ]);
+    expect(result.candidates.map((candidate) => candidate.packPath)).not.toContain("packs/legacy");
+  });
+
   test("builds publish input from immutable candidate fields and editable metadata", () => {
     const candidate = candidateFixture({ version: undefined });
     const input = publishInputFromGitHubCandidate(candidate, {
@@ -143,6 +158,8 @@ function githubResponse(apiPath: string) {
         { path: "README.md", type: "blob" },
         { path: "pack.toml", type: "blob" },
         { path: "packs/demo/pack.toml", type: "blob" },
+        { path: "packs/legacy/pack.toml", type: "blob" },
+        { path: "packs/long/pack.toml", type: "blob" },
       ],
       truncated: false,
     });
@@ -154,6 +171,12 @@ function githubResponse(apiPath: string) {
     return contentResponse(
       '[pack]\nname = "demo-pack"\nversion = "0.2.0"\ndescription = "Demo pack."\n',
     );
+  }
+  if (apiPath === `/repos/acme/packs/contents/packs/legacy/pack.toml?ref=${commit}`) {
+    return contentResponse('[pack]\nname = "legacy--pack"\nversion = "0.1.0"\n');
+  }
+  if (apiPath === `/repos/acme/packs/contents/packs/long/pack.toml?ref=${commit}`) {
+    return contentResponse(`[pack]\nname = "${"a".repeat(65)}"\nversion = "0.1.0"\n`);
   }
   return jsonResponse({ message: "not found" }, 404);
 }

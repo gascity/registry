@@ -197,6 +197,7 @@ function mergeApprovedEntry(
   },
 ) {
   const name = requireString(entry?.name, "approved entry name");
+  assertClientParseablePackName(name);
   const release = entry?.release ?? ({} as PublishRegistryEntry["release"]);
   const version = requireString(release?.version, `${name} release version`);
   requireString(entry.description, `${name} description`);
@@ -352,6 +353,36 @@ function renderRegistryToml(packs: RuntimePack[]) {
     }
   }
   return `${lines.join("\n").trimEnd()}\n`;
+}
+
+// The grammar every `gc` client enforces: packNameRE plus the 64-character segment cap in
+// internal/packregistry/catalog.go. ValidateCatalog aborts on the FIRST offending name, so one
+// approved publish outside this grammar hides the entire catalog — every first-party pack
+// included — from every client. Re-checked here and not only at submit because approve never
+// re-runs normalizePublishRequestInput: a row queued before the submit grammar tightened, or
+// written by a backfill, would otherwise sail through every submit-path gate. Strict mode turns
+// this into a 409 at approve (assertPublishRequestCanMerge); the serve path is fail-soft, so it
+// drops the one offender instead of the catalog.
+//
+// Deliberately LOOSER than the submit grammar in server/publish.ts: this one must accept every
+// name already served, including grandfathered `a--b` and trailing-dash names. Tightening it to
+// match the submit grammar would evict an already-published pack.
+const clientPackNamePattern = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)?$/;
+const maxClientPackNameSegment = 64;
+
+function assertClientParseablePackName(name: string) {
+  for (const segment of name.split("/")) {
+    if (segment.length > maxClientPackNameSegment) {
+      throw new Error(
+        `approved entry name ${JSON.stringify(name)} has a segment longer than ${maxClientPackNameSegment} characters; registry clients reject the whole catalog on one bad name`,
+      );
+    }
+  }
+  if (!clientPackNamePattern.test(name)) {
+    throw new Error(
+      `approved entry name ${JSON.stringify(name)} is not a valid pack name; registry clients reject the whole catalog on one bad name`,
+    );
+  }
 }
 
 // A scoped name flattens with the same "/" -> "--" rule the generator and the SPA use

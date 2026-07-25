@@ -300,3 +300,59 @@ describe("handler serves a 200 catalog even with a poisoned approved entry", () 
     }
   });
 });
+
+// `gc` runs ValidateCatalog over the whole fetched registry.toml and returns on the FIRST bad
+// pack name, so an approved name outside the client grammar is not a one-pack problem: it hides
+// every pack, first-party included, from every client. Approve never re-runs
+// normalizePublishRequestInput, so this is the only layer that sees an already-queued row.
+describe("client-parseable approved entry names", () => {
+  const overLong = `acme/${"a".repeat(65)}`;
+
+  test("an over-long approved name is refused in strict mode", () => {
+    expect(() =>
+      renderCatalogJsonWithApprovedPublishes(baseJson, [approvedRow("prq_long", entry(overLong, "1.0.0"))]),
+    ).toThrow(/segment longer than 64 characters/);
+    expect(() =>
+      renderRegistryTomlWithApprovedPublishes(baseToml, [approvedRow("prq_long", entry(overLong, "1.0.0"))]),
+    ).toThrow(/segment longer than 64 characters/);
+  });
+
+  test("an over-long approved name is skipped fail-soft, keeping the rest of the catalog", () => {
+    const { issues, onIssue } = collectIssues();
+    const json = renderCatalogJsonWithApprovedPublishes(
+      baseJson,
+      [approvedRow("prq_long", entry(overLong, "1.0.0")), approvedRow("prq_ok", entry("acme/tool", "1.0.0"))],
+      { mode: "fail-soft", onIssue },
+    );
+    const parsed = JSON.parse(json) as { packs: Array<{ name: string }> };
+    expect(parsed.packs.map((pack) => pack.name)).toEqual(["acme/tool", "alpha"]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ kind: "entry", requestId: "prq_long" });
+  });
+
+  test("an approved name outside the client grammar is refused", () => {
+    for (const name of ["Bad Name", "a/b/c", "-lead", "acme/"]) {
+      expect(() =>
+        renderCatalogJsonWithApprovedPublishes(baseJson, [approvedRow("prq_bad", entry(name, "1.0.0"))]),
+      ).toThrow(/is not a valid pack name/);
+    }
+  });
+
+  // Deliberately looser than the submit grammar: these names predate it and are already served,
+  // and `gc` parses them fine. Evicting them here would be a self-inflicted outage.
+  //
+  // The two length cases pin the guard's semantics against the Go client, which caps each SEGMENT
+  // at 64 with no bound on the whole name. Without them, applying the cap per NAME, or an
+  // off-by-one to `>=`, both ship green — and either one evicts a served pack. This layer keeps
+  // its own copy of `64` precisely so it can diverge from the submit grammar, which is only safe
+  // while the copy is independently pinned here.
+  test("already-served names the submit grammar would reject still merge", () => {
+    for (const name of ["acme--tool", "acme-", "acme-/tool", "a".repeat(64), `acme/${"a".repeat(64)}`]) {
+      const json = renderCatalogJsonWithApprovedPublishes(baseJson, [
+        approvedRow("prq_legacy", entry(name, "1.0.0")),
+      ]);
+      const parsed = JSON.parse(json) as { packs: Array<{ name: string }> };
+      expect(parsed.packs.map((pack) => pack.name)).toContain(name);
+    }
+  });
+});

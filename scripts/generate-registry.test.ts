@@ -301,14 +301,63 @@ describe("ingest policy (skip-and-warn)", () => {
     expect(fetchCalls).toBe(0);
   });
 
-  it("skips a pack whose derived identity (pack_key/og filename) collides with another", async () => {
+  // Ingested names are bare, so two packs can only share a derived identity across sources:
+  // source `x--a` + pack `b` and source `x` + pack `a--b` both flatten to pack_key `x--a--b`.
+  // (The og-filename half of that check is unreachable for bare names — see the comment on it.)
+  it("skips a pack whose pack_key collides with another source's", async () => {
+    const first = await writeUpstream("x--a", catalogToml(packBlock("b", [releaseBlock("1.0")])));
+    const second = await writeUpstream("x", catalogToml(packBlock("a--b", [releaseBlock("1.0")])));
+    const { packs, warnings } = await aggregate([first, second]);
+    expect(packs.map((p) => p.name)).toEqual(["a--b"]);
+    expect(warnings.some((w) => w.scope === "collision")).toBe(true);
+  });
+
+  it("skips a scoped upstream pack name and keeps the rest of the source", async () => {
     const src = await writeUpstream(
-      "ident",
-      catalogToml(packBlock("a/b", [releaseBlock("1.0")]), packBlock("a--b", [releaseBlock("1.0")])),
+      "scoped",
+      catalogToml(
+        packBlock("alpha", [releaseBlock("1.0")]),
+        packBlock("wespd/cacc-twin-team", [releaseBlock("1.0")]),
+      ),
     );
     const { packs, warnings } = await aggregate([src]);
-    expect(packs).toHaveLength(1);
-    expect(warnings.some((w) => w.scope === "collision")).toBe(true);
+    expect(packs.map((p) => p.name)).toEqual(["alpha"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].scope).toBe("pack");
+    expect(warnings[0].reason).toMatch(/scoped pack names are not ingestable/i);
+  });
+
+  it("escalates to fatal when every declared pack is scoped", async () => {
+    const src = await writeUpstream("solo", catalogToml(packBlock("wespd/only", [releaseBlock("1.0")])));
+    await expect(aggregate([src])).rejects.toThrow(/all 1 declared pack\(s\) failed validation/);
+  });
+
+  it("skips an upstream pack name longer than 64 characters", async () => {
+    const src = await writeUpstream(
+      "long",
+      catalogToml(
+        packBlock("alpha", [releaseBlock("1.0")]),
+        packBlock("a".repeat(65), [releaseBlock("1.0")]),
+      ),
+    );
+    const { packs, warnings } = await aggregate([src]);
+    expect(packs.map((p) => p.name)).toEqual(["alpha"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].scope).toBe("pack");
+    expect(warnings[0].reason).toMatch(/invalid pack name/);
+  });
+
+  it("still ingests a bare name with consecutive dashes and a 64-character name", async () => {
+    const src = await writeUpstream(
+      "dashes",
+      catalogToml(
+        packBlock("a--b", [releaseBlock("1.0")]),
+        packBlock("a".repeat(64), [releaseBlock("1.0")]),
+      ),
+    );
+    const { packs, warnings } = await aggregate([src]);
+    expect(packs.map((p) => p.name)).toEqual(["a--b", "a".repeat(64)]);
+    expect(warnings).toEqual([]);
   });
 
   it("skips a release whose withdrawn is not a boolean", async () => {
@@ -517,13 +566,28 @@ describe("catalog reconstruction validators (readCatalogJson)", () => {
     await expect(readCatalogJson(file)).rejects.toThrow(/commit/);
   });
 
-  it("rejects packs whose names collide on the same og filename", async () => {
-    const file = await writeCatalog([jsonPack("a/b"), jsonPack("a--b")]);
-    await expect(readCatalogJson(file)).rejects.toThrow(/og file/);
+  // A committed catalog may only hold bare names: scoped names belong to the publish lane, and
+  // a scoped name here would mean `bun run generate` could never reproduce the artifact.
+  it("rejects a scoped pack name", async () => {
+    const file = await writeCatalog([jsonPack("wespd/cacc-twin-team")]);
+    await expect(readCatalogJson(file)).rejects.toThrow(/invalid pack name/);
+  });
+
+  it("rejects a pack name longer than 64 characters", async () => {
+    const file = await writeCatalog([jsonPack("a".repeat(65))]);
+    await expect(readCatalogJson(file)).rejects.toThrow(/invalid pack name/);
+  });
+
+  it("accepts a bare pack name of exactly 64 characters", async () => {
+    const file = await writeCatalog([jsonPack("a".repeat(64))]);
+    expect((await readCatalogJson(file)).packs.map((p) => p.name)).toEqual(["a".repeat(64)]);
   });
 
   it("rejects packs that share a pack_key across sources (distinct og filenames)", async () => {
-    const file = await writeCatalog([jsonPack("b", { registry: "x--a" }), jsonPack("a/b", { registry: "x" })]);
+    const file = await writeCatalog([
+      jsonPack("b", { registry: "x--a" }),
+      jsonPack("a--b", { registry: "x" }),
+    ]);
     await expect(readCatalogJson(file)).rejects.toThrow(/pack_key/);
   });
 

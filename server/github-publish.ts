@@ -3,7 +3,7 @@ import { parse } from "smol-toml";
 import { sha256 } from "./crypto";
 import { githubFetch } from "./github";
 import { RequestError } from "./http";
-import { normalizePackPath } from "./publish";
+import { isPublishablePackName, normalizePackPath } from "./publish";
 import type {
   GitHubPublishCandidate,
   GitHubPublishImportCreateInput,
@@ -97,7 +97,6 @@ const defaultMaxRepositories = 200;
 const defaultMaxCandidates = 100;
 const defaultMaxPackTomlBytes = 256 * 1024;
 const commitPattern = /^[0-9a-f]{40}$/;
-const packNamePattern = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)?$/;
 const releaseVersionPattern = /^[0-9]+\.[0-9]+(\.[0-9]+)?$/;
 
 export async function discoverGitHubPublishCandidates(
@@ -385,7 +384,9 @@ function packMetadataFromToml(text: string) {
     return undefined;
   }
   const name = stringValue(raw.pack?.name);
-  if (!name || !packNamePattern.test(name)) return undefined;
+  // The submit grammar, not a copy of it: a candidate whose name would 422 on submit must not be
+  // offered as an importable pack in the first place.
+  if (!name || !isPublishablePackName(name)) return undefined;
   const version = stringValue(raw.pack?.version);
   const description = stringValue(raw.pack?.description)?.slice(0, 240);
   return {

@@ -91,7 +91,15 @@ type RawJsonPack = {
 };
 
 const sourceNamePattern = /^[a-z0-9][a-z0-9-]*$/;
-const packNamePattern = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)?$/;
+// Ingested packs own the BARE half of the namespace; `owner/pack` is reserved for direct
+// publishes (server/publish.ts, whose grammar is bare-OR-scoped for exactly that reason).
+// Deliberately still permits `--`, because names already in public/registry.toml must keep
+// round-tripping through reconstructPack.
+const ingestedPackNamePattern = /^[a-z0-9][a-z0-9-]*$/;
+// Mirrors ValidatePackName in internal/packregistry/catalog.go: `gc` rejects a segment over
+// 64 characters and ValidateCatalog aborts on the FIRST bad name, so one over-long name here
+// hides every pack in the catalog from every client.
+const maxPackNameSegment = 64;
 const releaseVersionPattern = /^[0-9]+\.[0-9]+(\.[0-9]+)?$/;
 const commitPattern = /^[0-9a-f]{40}$/;
 const hashPattern = /^sha256:[0-9a-f]{64}$/;
@@ -198,26 +206,28 @@ export async function aggregateSources(
 
   packs.sort((a, b) => compareByCodepoint(a.name, b.name));
 
-  // Distinct pack names can still collide on a derived identity: pack_key
-  // (`${registry}--${name/→--}`) or og filename (`${name/→--}.svg`). Keeping both would
-  // duplicate a catalog identity (pack_key drives reviews/ownership) or overwrite one og
-  // image. Keep the first in canonical order, skip later colliders with a warning.
+  // Distinct pack names can still collide on pack_key (`${registry}--${name/→--}`), which drives
+  // reviews and ownership — source `x--a` + pack `b` and source `x` + pack `a--b` both flatten to
+  // `x--a--b`. Keep the first in canonical order, skip later colliders with a warning.
+  //
+  // There is no og-filename check here on purpose. Ingested names are bare, so `packOgFilename` is
+  // the name plus a suffix and therefore injective, and equal names are already rejected by the
+  // cross-source dedupe above — so such a branch could never fire. A future scoped-ingest lane
+  // will need one, and will need to decide then whether to reject at ingest or skip fail-soft.
   const keyOwners = new Map<string, string>();
-  const ogOwners = new Map<string, string>();
   const unique: CatalogPack[] = [];
   for (const pack of packs) {
-    const collidesWith = keyOwners.get(packKeyFor(pack)) ?? ogOwners.get(packOgFilename(pack.name));
+    const collidesWith = keyOwners.get(packKeyFor(pack));
     if (collidesWith) {
       emit({
         scope: "collision",
         source: pack.registry,
         pack: pack.name,
-        reason: `derived identity (pack_key or og filename) collides with ${JSON.stringify(collidesWith)}; skipping`,
+        reason: `pack_key collides with ${JSON.stringify(collidesWith)}; skipping`,
       });
       continue;
     }
     keyOwners.set(packKeyFor(pack), pack.name);
-    ogOwners.set(packOgFilename(pack.name), pack.name);
     unique.push(pack);
   }
 
@@ -386,8 +396,19 @@ function normalizePack(
   emit: (warning: IngestWarning) => void,
 ): CatalogPack {
   const name = requireString(raw.name, `${registry}.pack.name`);
-  if (!packNamePattern.test(name)) {
-    throw new Error(`${registry}: invalid pack name ${JSON.stringify(name)}`);
+  // A scoped upstream name would not merely squat a publish claim, it would WIN it:
+  // mergeApprovedEntry refuses an approved publish that collides with a base pack, so the served
+  // pack would keep the name while pointing at the upstream source. It gets its own greppable
+  // reason because stderr and GITHUB_STEP_SUMMARY are the only channels watching the hourly
+  // refresh. Either throw is demoted to a per-pack skip-and-warn by normalizeCatalog — one bad
+  // entry must not freeze the refresh of every other pack — and a source whose packs ALL fail
+  // still escalates to fatal via the wipe guard in aggregateSources.
+  if (!ingestedPackNamePattern.test(name) || name.length > maxPackNameSegment) {
+    throw new Error(
+      name.includes("/")
+        ? `${registry}: scoped pack names are not ingestable; ${JSON.stringify(name)} belongs to the publish namespace`
+        : `${registry}: invalid pack name ${JSON.stringify(name)}`,
+    );
   }
 
   const sourceKind = requireString(raw.source_kind, `${registry}.${name}.source_kind`);
@@ -904,21 +925,14 @@ export async function readCatalogJson(path: URL): Promise<{ packs: CatalogPack[]
   const packs = rawPacks.map((rawPack) => reconstructPack(rawPack as RawJsonPack));
 
   const seenNames = new Set<string>();
-  const ogOwners = new Map<string, string>();
   const keyOwners = new Map<string, string>();
   for (const pack of packs) {
     if (seenNames.has(pack.name)) {
       throw new Error(`catalog.json: duplicate pack ${JSON.stringify(pack.name)}`);
     }
     seenNames.add(pack.name);
-    const ogFile = packOgFilename(pack.name);
-    const ogOwner = ogOwners.get(ogFile);
-    if (ogOwner) {
-      throw new Error(
-        `catalog.json: packs ${JSON.stringify(ogOwner)} and ${JSON.stringify(pack.name)} both map to og file ${ogFile}`,
-      );
-    }
-    ogOwners.set(ogFile, pack.name);
+    // No og-filename check: reconstructPack accepts bare names only, so the og filename is the
+    // name plus a suffix and the duplicate-name throw above already covers it.
     const packKey = packKeyFor(pack);
     const keyOwner = keyOwners.get(packKey);
     if (keyOwner) {
@@ -935,7 +949,9 @@ export async function readCatalogJson(path: URL): Promise<{ packs: CatalogPack[]
 function reconstructPack(raw: RawJsonPack): CatalogPack {
   const registry = requireString(raw.registry, "catalog.json pack.registry");
   const name = requireString(raw.name, "catalog.json pack.name");
-  if (!packNamePattern.test(name)) {
+  // Same grammar as normalizePack, or the offline check would either bless an artifact ingest
+  // could never emit, or reject one it could.
+  if (!ingestedPackNamePattern.test(name) || name.length > maxPackNameSegment) {
     throw new Error(`catalog.json: invalid pack name ${JSON.stringify(name)}`);
   }
 
