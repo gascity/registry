@@ -7,12 +7,21 @@ import { expectHealthyPage, trackRuntimeErrors } from "./runtimeErrors";
 
 const commit = "c".repeat(40);
 
-// Each test uses its OWN source repo (derived from its unique pack name). The harness runs a
+// Every direct publish is SCOPED `owner/pack`, where owner is the GitHub owner of the source repo
+// (all fixture repos live under `e2e-fixture`). An unscoped name is reserved and would be refused
+// at approve with PUBLISH_NAME_RESERVED.
+const scope = "e2e-fixture";
+
+// Each test uses its OWN source repo (derived from its unique pack slug). The harness runs a
 // single shared store across all parallel workers, and pack ownership is keyed per-repo — so a
 // shared repo makes concurrent seed-ownership calls clobber one another's verified owner,
 // spuriously tripping the approval gate on whichever test approves second.
-function repoUrlFor(name: string) {
-  return `https://github.com/e2e-fixture/${name}`;
+function repoUrlFor(slug: string) {
+  return `https://github.com/${scope}/${slug}`;
+}
+
+function packNameFor(slug: string) {
+  return `${scope}/${slug}`;
 }
 
 async function submitPublishRequest(page: Page, name: string, repoUrl: string) {
@@ -72,8 +81,9 @@ test("web publish: claim-only submit -> ownership gate -> override approve -> se
   // No expectHealthyPage here: this test deliberately triggers a 403, which Chromium logs
   // to the console as a failed-resource error.
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;
-  const name = `e2e-loop-${stamp}`;
-  const repoUrl = repoUrlFor(name);
+  const slug = `e2e-loop-${stamp}`;
+  const name = packNameFor(slug);
+  const repoUrl = repoUrlFor(slug);
 
   await page.goto(`/api/dev/sign-in?handle=pub-${stamp}&redirect=/account`);
   const submitted = await submitPublishRequest(page, name, repoUrl);
@@ -106,8 +116,9 @@ test("web publish: claim-only submit -> ownership gate -> override approve -> se
 test("web publish: verified ownership approves without an override", async ({ page }, testInfo) => {
   const errors = trackRuntimeErrors(page);
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;
-  const name = `e2e-owned-${stamp}`;
-  const repoUrl = repoUrlFor(name);
+  const slug = `e2e-owned-${stamp}`;
+  const name = packNameFor(slug);
+  const repoUrl = repoUrlFor(slug);
 
   await page.goto(`/api/dev/sign-in?handle=owner-${stamp}&redirect=/account`);
   expect(await seedOwnership(page, repoUrl)).toBe(201); // the dev ownership seam binds this user to the repo
@@ -130,8 +141,9 @@ test("web publish: reject terminates the request and never serves the pack", asy
   // No expectHealthyPage: the approve-after-reject probe deliberately triggers a 4xx, which
   // Chromium logs to the console.
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;
-  const name = `e2e-reject-${stamp}`;
-  const repoUrl = repoUrlFor(name);
+  const slug = `e2e-reject-${stamp}`;
+  const name = packNameFor(slug);
+  const repoUrl = repoUrlFor(slug);
 
   await page.goto(`/api/dev/sign-in?handle=pub-${stamp}&redirect=/account`);
   const submitted = await submitPublishRequest(page, name, repoUrl);
@@ -171,8 +183,9 @@ test("web publish: staff withdraw takes an approved pack off the served catalog"
   // No expectHealthyPage: the terminal re-validate probe deliberately triggers a 4xx, which
   // Chromium logs to the console.
   const stamp = `${Date.now()}-${testInfo.workerIndex}`;
-  const name = `e2e-withdraw-${stamp}`;
-  const repoUrl = repoUrlFor(name);
+  const slug = `e2e-withdraw-${stamp}`;
+  const name = packNameFor(slug);
+  const repoUrl = repoUrlFor(slug);
 
   await page.goto(`/api/dev/sign-in?handle=owner-${stamp}&redirect=/account`);
   expect(await seedOwnership(page, repoUrl)).toBe(201);

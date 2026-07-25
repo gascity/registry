@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import postgres, { type ISql, type Sql } from "postgres";
 import { hashCliDeviceCode, hashCliUserCode, normalizeCliUserCode } from "./cli-auth";
 import { randomToken, sha256 } from "./crypto";
-import { normalizePublishRequestInput } from "./publish";
+import { normalizePublishRequestInput, packNameScope } from "./publish";
 import { generateApiToken, hashApiToken } from "./tokens";
 import type {
   AccountReview,
@@ -25,6 +25,7 @@ import type {
   PublishRequestRow,
   PublishSourceIdentity,
   PublishSubmissionMethod,
+  PublishWithdrawOptions,
   PublicUser,
   RegistryStore,
   ReviewInput,
@@ -333,12 +334,6 @@ function publishRequestFromRows(row: any, user: PublicUser): PublishRequestRow {
   };
 }
 
-// The scope segment of a pack name (`acme` of `acme/tools`); undefined for a bare name.
-function packNameScope(name: string) {
-  const [scope, rest] = name.split("/");
-  return rest ? scope : undefined;
-}
-
 // The durable binding a name claim records, derived from the approved publish request that
 // earns it. Comes from the request's own columns, so it holds for direct publishes too (which
 // have no pack_ownerships row and structurally cannot). Each store stamps its own timestamps.
@@ -354,6 +349,32 @@ function nameClaimBindingFromPublishRequest(
     githubOwnerLogin: request.repository.owner,
     claimedByUserId: request.submittedBy.id,
     sourceRequestId: request.id,
+  };
+}
+
+// Releasing a BARE name's claim can only ever cause harm, so it is refused outright. Bare names
+// are reserved: the publish gate admits one only when a claim already exists, and nothing can mint
+// a bare claim afterwards (the backfill needs an approved request, approve is gate-blocked, and a
+// re-pin needs a claim to move). So releasing one does not return the name to a usable pool — it
+// makes the name permanently unpublishable, recoverable only by hand-editing the database.
+function assertNameClaimReleasable(name: string) {
+  if (!packNameScope(name)) {
+    throw new StoreValidationError(
+      "Unscoped pack names stay reserved; releasing the claim would make the name permanently unpublishable.",
+    );
+  }
+}
+
+// The binding fields of a claim, for an audit record of a re-pin or a release. Timestamps are
+// dropped: the audit row carries its own, and the claim's are not what moved.
+function nameClaimAuditBinding(claim: Omit<PackNameClaim, "createdAt" | "updatedAt">) {
+  return {
+    repoFullName: claim.repoFullName,
+    githubRepositoryId: claim.githubRepositoryId,
+    githubOwnerId: claim.githubOwnerId,
+    githubOwnerLogin: claim.githubOwnerLogin,
+    claimedByUserId: claim.claimedByUserId,
+    sourceRequestId: claim.sourceRequestId,
   };
 }
 
@@ -1849,8 +1870,10 @@ export class PostgresRegistryStore implements RegistryStore {
         RETURNING id
       `;
       if (!approvedRow) return false;
-      // First approval of this name mints the claim; a name already on file is only reported
-      // as matched — the claim is never re-pointed here (enforcing the match is a later slice).
+      // First approval of this name mints the claim. A name already on file is normally only
+      // reported as matched (the merge gate has already proved the request belongs to the claim);
+      // it is re-pointed here ONLY under an explicit staff namePinOverrideReason, which is the
+      // audited repo-migration path.
       const claim = nameClaimBindingFromPublishRequest(current);
       const claimed = await sql`
         INSERT INTO pack_name_claims (
@@ -1865,6 +1888,31 @@ export class PostgresRegistryStore implements RegistryStore {
         ON CONFLICT (name) DO NOTHING
         RETURNING name
       `;
+      let namePin: NonNullable<PublishApprovalDecision["namePin"]> =
+        claimed.length > 0 ? "created" : "matched";
+      let previousBinding: PackNameClaim | undefined;
+      if (namePin === "matched" && options?.namePinOverrideReason) {
+        // Read the outgoing binding first (FOR UPDATE, inside this transaction) so the audit row
+        // can reconstruct exactly what moved from where to where.
+        const [before] = await sql`
+          SELECT * FROM pack_name_claims WHERE name = ${claim.name} FOR UPDATE
+        `;
+        if (before) {
+          previousBinding = nameClaimFromRow(before as any);
+          await sql`
+            UPDATE pack_name_claims
+            SET repo_full_name = ${claim.repoFullName},
+                github_repository_id = ${claim.githubRepositoryId ?? null},
+                github_owner_id = ${claim.githubOwnerId ?? null},
+                github_owner_login = ${claim.githubOwnerLogin},
+                claimed_by_user_id = ${claim.claimedByUserId ?? null},
+                source_request_id = ${claim.sourceRequestId ?? null},
+                updated_at = now()
+            WHERE name = ${claim.name}
+          `;
+          namePin = "repinned";
+        }
+      }
       await this.audit(
         actorUserId,
         "publish_request.approve",
@@ -1881,7 +1929,12 @@ export class PostgresRegistryStore implements RegistryStore {
           // org_member / override) — recorded because org_member is live-synced and can
           // change post-approval.
           ownershipBasis: options?.ownershipBasis,
-          namePin: claimed.length > 0 ? "created" : "matched",
+          namePin,
+          // Re-pin forensics: the justification plus both ends of the move, so the audit alone
+          // answers "who moved this name off which repo, and onto which".
+          namePinOverrideReason: namePin === "repinned" ? options?.namePinOverrideReason : undefined,
+          namePinFrom: previousBinding ? nameClaimAuditBinding(previousBinding) : undefined,
+          namePinTo: namePin === "repinned" ? nameClaimAuditBinding(claim) : undefined,
         },
         sql,
       );
@@ -1926,26 +1979,67 @@ export class PostgresRegistryStore implements RegistryStore {
     actorUserId: string,
     id: string,
     reason: string,
+    options?: PublishWithdrawOptions,
   ): Promise<PublishRequestRow> {
     const cleanReason = normalizeStatusReason(reason, "Withdrawn by registry staff.");
-    // Only an approved (currently-served) request can be withdrawn; atomic so it can't race a
-    // concurrent re-approve. registry_entry is intentionally KEPT as takedown evidence + input
-    // to the post-withdraw version-conflict guard.
-    const [row] = await this.sql`
-      UPDATE pack_publish_requests
-      SET status = 'withdrawn',
-          status_reason = ${cleanReason},
-          reviewed_by_user_id = ${actorUserId},
-          reviewed_at = now(),
-          updated_at = now()
-      WHERE id = ${id}
-        AND status = 'approved'
-      RETURNING id
-    `;
-    if (!row) throw await this.publishRequestActionError(id, "withdrawn");
-    await this.audit(actorUserId, "publish_request.withdraw", "publish_request", id, {
-      reason: cleanReason,
+    // One transaction for the status flip, the optional claim release and the audit rows: an
+    // operator who asked to free the name must not end up with a takedown and a stale claim (or
+    // the reverse). Only an approved (currently-served) request can be withdrawn, and the UPDATE
+    // is atomic on that state so it can't race a concurrent re-approve. registry_entry is
+    // intentionally KEPT as takedown evidence + input to the post-withdraw version guard.
+    const withdrawn = await this.sql.begin(async (sql) => {
+      const [row] = await sql`
+        UPDATE pack_publish_requests
+        SET status = 'withdrawn',
+            status_reason = ${cleanReason},
+            reviewed_by_user_id = ${actorUserId},
+            reviewed_at = now(),
+            updated_at = now()
+        WHERE id = ${id}
+          AND status = 'approved'
+        RETURNING id, requested_name
+      `;
+      if (!row) return false;
+      const name = String(row.requested_name);
+      let released: PackNameClaim | undefined;
+      if (options?.releaseNameClaim) {
+        assertNameClaimReleasable(name);
+        // Refuse while any OTHER approved release of this name is still served. Two reasons, both
+        // load-bearing. (1) The delete is keyed by name alone, so releasing here would drop the
+        // claim protecting a sibling release — possibly one a staff re-pin deliberately moved to a
+        // different repo — leaving a live, served name unclaimed and re-claimable. (2) init()'s
+        // grandfather backfill re-mints a claim for any name that still has an approved request,
+        // so the release would silently revert on the next boot, pinned to the FIRST-approved repo:
+        // a squatter's binding restored, with no audit row for the reversion.
+        const [survivor] = await sql`
+          SELECT 1 FROM pack_publish_requests
+          WHERE requested_name = ${name} AND status = 'approved' AND id <> ${id}
+          LIMIT 1
+        `;
+        if (survivor) {
+          throw new StoreValidationError(
+            "Cannot release the name claim while another approved release of this name is still served.",
+          );
+        }
+        const [deleted] = await sql`DELETE FROM pack_name_claims WHERE name = ${name} RETURNING *`;
+        if (deleted) released = nameClaimFromRow(deleted as any);
+      }
+      await this.audit(
+        actorUserId,
+        "publish_request.withdraw",
+        "publish_request",
+        id,
+        {
+          reason: cleanReason,
+          // Only present on a deliberate unclaim, and it records the binding that was dropped —
+          // the name returns to unclaimed, so this row is the only record of who used to hold it.
+          releasedNameClaim: released ? { name, ...nameClaimAuditBinding(released) } : undefined,
+        },
+        sql,
+      );
+      return true;
     });
+    if (!withdrawn) throw await this.publishRequestActionError(id, "withdrawn");
     const request = await this.getPublishRequest(id);
     if (!request) throw new Error("Publish request not found after withdrawal.");
     return request;
@@ -2817,13 +2911,14 @@ class FileRegistryStore implements RegistryStore {
     return next;
   }
 
-  // The file store keeps no audit_logs (dev/test backend), so the ownership-override
-  // reason is accepted for interface parity but not persisted — the Postgres backend
-  // is the auditable system of record.
+  // The file store keeps no audit_logs (dev/test backend), so the ownership-override reason and
+  // the resulting namePin are not recorded anywhere — the Postgres backend is the auditable
+  // system of record. The claim EFFECTS of the decision (mint / leave / re-point) do apply here,
+  // because those are state the gate reads back.
   async approvePublishRequest(
     actorUserId: string,
     id: string,
-    _options?: PublishApprovalDecision,
+    options?: PublishApprovalDecision,
   ) {
     const request = this.requirePublishRequest(id);
     if (!request.registryEntry || request.status !== "pending_review") {
@@ -2841,12 +2936,20 @@ class FileRegistryStore implements RegistryStore {
       updatedAt: now,
     };
     this.publishRequests.set(id, next);
-    // Mirrors the Postgres claim upsert: mint on first approval of the name, leave an existing
-    // claim exactly as it is (a matched name is never re-pointed here).
-    if (!this.nameClaims.has(next.requestedName)) {
+    // Mirrors the Postgres claim upsert: mint on first approval of the name, and otherwise leave
+    // an existing claim exactly as it is UNLESS staff supplied a namePinOverrideReason, which
+    // re-points it (keeping the original createdAt — the claim's identity is the name).
+    const existing = this.nameClaims.get(next.requestedName);
+    if (!existing) {
       this.nameClaims.set(next.requestedName, {
         ...nameClaimBindingFromPublishRequest(next),
         createdAt: now,
+        updatedAt: now,
+      });
+    } else if (options?.namePinOverrideReason) {
+      this.nameClaims.set(next.requestedName, {
+        ...nameClaimBindingFromPublishRequest(next),
+        createdAt: existing.createdAt,
         updatedAt: now,
       });
     }
@@ -2875,7 +2978,12 @@ class FileRegistryStore implements RegistryStore {
     return next;
   }
 
-  async withdrawPublishRequest(actorUserId: string, id: string, reason: string) {
+  async withdrawPublishRequest(
+    actorUserId: string,
+    id: string,
+    reason: string,
+    options?: PublishWithdrawOptions,
+  ) {
     const request = this.requirePublishRequest(id);
     if (request.status !== "approved") {
       // Same message as the Postgres lane (publishRequestActionError) so the two stores are
@@ -2884,6 +2992,23 @@ class FileRegistryStore implements RegistryStore {
     }
     const reviewer = this.users.get(actorUserId);
     if (!reviewer) throw new Error("Reviewer not found.");
+    // Both release guards run BEFORE anything mutates, mirroring the Postgres lane where they sit
+    // inside the withdraw transaction: a refused release must leave the request served, not take it
+    // down and then fail. See assertNameClaimReleasable and the Postgres survivor check for why.
+    if (options?.releaseNameClaim) {
+      assertNameClaimReleasable(request.requestedName);
+      const survivor = [...this.publishRequests.values()].some(
+        (other) =>
+          other.id !== id &&
+          other.requestedName === request.requestedName &&
+          other.status === "approved",
+      );
+      if (survivor) {
+        throw new StoreValidationError(
+          "Cannot release the name claim while another approved release of this name is still served.",
+        );
+      }
+    }
     const now = new Date().toISOString();
     const next: PublishRequestRow = {
       ...request,
@@ -2895,6 +3020,9 @@ class FileRegistryStore implements RegistryStore {
       // registryEntry intentionally kept as takedown evidence + version-conflict-guard input.
     };
     this.publishRequests.set(id, next);
+    // Mirrors the Postgres lane's single-transaction takedown: an opt-in release drops the name's
+    // claim in the same step, returning the name to unclaimed.
+    if (options?.releaseNameClaim) this.nameClaims.delete(next.requestedName);
     await this.save();
     return next;
   }

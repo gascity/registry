@@ -36,6 +36,19 @@ http://127.0.0.1:5173/api/dev/sign-in?handle=alice     # a plain user
 
 ## 2. Web form: publish → moderate
 
+**Pack names are partitioned.** Ingested (first-party) packs are bare-named; every direct publish
+must be **scoped** `owner/pack`, where `owner` is the lowercase GitHub owner of the source repo.
+Approving anything else is refused:
+
+- `403 PUBLISH_NAME_RESERVED` — an unscoped name with no existing claim. There is no override;
+  first-party packs arrive through `sources.toml` ingest, not through publish.
+- `403 PUBLISH_SCOPE_MISMATCH` — the scope segment is not the source repo's owner.
+- `409 PUBLISH_NAME_OWNER_MISMATCH` — the name is already claimed by a different repo. Releases
+  must come from the claimed repo; staff can re-point the claim with a **Name re-pin reason**
+  (`namePinOverrideReason`), which is audited with the old and new binding.
+
+So while testing, publish `alice/my-pack` from `github.com/alice/anything`, not `my-pack`.
+
 1. Open `/publish`.
    - **Find packs from GitHub** (recommended) is repo-proven — it approves straight through.
    - **Manual publish request** is *claim-only* — it needs verified ownership or a staff
@@ -65,7 +78,12 @@ http://127.0.0.1:5173/api/dev/sign-in?handle=alice     # a plain user
      is served again.
    - Re-publishing the **same `name@version` with different provenance** (changed commit / hash /
      ref) is refused at approve with `409 PUBLISH_VERSION_WITHDRAWN` — a takedown can't be quietly
-     overwritten with swapped bits.
+     overwritten with swapped bits. This guard is scoped to the withdrawn release's **lineage**
+     (same source repo, or same submitter), so a hostile publish-then-takedown cannot burn a
+     version number for the repo that actually owns the name.
+   - Withdraw also takes an optional `releaseNameClaim` flag, which unclaims the pack name in the
+     same transaction. Use it only to free a squatted name — a content takedown should leave the
+     name pinned to the repo that owns it.
 
 ## 3. CLI: `gc pack registry publish`
 
@@ -160,6 +178,9 @@ finds the real problem fastest):
       link) — ownership verification would still work, since that path only needs Metadata.
 - [ ] **Publish (web) — manual/claim** — *Manual publish request* (claim-only). Confirm it shows
       `pending_review`, or `validation_failed` with a reason (HTTP is still `201` — read the label).
+- [ ] **Namespace** — a scoped name matching the source repo's owner (`alice/my-pack` from
+      `github.com/alice/...`) approves; an unscoped name is refused `PUBLISH_NAME_RESERVED`, and a
+      foreign scope is refused `PUBLISH_SCOPE_MISMATCH`. Neither is overridable.
 - [ ] **Verify ownership (Trust tab)** — open a published pack → **Trust** tab → verify via GitHub
       (hits `/api/ownership/github/start`; needs the App's **Metadata: Read** and you being repo
       **admin**). A claim-only request from a verified owner then approves **without** a staff

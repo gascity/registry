@@ -11,6 +11,15 @@ const commitPattern = /^[0-9a-f]{40}$/;
 const safePathPattern = /^[A-Za-z0-9._/@+-]+$/;
 const safeRefPattern = /^[A-Za-z0-9._/@+-]+$/;
 
+// The scope segment of a pack name (`acme` of `acme/tools`); undefined for a bare name. The
+// grammar above allows at most one slash, so a name carries either exactly one scope or none —
+// which is what partitions the namespace: bare names are reserved, scoped names belong to the
+// GitHub owner they are named for.
+export function packNameScope(name: string) {
+  const [scope, rest] = name.split("/");
+  return rest ? scope : undefined;
+}
+
 export function normalizePublishRequestInput(
   input: PublishRequestInput,
 ): NormalizedPublishRequestInput {
