@@ -201,8 +201,9 @@ export type VerifiedPackOwnershipInput = {
 // Durable binding of a pack name to the repo/owner that first published it, written when a
 // publish request for a previously unclaimed name is approved. Names are global and permanent
 // once served, so the first approval is what every later release of that name is measured
-// against. Distinct from PackOwnership, which is keyed per catalog pack_key + immutable
-// source_url and so cannot represent a direct publish (whose sourceUrl moves every release).
+// against. Distinct from PackOwnership, which is keyed per catalog pack_key and records who
+// PROVED control of the source repo (the Trust-tab badge); this row records which repo a NAME
+// belongs to, and it is the only one of the two the merge gate consults.
 export type PackNameClaim = {
   name: string;
   // The `acme` of `acme/tools`; absent for a legacy bare name.
@@ -402,13 +403,24 @@ export interface RegistryStore {
   }>;
   listAccountReviews(userId: string): Promise<AccountReview[]>;
   setStar(userId: string, packKey: string, starred: boolean): Promise<{ starred: boolean }>;
-  getPackOwnership(packKey: string, sourceUrl: string): Promise<PackOwnership | null>;
-  // True when `userId` personally proved control of `repoFullName` — i.e. a verified
-  // pack-ownership row exists for that repo whose verified_by_user_id is this user.
-  // Binds per-repo + per-user (NOT org-wide publisher membership), and matches on repo
-  // identity rather than the commit-bearing publish sourceUrl, so it authorizes new
-  // releases from a repo the submitter themselves onboarded.
-  hasVerifiedRepoOwnership(userId: string, repoFullName: string): Promise<boolean>;
+  // The ownership row for a catalog pack_key, or null while the pack is unverified. Keyed by
+  // pack_key ALONE: source_url is a stored descriptive column that legitimately moves (a direct
+  // pack's catalog `source` is frozen at its earliest approved release, so withdrawing that
+  // release re-creates the pack at a different commit), and putting a mutable string in the
+  // read predicate could only ever hide a live row. Callers that care which repository the row
+  // belongs to compare `sourceRepository` themselves.
+  getPackOwnership(packKey: string): Promise<PackOwnership | null>;
+  // The GitHub numeric repository id `userId` personally proved control of for `repoFullName` —
+  // i.e. a verified pack-ownership row exists for that repo whose verified_by_user_id is this
+  // user — or null when they proved nothing. Binds per-repo + per-user (NOT org-wide publisher
+  // membership), and matches on repo identity rather than the commit-bearing publish sourceUrl, so
+  // it authorizes new releases from a repo the submitter themselves onboarded.
+  //
+  // Returns the ID rather than a boolean because the merge gate needs both halves of the proof:
+  // that SOMETHING was proven, and WHICH repo it was. github_repository_full_name is mutable (a
+  // rename or a delete-and-recreate moves it), so a row that matches the name is not on its own
+  // proof that the caller controls the repo a name claim is PINNED to.
+  verifiedRepoOwnershipRepositoryId(userId: string, repoFullName: string): Promise<string | null>;
   // True when the user's last login carried a trusted registry-member assertion
   // (users.org_member, live-synced by ensureUser). Read by the publish merge gate.
   isOrgMember(userId: string): Promise<boolean>;

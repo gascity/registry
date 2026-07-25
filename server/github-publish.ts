@@ -3,7 +3,7 @@ import { parse } from "smol-toml";
 import { sha256 } from "./crypto";
 import { githubFetch } from "./github";
 import { RequestError } from "./http";
-import { isPublishablePackName, normalizePackPath } from "./publish";
+import { isPublishablePackName, isPublishableReleaseVersion, normalizePackPath } from "./publish";
 import type {
   GitHubPublishCandidate,
   GitHubPublishImportCreateInput,
@@ -97,7 +97,6 @@ const defaultMaxRepositories = 200;
 const defaultMaxCandidates = 100;
 const defaultMaxPackTomlBytes = 256 * 1024;
 const commitPattern = /^[0-9a-f]{40}$/;
-const releaseVersionPattern = /^[0-9]+\.[0-9]+(\.[0-9]+)?$/;
 
 export async function discoverGitHubPublishCandidates(
   accessToken: string,
@@ -391,7 +390,7 @@ function packMetadataFromToml(text: string) {
   const description = stringValue(raw.pack?.description)?.slice(0, 240);
   return {
     name,
-    version: version && releaseVersionPattern.test(version) ? version : undefined,
+    version: version && isPublishableReleaseVersion(version) ? version : undefined,
     description,
   };
 }

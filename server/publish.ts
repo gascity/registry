@@ -15,7 +15,13 @@ const packNamePattern = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)?$/;
 // characters and ValidateCatalog aborts on the FIRST bad name, so a single over-long approved
 // name would hide the whole catalog — all 15 first-party packs included — from every client.
 const maxPackNameSegment = 64;
-const releaseVersionPattern = /^[0-9]+\.[0-9]+(\.[0-9]+)?$/;
+// ONE canonical spelling per version, because several security-relevant lookups key on this string
+// as bytes: H4's withdrawn-version guard (server/app.ts), the requested_version match in
+// listWithdrawnPublishRequestsForVersion, and the isSamePublishRequest dedup key. Admitting both
+// arities and leading zeros let a taken-down `0.1.0` re-land as `0.1`, `0.01.0` or `00.1.0` — three
+// distinct strings that compareVersions (server/aggregate.ts) then calls equal, so the catalog
+// served the withdrawn commit again and the machine gate stayed quiet.
+const releaseVersionPattern = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const commitPattern = /^[0-9a-f]{40}$/;
 const safePathPattern = /^[A-Za-z0-9._/@+-]+$/;
 const safeRefPattern = /^[A-Za-z0-9._/@+-]+$/;
@@ -110,6 +116,12 @@ export function assertPublishablePackName(name: string) {
   }
 }
 
+// The submit grammar for a release version, exported for the same reason isPublishablePackName is:
+// the import discovery path must not offer a candidate whose version would 422 on submit.
+export function isPublishableReleaseVersion(version: string) {
+  return releaseVersionPattern.test(version);
+}
+
 export function isPublishablePackName(name: string) {
   try {
     assertPublishablePackName(name);
@@ -133,7 +145,9 @@ export function normalizePublishRequestInput(
 
   const requestedVersion = stringField(input.requestedVersion, "requestedVersion");
   if (!releaseVersionPattern.test(requestedVersion)) {
-    throw new PublishRequestValidationError("Version must be semver major.minor[.patch].");
+    throw new PublishRequestValidationError(
+      "Version must be semver major.minor.patch with no leading zeros.",
+    );
   }
 
   const packPath = normalizePackPath(input.packPath);
