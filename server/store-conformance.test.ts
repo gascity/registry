@@ -765,7 +765,7 @@ for (const lane of lanes) {
       expect(failed.registryEntry).toBeUndefined();
     });
 
-    test("submitter-scoped dedup: idempotent re-submit, conflict on divergence, per-submitter", async () => {
+    test("submitter-scoped dedup: idempotent re-submit, supersede on divergence, per-submitter", async () => {
       const a = await store.ensureUser(identity());
       const b = await store.ensureUser(identity());
       const name = uid("pack");
@@ -774,14 +774,167 @@ for (const lane of lanes) {
       const again = await store.createPublishRequest(a.id, publishInput(name), "web_session");
       expect(again.id).toBe(first.id); // idempotent for the same submitter + identical input
 
-      // Same submitter, same name+version, different commit -> conflict.
-      await expect(
-        store.createPublishRequest(a.id, publishInput(name, { commit: "c".repeat(40) }), "web_session"),
-      ).rejects.toBeInstanceOf(StoreConflictError);
+      // Same submitter, same name+version, different commit -> the submitter's own pending row is
+      // superseded and a fresh one lands. Previously a hard 409 with no way out.
+      const corrected = await store.createPublishRequest(
+        a.id,
+        publishInput(name, { commit: "c".repeat(40) }),
+        "web_session",
+      );
+      expect(corrected.id).not.toBe(first.id);
+      expect(corrected.status).toBe("pending_validation");
 
       // A different submitter with identical input gets a distinct row.
       const other = await store.createPublishRequest(b.id, publishInput(name), "web_session");
       expect(other.id).not.toBe(first.id);
+    });
+
+    // (d) Self-supersede. Each case names the mutation it kills, because the whole point of this
+    // block is that a submitter can correct a mistake without a staff round-trip while an
+    // already-SERVED release still cannot be swapped under a version clients have pinned.
+    test("supersede: a divergent resubmit closes the submitter's own pending_review row", async () => {
+      const submitter = await store.ensureUser(identity());
+      const name = uid("pack");
+      const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      await store.markPublishRequestValidated(first.id, entry(name));
+      expect((await store.getPublishRequest(first.id))?.status).toBe("pending_review");
+
+      const second = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { commit: "c".repeat(40) }),
+        "web_session",
+      );
+      expect(second.id).not.toBe(first.id);
+
+      const closed = await store.getPublishRequest(first.id);
+      expect(closed?.status).toBe("rejected");
+      // Names the superseder, so status_reason alone answers "replaced by what?" on all three
+      // status surfaces without a new PublishRequestStatus.
+      expect(closed?.statusReason).toContain(second.id);
+      // No staff member rejected this: reporting one would be a false audit trail.
+      expect(closed?.reviewedBy).toBeUndefined();
+    });
+
+    test("supersede: a validation_failed row can be corrected and resubmitted", async () => {
+      // The sharpest half of (d): validation_failed is inside the dedup's blocking set, so before
+      // this a submitter whose validation failed could not fix the commit and resubmit AT ALL.
+      const submitter = await store.ensureUser(identity());
+      const name = uid("pack");
+      const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      await store.markPublishRequestValidationFailed(first.id, "hash mismatch");
+      expect((await store.getPublishRequest(first.id))?.status).toBe("validation_failed");
+
+      const second = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { commit: "c".repeat(40) }),
+        "web_session",
+      );
+      expect(second.id).not.toBe(first.id);
+      const closed = await store.getPublishRequest(first.id);
+      expect(closed?.status).toBe("rejected");
+      expect(closed?.statusReason).toContain(second.id);
+    });
+
+    test("supersede: an APPROVED release is never superseded", async () => {
+      // Widening supersede past isPreApprovalStatus would be an unaudited content swap on bits
+      // pinned clients are already fetching.
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ handle: uid("admin") }));
+      const name = uid("pack");
+      const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      await store.markPublishRequestValidated(first.id, entry(name));
+      const approved = await store.approvePublishRequest(admin.id, first.id);
+      expect(approved.status).toBe("approved");
+
+      await expect(
+        store.createPublishRequest(
+          submitter.id,
+          publishInput(name, { commit: "c".repeat(40) }),
+          "web_session",
+        ),
+      ).rejects.toBeInstanceOf(StoreConflictError);
+      const untouched = await store.getPublishRequest(first.id);
+      expect(untouched?.status).toBe("approved");
+      expect(untouched?.statusReason).toBeUndefined();
+    });
+
+    test("supersede: a superseded row is never a withdrawn row", async () => {
+      // Implementing supersede as `withdrawn` would feed H4's lineage filter (same submitter), so
+      // the submitter's own replacement would 409 PUBLISH_VERSION_WITHDRAWN — a self-DoS that burns
+      // the version permanently — and would hand any user a way to mint withdrawn rows at will.
+      const submitter = await store.ensureUser(identity());
+      const name = uid("pack");
+      const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      await store.markPublishRequestValidated(first.id, entry(name));
+      const second = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { commit: "c".repeat(40) }),
+        "web_session",
+      );
+      expect(second.id).not.toBe(first.id);
+      const withdrawn = await store.listWithdrawnPublishRequestsForVersion(name, "0.1.0");
+      expect(withdrawn.map((row) => row.id)).not.toContain(first.id);
+      expect(withdrawn).toHaveLength(0);
+    });
+
+    test("supersede: an identical resubmit still replays, and another submitter's row is untouched", async () => {
+      const submitter = await store.ensureUser(identity());
+      const other = await store.ensureUser(identity());
+      const name = uid("pack");
+      const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      await store.markPublishRequestValidated(first.id, entry(name));
+
+      // A CI retry must not churn a new row per attempt.
+      const replay = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      expect(replay.id).toBe(first.id);
+      expect(replay.status).toBe("pending_review");
+
+      // Cross-submitter: the dedup (and therefore the supersede) is submitter-scoped, so a
+      // stranger's divergent submission of the same name+version cannot close somebody else's row.
+      const foreign = await store.createPublishRequest(
+        other.id,
+        publishInput(name, { commit: "c".repeat(40) }),
+        "web_session",
+      );
+      expect(foreign.id).not.toBe(first.id);
+      expect((await store.getPublishRequest(first.id))?.status).toBe("pending_review");
+    });
+
+    test("supersede: a resubmit that changes only the ref lands the new ref", async () => {
+      // isSamePublishRequest used to ignore requestedRef/requestedDescription, so this returned the
+      // STALE row and silently dropped the correction — which makes "fix the ref and retry"
+      // impossible even with supersede shipping.
+      const submitter = await store.ensureUser(identity());
+      const name = uid("pack");
+      const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      expect(first.requestedRef).toBe("refs/heads/main");
+
+      const retagged = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { requestedRef: "refs/tags/v0.1.0" }),
+        "web_session",
+      );
+      expect(retagged.id).not.toBe(first.id);
+      expect(retagged.requestedRef).toBe("refs/tags/v0.1.0");
+      expect((await store.getPublishRequest(first.id))?.status).toBe("rejected");
+    });
+
+    // The description half of the same dedup key, which the ref case above cannot cover: drop it
+    // from isSamePublishRequest and this resubmit returns the STALE row, so the correction is
+    // silently discarded — and requestedDescription is what becomes the published catalog
+    // description (server/publish-validation.ts), so the wrong text ships under the right version.
+    test("supersede: a resubmit that changes only the description lands the new description", async () => {
+      const submitter = await store.ensureUser(identity());
+      const name = uid("pack");
+      const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      const edited = await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { requestedDescription: "Corrected release notes." }),
+        "web_session",
+      );
+      expect(edited.id).not.toBe(first.id);
+      expect(edited.requestedDescription).toBe("Corrected release notes.");
+      expect((await store.getPublishRequest(first.id))?.status).toBe("rejected");
     });
 
     test("ownership: upsert, per-user/per-repo check, and revocation", async () => {
@@ -792,18 +945,54 @@ for (const lane of lanes) {
 
       const ownership = await store.upsertVerifiedPackOwnership(ownerUser.id, input);
       expect(ownership.verificationStatus).toBe("verified");
-      const fetched = await store.getPackOwnership(input.packKey, input.sourceUrl);
+      const fetched = await store.getPackOwnership(input.packKey);
       expect(fetched?.verificationStatus).toBe("verified");
 
-      expect(await store.hasVerifiedRepoOwnership(ownerUser.id, repoFull)).toBe(true);
-      expect(await store.hasVerifiedRepoOwnership(stranger.id, repoFull)).toBe(false);
+      // Returns the numeric id that was PROVEN, not just a yes — the merge gate compares it against
+      // the id a name claim is pinned to, because the full name this row was found by is mutable.
+      expect(await store.verifiedRepoOwnershipRepositoryId(ownerUser.id, repoFull)).toBe(
+        input.githubRepositoryId,
+      );
+      expect(await store.verifiedRepoOwnershipRepositoryId(ownerUser.id, repoFull.toUpperCase())).toBe(
+        input.githubRepositoryId,
+      );
+      expect(await store.verifiedRepoOwnershipRepositoryId(stranger.id, repoFull)).toBeNull();
 
       const removed = await store.deletePackOwnershipsForGithubRepositoryIds(
         [input.githubRepositoryId],
         "conformance test",
       );
       expect(removed).toBe(1);
-      expect(await store.hasVerifiedRepoOwnership(ownerUser.id, repoFull)).toBe(false);
+      expect(await store.verifiedRepoOwnershipRepositoryId(ownerUser.id, repoFull)).toBeNull();
+    });
+
+    // (c) The row is keyed by pack_key alone and its source_url is a descriptive column that MOVES.
+    // A direct pack's catalog `source` is frozen at its earliest approved release, so withdrawing
+    // that release re-creates the pack at a different commit; the old write-time pin then refused
+    // re-verification forever ("Pack ownership source does not match the catalog") even though the
+    // ON CONFLICT clause right below it was written to perform exactly that update.
+    test("ownership: re-verification follows the catalog when a pack's source moves", async () => {
+      const ownerUser = await store.ensureUser(identity());
+      const repoFull = `acme/${uid("repo")}`;
+      const input = ownershipInput(repoFull);
+      const movedSourceUrl = `https://github.com/${repoFull}/tree/${"d".repeat(40)}/packs/thing`;
+
+      await store.upsertVerifiedPackOwnership(ownerUser.id, input);
+      const moved = await store.upsertVerifiedPackOwnership(ownerUser.id, {
+        ...input,
+        sourceUrl: movedSourceUrl,
+      });
+      expect(moved.sourceUrl).toBe(movedSourceUrl);
+
+      // And the read is keyed by pack_key alone, so the caller does not have to know the new URL to
+      // find the live row — the badge lookup used to require exact source_url equality, which is why
+      // the badge silently vanished with nobody re-verifying.
+      const fetched = await store.getPackOwnership(input.packKey);
+      expect(fetched?.sourceUrl).toBe(movedSourceUrl);
+      expect(fetched?.verificationStatus).toBe("verified");
+      expect(await store.verifiedRepoOwnershipRepositoryId(ownerUser.id, repoFull)).toBe(
+        input.githubRepositoryId,
+      );
     });
 
     test("publish requests round-trip the server-derived github source ids, including NULL", async () => {
@@ -1395,6 +1584,42 @@ for (const lane of lanes) {
           expect(String(withdrawRows[0]!.metadata.reason)).toContain("conformance takedown");
           // The approve audit row remains — withdraw appends, never erases the approval record.
           expect(approveRows).toHaveLength(1);
+        } finally {
+          await sql.end();
+        }
+      });
+
+      test("audit_logs record a supersede as its own action, not as a staff rejection", async () => {
+        // The row lands in `rejected`, so without a distinct action + a NULL-reviewer trail the
+        // audit would read as though staff turned the submission down.
+        const submitter = await store.ensureUser(identity());
+        const name = uid("pack");
+        const first = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+        await store.markPublishRequestValidated(first.id, entry(name));
+        const second = await store.createPublishRequest(
+          submitter.id,
+          publishInput(name, { commit: "c".repeat(40) }),
+          "web_session",
+        );
+
+        const sql = postgres(dbUrl!, { max: 1 });
+        try {
+          const rows = await sql`
+            SELECT actor_user_id, metadata FROM audit_logs
+            WHERE target_id = ${first.id} AND action = 'publish_request.supersede'`;
+          expect(rows).toHaveLength(1);
+          expect(rows[0]!.actor_user_id).toBe(submitter.id);
+          expect(rows[0]!.metadata.supersededBy).toBe(second.id);
+          expect(rows[0]!.metadata.previousStatus).toBe("pending_review");
+          // No staff reject was recorded, and the new row's create audit points back at what it replaced.
+          const rejects = await sql`
+            SELECT 1 FROM audit_logs WHERE target_id = ${first.id} AND action = 'publish_request.reject'`;
+          expect(rejects).toHaveLength(0);
+          const creates = await sql`
+            SELECT metadata FROM audit_logs
+            WHERE target_id = ${second.id} AND action = 'publish_request.create'`;
+          expect(creates).toHaveLength(1);
+          expect(creates[0]!.metadata.supersededRequestId).toBe(first.id);
         } finally {
           await sql.end();
         }

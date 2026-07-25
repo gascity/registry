@@ -22,7 +22,7 @@ import {
   generateCliDeviceCodePair,
   validateCliLoopbackRedirectUri,
 } from "./cli-auth";
-import { requireCatalogPackSource } from "./catalog";
+import { findCatalogPackSource, type CatalogPackSource } from "./catalog";
 import {
   PublishRequestValidationError,
   nameClaimMatchesRequest,
@@ -377,9 +377,21 @@ async function handleApi(request: Request) {
   if (request.method === "GET" && url.pathname === "/api/ownership") {
     const packKey = requirePackKey(url);
     const sourceUrl = requireSourceUrl(url);
-    await requireCatalogPackSource(packKey, sourceUrl);
+    await requirePackSource(packKey, sourceUrl);
     const sourceRepository = parseGitHubSource(sourceUrl);
-    const ownership = await store.getPackOwnership(packKey, sourceUrl);
+    const stored = await store.getPackOwnership(packKey);
+    // A verification is of a REPOSITORY, not of one commit-pinned URL: a direct pack's catalog
+    // `source` moves when its earliest approved release is withdrawn (aggregate.ts writes `source`
+    // only when it creates the pack), which is why the row is no longer keyed by source_url.
+    // Matching the repo here survives that drift and still refuses a row that belongs to a
+    // DIFFERENT repository than the one being asked about — the state left behind when an audited
+    // staff re-pin moves a name to a new repo while the old repo's proof row is still on disk.
+    const ownership =
+      stored &&
+      sourceRepository &&
+      stored.sourceRepository?.fullName.toLowerCase() === sourceRepository.fullName.toLowerCase()
+        ? stored
+        : null;
     return json({
       packKey,
       sourceUrl,
@@ -404,7 +416,7 @@ async function handleApi(request: Request) {
     if (!packKey || !sourceUrl) {
       throw new RequestError(422, "VALIDATION_ERROR", "Pack key and source URL are required.");
     }
-    const pack = await requireCatalogPackSource(packKey, sourceUrl);
+    const pack = await requirePackSource(packKey, sourceUrl);
     const sourceRepository = parseGitHubSource(sourceUrl);
     if (!sourceRepository) {
       throw new RequestError(422, "UNSUPPORTED_SOURCE", "Only GitHub source repositories can be verified.");
@@ -454,7 +466,7 @@ async function handleApi(request: Request) {
     if (claim.userId !== session.user.id) {
       throw new RequestError(403, "BAD_GITHUB_STATE", "GitHub verification state is invalid.");
     }
-    await requireCatalogPackSource(claim.packKey, claim.sourceUrl);
+    await requirePackSource(claim.packKey, claim.sourceUrl);
     const sourceRepository = parseGitHubSource(claim.sourceUrl);
     if (!sourceRepository) {
       throw new RequestError(422, "UNSUPPORTED_SOURCE", "Only GitHub source repositories can be verified.");
@@ -678,6 +690,58 @@ function requireSourceUrl(url: URL) {
   return sourceUrl;
 }
 
+// Resolve the packKey -> source-repository binding an ownership request asserts, or refuse. This is
+// the only thing standing between a client-supplied packKey and a pack_ownerships upsert whose
+// primary key is that packKey alone (store.ts, ON CONFLICT (pack_key) DO UPDATE overwrites
+// publisher_id and verified_by_user_id), so it is what stops badge spoofing: without it anyone with
+// admin on any repo could start the flow with packKey "gascity-packs--bmad" and their own repo as
+// the source, prove admin on their own repo, and paint "Verified author" onto a first-party pack.
+//
+// A packKey lives in exactly one of two disjoint universes and each has its own authority.
+async function requirePackSource(packKey: string, sourceUrl: string): Promise<CatalogPackSource> {
+  // Base/ingested packs first. The generated artifact is the one document no publisher can write,
+  // so a name claim can never override a first-party pack's binding — belt to the braces of the
+  // `direct--` prefix test below.
+  const base = findCatalogPackSource(await readRuntimeText("catalog.json"), packKey);
+  if (base) {
+    if (base.source !== sourceUrl) throw packSourceMismatch();
+    return base;
+  }
+  // Community direct publishes. pack_name_claims is the authority, NOT the committed catalog (which
+  // never contains a `direct--` key — the bug this replaces, so /api/ownership 422'd for every
+  // direct publish) and NOT a runtime render of the merged catalog (this route has no auth, no CSRF
+  // and no rate limit, the base artifact is ~428 KB, and the merge is fail-soft, so a dropped pack
+  // would silently become a verification failure). It is also the same table the merge gate measures
+  // every release against, so the badge and the gate cannot disagree about who owns a name.
+  const name = directPackName(packKey);
+  const claim = name ? await store.getPackNameClaim(name) : null;
+  if (!claim) throw packSourceMismatch();
+  // Repo IDENTITY, not a URL string: strictly stronger than comparing a commit-pinned pack.source,
+  // and independent of which commit or branch the caller happened to send.
+  const repository = parseGitHubSource(sourceUrl);
+  if (!repository || repository.fullName.toLowerCase() !== claim.repoFullName.toLowerCase()) {
+    throw packSourceMismatch();
+  }
+  return { packKey, name: claim.name, source: sourceUrl };
+}
+
+// `direct--owner--pack` -> `owner/pack`. Inverse of aggregate.ts's flattenName, injective only
+// because assertPublishablePackName bans `--` inside a segment. The round-trip re-flatten is what
+// makes a non-canonical packKey (a literal `/`, a doubled `--`) fail here instead of writing an
+// ownership row under a key getPackOwnership will never be asked for.
+function directPackName(packKey: string) {
+  const prefix = "direct--";
+  if (!packKey.startsWith(prefix)) return null;
+  const flat = packKey.slice(prefix.length);
+  if (!flat) return null;
+  const name = flat.replaceAll("--", "/");
+  return `${prefix}${name.replaceAll("/", "--")}` === packKey ? name : null;
+}
+
+function packSourceMismatch() {
+  return new RequestError(422, "VALIDATION_ERROR", "Pack source does not match the catalog.");
+}
+
 function requireRegistryStaff(session: SessionRecord | null) {
   if (!session) throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
   if (session.user.role !== "admin" && session.user.role !== "moderator") {
@@ -823,12 +887,16 @@ async function assertPublishRequestCanMerge(
   const method = publishRequest.submissionMethod;
   const repoProven = method === "github_actions_oidc" || method === "github_import";
   let ownershipDecision: PublishApprovalDecision = { ownershipBasis: "repo_proven" };
+  // WHICH repo the submitter actually proved, when the basis is a verified ownership row. H2 needs
+  // it below: the row is found by a mutable full name, so the name it matched is not proof that it
+  // is the repo the name claim is pinned to.
+  let provenRepositoryId: string | null = null;
   if (!repoProven) {
-    const ownsRepo = await store.hasVerifiedRepoOwnership(
+    provenRepositoryId = await store.verifiedRepoOwnershipRepositoryId(
       publishRequest.submittedBy.id,
       publishRequest.repository.fullName,
     );
-    if (ownsRepo) {
+    if (provenRepositoryId) {
       ownershipDecision = { ownershipBasis: "verified_repo_ownership" };
     } else if (await store.isOrgMember(publishRequest.submittedBy.id)) {
       // Verified @gascity org members (registry-member realm role, live-synced at login)
@@ -882,8 +950,33 @@ async function assertPublishRequestCanMerge(
   // H2 — the name's existing claim pins it to a REPO (not a person, so teammates can cut
   // releases). A mismatch is a takeover attempt; staff can authorize an audited RE-PIN instead,
   // which is the legitimate repo-migration path.
+  //
+  // FAIL CLOSED when the request cannot answer the pin in the currency the pin is written in. A
+  // claim that carries a numeric repository id was pinned by a repo-proven release; a submission
+  // that carries none (session, personal token, EIA) can only be measured against the claim's
+  // mutable repoFullName. Letting it fall back to that string means DOWNGRADING the submission
+  // method defeats the id pin: the same release refused 409 over OIDC (ids compared, mismatch)
+  // re-lands over a personal token (no ids, case-folded name compare, match) with nothing typed.
+  // Scoped to verified_repo_ownership because that is the basis this change newly made reachable
+  // for community repos — before it, clearing step 2 without an override REQUIRED a repo-proven
+  // method, and those always stamp ids, so the fallback was unreachable on approvable traffic.
+  // org_member and override are deliberately untouched: no pre-existing path tightens here.
+  //
+  // A claim with NO ids still falls back to the name compare exactly as today, which is what keeps
+  // the grandfathered claim-only packs (cacc-twin-team) publishing. And a submitter who proved the
+  // very repo the claim is pinned to is not refused — the proof and the pin name the same id.
+  //
+  // The sourceGithubRepositoryId term is belt-and-braces, not load-bearing: it cannot be false while
+  // the basis is verified_repo_ownership, because only repo-proven methods stamp ids on a request
+  // and those never reach this basis. Kept so the shape being closed is legible, and so a future
+  // submission path that stamps ids without proving a repo cannot quietly re-open it.
+  const unprovenNamePin =
+    ownershipDecision.ownershipBasis === "verified_repo_ownership" &&
+    claim?.githubRepositoryId != null &&
+    publishRequest.sourceGithubRepositoryId == null &&
+    claim.githubRepositoryId !== provenRepositoryId;
   let namePinDecision: Pick<PublishApprovalDecision, "namePinOverrideReason"> = {};
-  if (claim && !nameClaimMatchesRequest(claim, publishRequest)) {
+  if (claim && (unprovenNamePin || !nameClaimMatchesRequest(claim, publishRequest))) {
     if (!overrides.namePinOverrideReason) {
       throw new RequestError(
         409,
@@ -903,6 +996,14 @@ async function assertPublishRequestCanMerge(
   // permanently burned that version number for the real owner — a denial of service on every
   // future release of a pack they do not own. Content-swap protection only ever mattered within
   // a lineage anyway: the bits a takedown was about are that lineage's bits.
+  //
+  // The version lookup is a BYTE compare (requested_version = $1), so it is total only because
+  // releaseVersionPattern admits one spelling per version. That holds for everything minted after
+  // that grammar tightened; it does NOT retroactively canonicalize rows already stored. A
+  // withdrawn row persisted as `0.1` or `00.1.0` is still invisible to the canonical `0.1.0`
+  // lookup, so the deploy that ships the tightened grammar has to canonicalize or reject any
+  // pre-existing non-canonical requested_version first. Fixing that in code would mean comparing
+  // semantically here, which is the deferrable belt-and-braces option, not this guard's job.
   const entry = publishRequest.registryEntry;
   const withdrawnConflict = (
     await store.listWithdrawnPublishRequestsForVersion(entry.name, entry.release.version)

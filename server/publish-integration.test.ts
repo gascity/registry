@@ -735,6 +735,55 @@ describe("local registry publish integration", () => {
     }
   });
 
+  // H4 keys on the version STRING — listWithdrawnPublishRequestsForVersion matches
+  // requested_version as bytes — so the guard is only as strong as the grammar that mints that
+  // string. While the grammar admitted both arities and leading zeros, a taken-down 0.1.0 re-landed
+  // as 0.1, 0.01.0 or 00.1.0: three strings H4 looks up and finds nothing withdrawn under, which
+  // compareVersions (which parseInts and pads to three) then calls the SAME version, so the site
+  // served the withdrawn commit again and the machine gate told the reviewer it was clean.
+  test("a takedown cannot be re-landed under an equivalent spelling of the same version", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const publisher = await harness.signIn("respell-pub");
+      const name = `${owner}/integration-respell`;
+
+      const served = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("respell", "0.1.0", { name }),
+      );
+      await harness.approve(admin, served.id);
+      await harness.withdraw(admin, served.id, "takedown: malicious content");
+
+      // CONTROL: the canonical spelling is refused, which is H4 working as designed.
+      const control = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("respell", "0.1.0", { name, commit: secondCommit }),
+      );
+      await harness.approveExpectingError(admin, control.id, 409, "PUBLISH_VERSION_WITHDRAWN");
+
+      // ATTACK: every synonym is now refused at MINT, before a reviewable row exists at all. One
+      // canonical spelling per version is what keeps H4's byte compare total.
+      for (const respelling of ["0.1", "0.01.0", "00.1.0", "0.1.00"]) {
+        const attack = await harness.createPack("respell", "0.1.0", { name, commit: secondCommit });
+        await harness.publishExpectingError(
+          publisher,
+          { ...attack, requestedVersion: respelling },
+          422,
+          "VALIDATION_ERROR",
+        );
+      }
+
+      // Nothing withdrawn came back, under any spelling.
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; latest: string; releases: Array<{ version: string }> }>;
+      }>("/catalog.json");
+      expect(catalog.packs.some((pack) => pack.name === name)).toBe(false);
+      const withdrawnRows = await harness.store.listWithdrawnPublishRequestsForVersion(name, "0.1.0");
+      expect(withdrawnRows).toHaveLength(1);
+    } finally {
+      await harness.close();
+    }
+  });
+
   // BACKWARD-COMPAT GUARANTEE the whole design rests on: the live bare-named community pack keeps
   // working. No rename and no alias (either would break its installers) — its grandfathered claim
   // is what makes the reserved-bare-name rule survivable.
@@ -756,6 +805,13 @@ describe("local registry publish integration", () => {
       const claim = await harness.store.getPackNameClaim("cacc-twin-team");
       expect(claim).toMatchObject({ repoFullName: legacyRepo, githubOwnerLogin: "wespd" });
       expect(claim?.scope).toBeUndefined();
+      // Load-bearing for the fail-closed rule in the merge gate below: this claim proved NO numeric
+      // ids (its releases are claim-only), so there is no id pin for an id-less submission to
+      // defeat, and the repoFullName fallback stays the correct — and only — comparison available.
+      // The unprovenNamePin refusal keys on `claim.githubRepositoryId != null` precisely so that it
+      // cannot fire here. If this pack ever stops approving, that guard is too broad.
+      expect(claim?.githubRepositoryId).toBeUndefined();
+      expect(claim?.githubOwnerId).toBeUndefined();
 
       // The maintainer proved the repo through the GitHub App, so the next release needs no staff
       // override at all — the bare name is the ONLY thing that could have blocked it.
@@ -866,9 +922,12 @@ describe("local registry publish integration", () => {
       expect(claim?.githubOwnerId).toBeUndefined();
 
       // A verified ownership record for the very same repo, WITH both numeric ids. Enrichment must
-      // not reach for it: pack_ownerships is keyed by catalog pack_key + immutable source_url and is
-      // structurally empty for direct publishes in production, so an enrichment sourced from it
-      // would be tested-dead code guarding a security binding.
+      // not reach for it: an ownership row records who proved control of a REPO for the Trust badge,
+      // and the ids on it come from whatever GitHub identity the App callback saw — not from the
+      // trusted auth context of THIS publish. Sourcing a name pin from anywhere but
+      // PublishSourceIdentity would let the caller choose the pin. (Direct packs now DO get ownership
+      // rows — the ownership flow resolves `direct--` keys against pack_name_claims — so this is a
+      // live path, not a hypothetical one.)
       await harness.store.upsertVerifiedPackOwnership(maintainer.userId, {
         packKey: "wespd--cacc-twin-team",
         sourceUrl: `https://github.com/${legacyRepo}/tree/main`,
@@ -997,6 +1056,484 @@ describe("local registry publish integration", () => {
       await harness.close();
     }
   });
+
+  // (b) The ownership routes used to resolve a packKey against the COMMITTED catalog artifact only,
+  // which never contains a `direct--` key — so every community publish 422'd on /api/ownership, the
+  // Trust tab rendered "Unverified source" indistinguishably from a genuinely unverified pack, and
+  // the Verify button was permanently disabled. pack_name_claims is the authority instead.
+  test("a direct-published pack can be looked up, verified, and re-verified after its source moves", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const maintainer = await harness.signIn("direct-maintainer");
+      const request = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("badge", "1.0.0"),
+      );
+      await harness.approve(admin, request.id);
+      const packKey = `direct--${owner}--integration-badge`;
+      const servedSourceUrl = request.registryEntry!.source;
+
+      // The pack the SPA was served really is resolvable now (this is the (b) regression: 422 today).
+      const unverified = await harness.publicClient.json<{
+        sourceRepository: { fullName: string } | null;
+        verificationStatus: string;
+      }>(`/api/ownership?packKey=${encodeURIComponent(packKey)}&sourceUrl=${encodeURIComponent(servedSourceUrl)}`);
+      expect(unverified.sourceRepository?.fullName).toBe(`${owner}/${repo}`);
+      expect(unverified.verificationStatus).toBe("unverified");
+
+      // (c) The proof row is written by the GitHub App callback at the REPO's tree URL, which is not
+      // the commit-pinned `source` the merged catalog serves. The badge lookup used to require exact
+      // source_url equality, so it silently reported "unverified" with nobody re-verifying.
+      await harness.store.upsertVerifiedPackOwnership(maintainer.userId, {
+        packKey,
+        sourceUrl: `${repoUrl}/tree/main`,
+        githubRepositoryId: "repo_123",
+        githubRepositoryFullName: `${owner}/${repo}`,
+        githubRepositoryName: repo,
+        githubOwnerId: "owner_123",
+        githubOwnerLogin: owner,
+        githubOwnerType: "Organization",
+        verificationMethod: "github_app_user_token",
+      });
+      const verified = await harness.publicClient.json<{
+        verificationStatus: string;
+        publisher: { githubOwnerLogin: string } | null;
+      }>(`/api/ownership?packKey=${encodeURIComponent(packKey)}&sourceUrl=${encodeURIComponent(servedSourceUrl)}`);
+      expect(verified.verificationStatus).toBe("verified");
+      expect(verified.publisher?.githubOwnerLogin).toBe(owner);
+
+      // ...and the flow's entry point is reachable too (422 today), redirecting back to the SCOPED
+      // pack route derived server-side from the claim, never from a request field.
+      const started = await maintainer.json<{ authorizationUrl: string }>("/api/ownership/github/start", {
+        method: "POST",
+        csrfToken: maintainer.csrfToken,
+        body: { packKey, sourceUrl: servedSourceUrl },
+      });
+      expect(started.authorizationUrl).toContain("state=");
+
+      // The redirect the callback will replay verbatim as its Location. Asserted here because
+      // "state= is present" is satisfied by ANY signed state, so it never checked the property the
+      // comment above claims: building this from the request's packKey instead of the claim's NAME
+      // yields /packs/direct--owner--slug#trust, which the SPA parses as a pack name it cannot
+      // resolve, landing the verifier on the not-found panel at the end of a successful GitHub
+      // handshake. State format is signValue: base64url(json) "." base64url(hmac).
+      const startState = new URL(started.authorizationUrl).searchParams.get("state") ?? "";
+      const claimState = JSON.parse(
+        Buffer.from(startState.slice(0, startState.lastIndexOf(".")), "base64url").toString("utf8"),
+      ) as { redirectTo: string; packKey: string };
+      expect(claimState.packKey).toBe(packKey);
+      expect(claimState.redirectTo).toBe(`/packs/${owner}/integration-badge#trust`);
+
+      // (c) A row that belongs to a DIFFERENT repository is not this pack's proof. This is the state
+      // an audited staff re-pin leaves behind: the name moves to a new repo while the old repo's
+      // proof row is still on disk under the same pack_key.
+      await harness.store.upsertVerifiedPackOwnership(maintainer.userId, {
+        packKey,
+        sourceUrl: "https://github.com/attacker/other/tree/main",
+        githubRepositoryId: "repo_attacker",
+        githubRepositoryFullName: "attacker/other",
+        githubRepositoryName: "other",
+        githubOwnerId: "owner_attacker",
+        githubOwnerLogin: "attacker",
+        githubOwnerType: "User",
+        verificationMethod: "github_app_user_token",
+      });
+      const foreignRow = await harness.publicClient.json<{ verificationStatus: string; publisher: unknown }>(
+        `/api/ownership?packKey=${encodeURIComponent(packKey)}&sourceUrl=${encodeURIComponent(servedSourceUrl)}`,
+      );
+      expect(foreignRow.verificationStatus).toBe("unverified");
+      expect(foreignRow.publisher ?? null).toBeNull();
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The badge-spoofing defence, which is the whole reason the catalog check stays. pack_ownerships'
+  // primary key is pack_key ALONE and its upsert overwrites publisher_id/verified_by_user_id, so a
+  // packKey a caller was allowed to assert freely would let anyone with admin on any repo destroy a
+  // first-party pack's badge.
+  test("an ownership request must name the repository that actually owns the pack", async () => {
+    const harness = await createPublishHarness({ basePackSlugs: ["bmad"] });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const attacker = await harness.signIn("spoofer");
+      const request = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("spoof-target", "1.0.0"),
+      );
+      await harness.approve(admin, request.id);
+      const directKey = `direct--${owner}--integration-spoof-target`;
+
+      async function ownershipStatus(packKey: string, sourceUrl: string) {
+        const response = await harness.publicClient.request(
+          `/api/ownership?packKey=${encodeURIComponent(packKey)}&sourceUrl=${encodeURIComponent(sourceUrl)}`,
+        );
+        return { status: response.status, body: await response.text() };
+      }
+
+      // A direct pack, but a source repo that is not the one its name claim is pinned to.
+      const spoofed = await ownershipStatus(directKey, "https://github.com/spoofer/evil/tree/main");
+      expect(spoofed.status, spoofed.body).toBe(422);
+      // Even a *plausible* URL on the wrong host/shape is refused rather than trusted.
+      expect((await ownershipStatus(directKey, "https://gitlab.com/acme/registry-fixtures")).status).toBe(422);
+      // A `direct--` key with no name claim behind it at all.
+      expect((await ownershipStatus("direct--acme--never-published", `${repoUrl}/tree/main`)).status).toBe(422);
+      // A non-canonical key that does NOT survive the flatten round-trip. Without that check this
+      // would resolve through the claim for `acme/integration-spoof-target` and write an ownership
+      // row under a pack_key the catalog will never ask about.
+      expect(
+        (await ownershipStatus(`direct--${owner}/integration-spoof-target`, request.registryEntry!.source)).status,
+      ).toBe(422);
+
+      // A first-party pack: the generated artifact is the authority, and its exact `source` binds.
+      const basePack = baseCatalogPack("bmad");
+      expect((await ownershipStatus(basePack.pack_key, basePack.source)).status).toBe(200);
+      expect((await ownershipStatus(basePack.pack_key, "https://github.com/spoofer/evil/tree/main")).status).toBe(422);
+      // ...and a name claim can never override it. The attacker owns the claim for their own scoped
+      // name, but that buys nothing on a `gascity-packs--` key.
+      const attackerPack = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("bmad-lookalike", "1.0.0", {
+          name: "spoofer/bmad",
+          repoUrl: "https://github.com/spoofer/bmad",
+        }),
+      );
+      await harness.approve(admin, attackerPack.id);
+      expect(
+        (await ownershipStatus(basePack.pack_key, "https://github.com/spoofer/bmad/tree/main")).status,
+      ).toBe(422);
+
+      // The write path is gated by the same resolver, so no ownership row exists for the spoofed key.
+      const started = await attacker.request("/api/ownership/github/start", {
+        method: "POST",
+        csrfToken: attacker.csrfToken,
+        body: { packKey: basePack.pack_key, sourceUrl: "https://github.com/spoofer/evil/tree/main" },
+      });
+      expect(started.status).toBe(422);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // (b)'s second-order consequence, and the security review of it. Before this change a community
+  // claim-only request from a non-org-member with no override died at step 2 with 403
+  // OWNERSHIP_NOT_VERIFIED before requestedName, scope or the claim were ever read — so H1b, H2, H4
+  // and the aggregate dry run were UNREACHABLE on that traffic shape. Making verified_repo_ownership
+  // reachable for community repos moves that traffic into steps 3-7 for the first time.
+  test("a community publisher's verified repo ownership clears step 2 but nothing downstream", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const publisher = await harness.signIn("community-pub");
+      const victim = await harness.signIn("victim-pub");
+
+      // The publisher proved admin on their own repo through the App flow.
+      await harness.store.upsertVerifiedPackOwnership(publisher.userId, {
+        packKey: `direct--${owner}--integration-community`,
+        sourceUrl: `${repoUrl}/tree/main`,
+        githubRepositoryId: "repo_123",
+        githubRepositoryFullName: `${owner}/${repo}`,
+        githubRepositoryName: repo,
+        githubOwnerId: "owner_123",
+        githubOwnerLogin: owner,
+        githubOwnerType: "Organization",
+        verificationMethod: "github_app_user_token",
+      });
+
+      // A FOREIGN-scoped name now reaches H1b instead of dying at step 2. Proving admin on a repo
+      // buys only that owner's namespace.
+      const foreignScope = await harness.publishWithPersonalToken(
+        publisher,
+        await harness.createPack("community-scope", "1.0.0", { name: "someone-else/community-scope" }),
+      );
+      expect(foreignScope.submissionMethod).toBe("api_token");
+      await harness.approveExpectingError(admin, foreignScope.id, 403, "PUBLISH_SCOPE_MISMATCH");
+
+      // A name already claimed by a different repo now reaches H2, not step 2.
+      const claimed = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("community-claimed", "1.0.0", {
+          name: `${owner}/integration-community-claimed`,
+          repoUrl: `https://github.com/${owner}/other-repo`,
+        }),
+      );
+      await harness.approve(admin, claimed.id);
+      const takeover = await harness.publishWithPersonalToken(
+        publisher,
+        await harness.createPack("community-claimed", "1.0.0", {
+          name: `${owner}/integration-community-claimed`,
+          commit: secondCommit,
+        }),
+      );
+      await harness.approveExpectingError(admin, takeover.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+
+      // And the basis is per-user: a different publisher pointing at the same public repo URL still
+      // has no proof of anything.
+      const borrowed = await harness.publishWithPersonalToken(
+        victim,
+        await harness.createPack("community-borrowed", "1.0.0"),
+      );
+      await harness.approveExpectingOwnershipError(admin, borrowed.id);
+
+      // The publisher's OWN scoped name from their proven repo is what the basis is for.
+      const legitimate = await harness.publishWithPersonalToken(
+        publisher,
+        await harness.createPack("community-own", "1.0.0"),
+      );
+      expect((await harness.approve(admin, legitimate.id)).status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The population the fail-closed rule must NOT catch, and the only test that pins its last
+  // conjunct: the submitter proved the very repo the claim is pinned to, then cut the next release
+  // over a personal token. Nothing is ambiguous here — the proof and the pin name the same numeric
+  // id — so an id-less submission is still measured by the repoFullName fallback and approves with
+  // no override. Without this, `claim.githubRepositoryId !== provenRepositoryId` can be stubbed to
+  // `true` with the whole suite green, and the refusal silently widens to every claim-only release
+  // of an id-pinned pack.
+  test("an id-pinned claim still approves an id-less release from the repo that was proven", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const maintainer = await harness.signIn("proven-pin-pub");
+      const name = `${owner}/integration-provenpin`;
+      const live = repoIdentityFor(`${owner}/${repo}`);
+
+      // Claim pinned to the LIVE ids by a repo-proven release.
+      await harness.seedApprovedPublish(
+        maintainer.userId,
+        admin.userId,
+        await harness.createPack("provenpin-v1", "1.0.0", { name }),
+        {
+          submissionMethod: "github_actions_oidc",
+          sourceIdentity: { githubRepositoryId: live.repositoryId, githubOwnerId: live.ownerId },
+        },
+      );
+      expect(await harness.store.getPackNameClaim(name)).toMatchObject({
+        githubRepositoryId: live.repositoryId,
+      });
+
+      // The maintainer proved that SAME repo through the App flow.
+      await harness.store.upsertVerifiedPackOwnership(maintainer.userId, {
+        packKey: `direct--${owner}--integration-provenpin`,
+        sourceUrl: `${repoUrl}/tree/main`,
+        githubRepositoryId: live.repositoryId,
+        githubRepositoryFullName: `${owner}/${repo}`,
+        githubRepositoryName: repo,
+        githubOwnerId: live.ownerId,
+        githubOwnerLogin: owner,
+        githubOwnerType: "Organization",
+        verificationMethod: "github_app_user_token",
+      });
+
+      const next = await harness.publishWithPersonalToken(
+        maintainer,
+        await harness.createPack("provenpin-v2", "1.1.0", { name, commit: secondCommit }),
+      );
+      expect(next.submissionMethod).toBe("api_token");
+      expect(next.sourceGithubRepositoryId ?? null).toBeNull();
+      // No ownershipOverrideReason and no namePinOverrideReason: nothing to authorize.
+      expect((await harness.approve(admin, next.id)).status).toBe("approved");
+
+      const catalog = await harness.publicClient.json<{ packs: Array<{ name: string; latest: string }> }>(
+        "/catalog.json",
+      );
+      expect(catalog.packs.find((pack) => pack.name === name)?.latest).toBe("1.1.0");
+      // The pin did not move, and it did not lose the id it had proven.
+      expect(await harness.store.getPackNameClaim(name)).toMatchObject({
+        repoFullName: `${owner}/${repo}`,
+        githubRepositoryId: live.repositoryId,
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // H2's id pin is only as strong as the WEAKEST submission method that can reach it. Ids are
+  // compared only when both sides carry them, and only repo-proven methods stamp them on the
+  // request — so a release refused over OIDC (ids compared, mismatch) could be resubmitted over a
+  // personal token, which stamps nothing, take the case-folded repoFullName fallback, and approve
+  // with NO override typed at all. Reachable only because a verified ownership row now clears step 2
+  // for community repos; before that, clearing step 2 without an override required a repo-proven
+  // method, and those always stamp ids.
+  test("an id-pinned claim refuses an id-less resubmission instead of falling back to the name", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const attacker = await harness.signIn("downgrade-pub");
+      const name = `${owner}/integration-finalpin`;
+      const packKey = `direct--${owner}--integration-finalpin`;
+
+      // The name is pinned to THIS repo's full name but to a STALE numeric id — the shape a repo
+      // delete-and-recreate (or an audited re-pin) leaves behind. The full name still matches; the
+      // identity does not, and identity is what the pin is written in.
+      await harness.seedApprovedPublish(
+        attacker.userId,
+        admin.userId,
+        await harness.createPack("finalpin-v1", "1.0.0", { name }),
+        {
+          submissionMethod: "github_actions_oidc",
+          sourceIdentity: { githubRepositoryId: "repo_OLD", githubOwnerId: "owner_123" },
+        },
+      );
+      const claim = await harness.store.getPackNameClaim(name);
+      expect(claim).toMatchObject({ repoFullName: `${owner}/${repo}`, githubRepositoryId: "repo_OLD" });
+
+      // CONTROL: over OIDC the request carries the LIVE id, both sides have ids, and H2 compares
+      // them — refused, and staff must type an audited re-pin reason.
+      const overOidc = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("finalpin-v2", "1.0.0", { name, commit: secondCommit }),
+      );
+      expect(overOidc.sourceGithubRepositoryId).toBe("repo_123");
+      await harness.approveExpectingError(admin, overOidc.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+
+      // The newly reachable basis: the attacker proves the LIVE repo through the App flow. This is a
+      // real proof of the live repo — it is simply not proof of the repo the name is pinned to.
+      const started = await attacker.json<{ authorizationUrl: string }>("/api/ownership/github/start", {
+        method: "POST",
+        csrfToken: attacker.csrfToken,
+        body: { packKey, sourceUrl: `${repoUrl}/tree/main` },
+      });
+      expect(started.authorizationUrl).toContain("state=");
+      await harness.store.upsertVerifiedPackOwnership(attacker.userId, {
+        packKey,
+        sourceUrl: `${repoUrl}/tree/main`,
+        githubRepositoryId: "repo_123",
+        githubRepositoryFullName: `${owner}/${repo}`,
+        githubRepositoryName: repo,
+        githubOwnerId: "owner_123",
+        githubOwnerLogin: owner,
+        githubOwnerType: "Organization",
+        verificationMethod: "github_app_user_token",
+      });
+
+      // THE ATTACK: the same name from the same repo, downgraded to a personal token so it stamps no
+      // ids. The ownership row clears step 2, and H2 must NOT now soften to a name compare just
+      // because the request declined to carry the currency the pin is written in. (A fresh version:
+      // the attacker's own approved 1.0.0 is already served, and resubmitting THAT is a different
+      // refusal.)
+      const downgraded = await harness.publishWithPersonalToken(
+        attacker,
+        await harness.createPack("finalpin-v3", "1.1.0", { name, commit: secondCommit }),
+      );
+      expect(downgraded.submissionMethod).toBe("api_token");
+      expect(downgraded.sourceGithubRepositoryId ?? null).toBeNull();
+      expect(downgraded.repository.fullName.toLowerCase()).toBe(claim!.repoFullName.toLowerCase());
+      await harness.approveExpectingError(admin, downgraded.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+
+      // The pin held: nothing new was served and the claim still points at the stale id, so the
+      // decision is still in front of a human.
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; latest: string }>;
+      }>("/catalog.json");
+      expect(catalog.packs.find((pack) => pack.name === name)?.latest).toBe("1.0.0");
+      expect(await harness.store.getPackNameClaim(name)).toMatchObject({
+        githubRepositoryId: "repo_OLD",
+      });
+
+      // And the legitimate escape hatch is unchanged: an audited re-pin approves and MOVES the pin,
+      // which is the same decision the OIDC path already forced.
+      const approved = await harness.approve(
+        admin,
+        downgraded.id,
+        undefined,
+        "Repo recreated upstream; re-pinning acme/integration-finalpin after out-of-band check.",
+      );
+      expect(approved.status).toBe("approved");
+      const repinned = await harness.store.getPackNameClaim(name);
+      expect(repinned?.repoFullName).toBe(`${owner}/${repo}`);
+      // The re-pin records what was actually PROVEN, which for an id-less submission is no id: the
+      // claim drops to the weaker name-only pin rather than inheriting the stale one. A later
+      // repo-proven release re-teaches the live id through the enrichment path.
+      expect(repinned?.githubRepositoryId).toBeUndefined();
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The SCOPE of the fail-closed rule, pinned so widening it cannot pass silently. It applies only
+  // to the verified_repo_ownership basis — the one this change newly made reachable for community
+  // repos. org_member is a pre-existing basis on an unchanged code path, so it keeps taking the
+  // repoFullName fallback and this change tightens nothing for it.
+  //
+  // RESIDUAL, deliberately not closed here: that means a verified org member can still satisfy an
+  // id-pinned claim by full name alone with nothing typed. It is exactly as true before this change
+  // as after, and the population is @gascity org members rather than open self-registration, so
+  // closing it is a separate decision about internal publishing — not a regression to fix in this
+  // commit. If it is ever closed, this test is the one that should change.
+  test("the fail-closed name-pin rule does not tighten the pre-existing org_member basis", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const member = await harness.signIn("orgpin-member", undefined, { orgMember: true });
+      const name = `${owner}/integration-orgpin`;
+
+      // Same setup as the downgrade attack: claim pinned to a STALE numeric id.
+      await harness.seedApprovedPublish(
+        member.userId,
+        admin.userId,
+        await harness.createPack("orgpin-v1", "1.0.0", { name }),
+        {
+          submissionMethod: "github_actions_oidc",
+          sourceIdentity: { githubRepositoryId: "repo_OLD", githubOwnerId: "owner_123" },
+        },
+      );
+      expect(await harness.store.getPackNameClaim(name)).toMatchObject({
+        githubRepositoryId: "repo_OLD",
+      });
+
+      // No pack_ownerships row anywhere, so the basis is org_member, not verified_repo_ownership.
+      const next = await harness.publishWithPersonalToken(
+        member,
+        await harness.createPack("orgpin-v2", "1.1.0", { name, commit: secondCommit }),
+      );
+      expect(next.sourceGithubRepositoryId ?? null).toBeNull();
+      expect((await harness.approve(admin, next.id)).status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // (d) Supersede must not become a laundering path for bits a staff takedown removed.
+  test("a superseded request approves cleanly, but a withdrawn version still cannot be re-published", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const publisher = await harness.signIn("supersede-pub");
+
+      // Correcting a pending submission: the replacement approves with no PUBLISH_VERSION_WITHDRAWN,
+      // because supersede writes `rejected`, never `withdrawn`. As a withdrawn row it would feed
+      // H4's same-submitter lineage filter and 409 the submitter's own correction — a self-DoS that
+      // burns the version permanently.
+      // Repo-proven so the merge gate itself has nothing to say — the only thing that can refuse the
+      // superseded row is its own status.
+      const pack = await harness.createPack("supersede", "1.0.0");
+      const first = await harness.publishWithGitHubActionsToken(pack);
+      expect(first.status).toBe("pending_review");
+      const corrected = await harness.publishWithGitHubActionsToken({ ...pack, commit: secondCommit });
+      expect(corrected.id).not.toBe(first.id);
+
+      const closed = await harness.store.getPublishRequest(first.id);
+      expect(closed?.status).toBe("rejected");
+      expect(closed?.statusReason).toContain(corrected.id);
+      // Staff can no longer approve the bits they were reading: the superseded row fails the
+      // status = 'pending_review' guard, so a review TOCTOU is closed rather than resolved by luck.
+      await harness.approveExpectingError(admin, first.id, 422, "VALIDATION_ERROR");
+      expect((await harness.approve(admin, corrected.id)).status).toBe("approved");
+
+      // A genuinely WITHDRAWN version is still refused at approve, and superseding cannot dissolve
+      // that: the withdrawn row is outside the dedup set, so it is never a supersede target.
+      const takedown = await harness.createPack("laundry", "1.0.0");
+      const served = await harness.publishWithGitHubActionsToken(takedown);
+      await harness.approve(admin, served.id);
+      await harness.withdraw(admin, served.id, "malware");
+      const relapse = await harness.publishWithGitHubActionsToken({ ...takedown, commit: secondCommit });
+      expect(relapse.id).not.toBe(served.id);
+      await harness.approveExpectingError(admin, relapse.id, 409, "PUBLISH_VERSION_WITHDRAWN");
+      expect((await harness.store.getPublishRequest(served.id))?.status).toBe("withdrawn");
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 type TestPack = PublishRequestInput & {
@@ -1008,7 +1545,32 @@ type SignedInClient = TestHttpClient & {
   userId: string;
 };
 
-async function createPublishHarness() {
+// A first-party, ingest-generated pack as it appears in the committed catalog artifact: keyed
+// `gascity-packs--<slug>`, sourced from the monorepo. No publisher can write one, which is why it is
+// the authority the ownership routes measure base pack_keys against.
+function baseCatalogPack(slug: string) {
+  return {
+    pack_key: `gascity-packs--${slug}`,
+    registry: "gascity-packs",
+    name: slug,
+    description: `First-party ${slug} pack.`,
+    source: `https://github.com/gastownhall/gascity-packs/tree/main/${slug}`,
+    source_kind: "git",
+    og_image: "/og/registry.svg",
+    latest: "1.0.0",
+    releases: [
+      {
+        version: "1.0.0",
+        ref: "refs/heads/main",
+        commit: "e".repeat(40),
+        hash: `sha256:${"f".repeat(64)}`,
+        description: `First-party ${slug} release.`,
+      },
+    ],
+  };
+}
+
+async function createPublishHarness(options: { basePackSlugs?: string[] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "registry-publish-integration-"));
   const distRoot = join(dir, "dist");
   const repoRoot = join(dir, "repo");
@@ -1016,9 +1578,16 @@ async function createPublishHarness() {
   await mkdir(repoRoot, { recursive: true });
   await writeFile(join(distRoot, "index.html"), "<!doctype html><title>Registry integration shell</title>");
   await writeFile(join(distRoot, "registry.toml"), "schema = 1\n");
+  const basePacks = (options.basePackSlugs ?? []).map(baseCatalogPack);
   await writeFile(
     join(distRoot, "catalog.json"),
-    `${JSON.stringify({ schema: 1, source_count: 0, pack_count: 0, sources: [], packs: [] })}\n`,
+    `${JSON.stringify({
+      schema: 1,
+      source_count: basePacks.length > 0 ? 1 : 0,
+      pack_count: basePacks.length,
+      sources: basePacks.length > 0 ? [{ name: "gascity-packs", url: "https://github.com/gastownhall/gascity-packs", pack_count: basePacks.length }] : [],
+      packs: basePacks,
+    })}\n`,
   );
 
   // With REGISTRY_TEST_DATABASE_URL set (CI), run the whole publish flow against a fresh
@@ -1299,6 +1868,32 @@ async function createPublishHarness() {
     );
   }
 
+  // A submit that must be REFUSED before any row exists, so a test can pin the status and code of
+  // an input the mint grammar rejects. Same path as publishWithPersonalToken; it just does not
+  // assert 2xx.
+  async function publishExpectingError(
+    client: SignedInClient,
+    pack: TestPack,
+    status: number,
+    code: string,
+  ) {
+    const created = await client.json<{ token: { token: string } }>("/api/account/api-tokens", {
+      method: "POST",
+      csrfToken: client.csrfToken,
+      body: { label: `publish ${pack.slug}` },
+    });
+    const response = await nextMachineClient().request("/api/publish-requests?validate=1", {
+      method: "POST",
+      bearerToken: created.token.token,
+      body: pack,
+    });
+    const text = await response.text();
+    expect(response.status, text).toBe(status);
+    const { error } = JSON.parse(text) as { error: { code: string; message: string } };
+    expect(error.code).toBe(code);
+    return error;
+  }
+
   async function approve(
     client: SignedInClient,
     requestId: string,
@@ -1377,6 +1972,7 @@ async function createPublishHarness() {
     publishWithGitHubActionsToken,
     publishWithEiaToken,
     publishWithGitHubImport,
+    publishExpectingError,
     approve,
     approveExpectingOwnershipError,
     approveExpectingError,

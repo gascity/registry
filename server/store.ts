@@ -506,6 +506,11 @@ function normalizeRegistryEntry(value: unknown): PublishRegistryEntry | undefine
   return entry;
 }
 
+// Is this resubmit a replay of the stored row, or a genuinely different submission? Every field the
+// row carries from its input is compared — including requestedRef and requestedDescription, which
+// were previously ignored, so a resubmit that only fixed the ref returned the STALE row and silently
+// dropped the new value. Now that a divergent resubmit supersedes (createPublishRequest), "fix the
+// ref and retry" has to actually work.
 function isSamePublishRequest(left: PublishRequestRow, right: {
   repoUrl: string;
   sourceUrl: string;
@@ -513,6 +518,8 @@ function isSamePublishRequest(left: PublishRequestRow, right: {
   commit: string;
   requestedName: string;
   requestedVersion: string;
+  requestedRef?: string;
+  requestedDescription?: string;
 }) {
   return (
     left.repoUrl === right.repoUrl &&
@@ -520,8 +527,18 @@ function isSamePublishRequest(left: PublishRequestRow, right: {
     left.packPath === right.packPath &&
     left.commit === right.commit &&
     left.requestedName === right.requestedName &&
-    left.requestedVersion === right.requestedVersion
+    left.requestedVersion === right.requestedVersion &&
+    left.requestedRef === right.requestedRef &&
+    left.requestedDescription === right.requestedDescription
   );
+}
+
+// The reason stamped on a row a divergent resubmit replaced. It names the superseding request, so
+// the trail reads correctly with no new status and no reviewer: reviewed_by_user_id stays NULL and a
+// distinct publish_request.supersede audit action is what separates this from a staff rejection.
+// Rendered as-is by all three status surfaces (admin queue, /publish, /account).
+function supersededStatusReason(supersededByRequestId: string) {
+  return `Superseded by a newer submission from the same publisher (${supersededByRequestId}).`;
 }
 
 function normalizeStatusReason(value: string, fallback: string) {
@@ -1501,7 +1518,7 @@ export class PostgresRegistryStore implements RegistryStore {
     return { starred };
   }
 
-  async getPackOwnership(packKey: string, sourceUrl: string): Promise<PackOwnership | null> {
+  async getPackOwnership(packKey: string): Promise<PackOwnership | null> {
     const rows = await this.sql`
       SELECT
         pack_ownerships.*,
@@ -1515,24 +1532,30 @@ export class PostgresRegistryStore implements RegistryStore {
       FROM pack_ownerships
       JOIN publishers ON publishers.id = pack_ownerships.publisher_id
       WHERE pack_ownerships.pack_key = ${packKey}
-        AND pack_ownerships.source_url = ${sourceUrl}
       LIMIT 1
     `;
     return rows[0] ? ownershipFromRows(rows[0]) : null;
   }
 
-  async hasVerifiedRepoOwnership(userId: string, repoFullName: string): Promise<boolean> {
+  async verifiedRepoOwnershipRepositoryId(
+    userId: string,
+    repoFullName: string,
+  ): Promise<string | null> {
     // Bind to the repo THIS user personally verified (verified_by_user_id), not org-wide
     // publisher membership — proving admin on one repo must not authorize publishing a
     // sibling repo of the same org that a teammate onboarded.
+    //
+    // Selects the numeric id (NOT NULL on this table) so the caller can compare the repo that was
+    // actually proven against the one a name claim is pinned to, instead of trusting the mutable
+    // full name this row was found by.
     const rows = await this.sql`
-      SELECT 1
+      SELECT github_repository_id
       FROM pack_ownerships
       WHERE lower(github_repository_full_name) = lower(${repoFullName})
         AND verified_by_user_id = ${userId}
       LIMIT 1
     `;
-    return rows.length > 0;
+    return rows[0] ? String(rows[0].github_repository_id) : null;
   }
 
   async isOrgMember(userId: string): Promise<boolean> {
@@ -1544,13 +1567,11 @@ export class PostgresRegistryStore implements RegistryStore {
     userId: string,
     input: VerifiedPackOwnershipInput,
   ): Promise<PackOwnership> {
-    const existing = await this.sql`
-      SELECT source_url FROM pack_ownerships WHERE pack_key = ${input.packKey} LIMIT 1
-    `;
-    if (existing[0] && existing[0].source_url !== input.sourceUrl) {
-      throw new StoreValidationError("Pack ownership source does not match the catalog.");
-    }
-
+    // No source_url pre-check. It refused the very UPDATE the ON CONFLICT clause below is written
+    // to perform, so re-verifying a pack whose catalog `source` had moved 422'd forever. What binds
+    // an incoming packKey to a real pack is requirePackSource in server/app.ts, which runs before
+    // both HTTP writers and measures the request against a LIVE authority (the generated catalog
+    // for base packs, pack_name_claims for direct ones) rather than against a stale stored string.
     const publisher = await this.ensureGithubPublisher(input);
     const memberRole = input.githubOwnerType === "User" ? "owner" : "publisher";
     await this.sql`
@@ -1596,7 +1617,7 @@ export class PostgresRegistryStore implements RegistryStore {
       publisherId: publisher.id,
       verificationMethod: input.verificationMethod,
     });
-    const ownership = await this.getPackOwnership(input.packKey, input.sourceUrl);
+    const ownership = await this.getPackOwnership(input.packKey);
     if (!ownership) throw new Error("Pack ownership verification failed.");
     return ownership;
   }
@@ -1662,6 +1683,10 @@ export class PostgresRegistryStore implements RegistryStore {
     sourceIdentity?: PublishSourceIdentity,
   ): Promise<PublishRequestRow> {
     const normalized = normalizePublishRequestInput(input);
+    // The submitter's own pre-approval row for this name+version, if a divergent resubmit is
+    // replacing it. Scoped to the submitter by the dedup query below, so it can never close a row
+    // belonging to somebody else.
+    let superseded: PublishRequestRow | undefined;
     // Dedup is scoped to the submitter: a user's own re-submit is idempotent, but two
     // different users requesting the same name+version get distinct rows (cross-submitter
     // collisions are arbitrated by the registry.toml aggregate render at approval time).
@@ -1697,37 +1722,92 @@ export class PostgresRegistryStore implements RegistryStore {
         }),
       );
       if (isSamePublishRequest(row, normalized)) return row;
-      throw new StoreConflictError(
-        `A publish request already exists for ${normalized.requestedName} ${normalized.requestedVersion}.`,
-      );
+      // A divergent resubmit supersedes the submitter's own row. Which statuses that is allowed for
+      // is decided in exactly ONE place — the CAS inside the transaction below. A pre-check here
+      // would be a second copy of that status set which no test could kill (it can only refuse rows
+      // the CAS already refuses), and the CAS also has to hold the line against a staff
+      // reject/approve landing between this read and the write.
+      superseded = row;
     }
 
     const now = new Date();
-    const [row] = await this.sql`
-      INSERT INTO pack_publish_requests (
-        id, submitter_user_id, status, repo_host, repo_owner, repo_name, repo_full_name,
-        repo_url, source_url, pack_path, commit_sha, requested_name, requested_version,
-        requested_ref, requested_description, submission_method, source_github_repository_id,
-        source_github_owner_id, created_at, updated_at
-      )
-      VALUES (
-        ${newId("publishRequest")}, ${userId}, 'pending_validation', 'github.com',
-        ${normalized.repository.owner}, ${normalized.repository.name}, ${normalized.repository.fullName},
-        ${normalized.repoUrl}, ${normalized.sourceUrl}, ${normalized.packPath}, ${normalized.commit},
-        ${normalized.requestedName}, ${normalized.requestedVersion}, ${normalized.requestedRef ?? null},
-        ${normalized.requestedDescription ?? null}, ${submissionMethod},
-        ${sourceIdentity?.githubRepositoryId ?? null}, ${sourceIdentity?.githubOwnerId ?? null},
-        ${now}, ${now}
-      )
-      RETURNING *
-    `;
-    await this.audit(userId, "publish_request.create", "publish_request", row.id, {
-      requestedName: normalized.requestedName,
-      requestedVersion: normalized.requestedVersion,
-      repoFullName: normalized.repository.fullName,
-      commit: normalized.commit,
-      packPath: normalized.packPath,
-      submissionMethod,
+    const id = newId("publishRequest");
+    // One transaction for the supersede, the INSERT and both audit rows: a predecessor must never be
+    // closed without its replacement landing, and an audit row must not commit on a separate
+    // connection from the action it records.
+    const row = await this.sql.begin(async (sql) => {
+      if (superseded) {
+        // CAS, and the single definition of what supersede may touch: the pre-approval statuses.
+        // An `approved` row is currently SERVED, so replacing its bits under a version pinned
+        // clients already fetched stays a staff decision (withdraw plus a fresh approval) — it
+        // matches no row here and the resubmit gets the same 409 it always did. Being a CAS rather
+        // than a pre-check also means two concurrent divergent resubmits contend on the predecessor
+        // (one wins, the loser gets an honest 409 instead of silently orphaning the row it thought
+        // it replaced) and a staff reject/approve landing between the dedup SELECT and this UPDATE
+        // is not overwritten.
+        const [flipped] = await sql`
+          UPDATE pack_publish_requests
+          SET status = 'rejected',
+              status_reason = ${supersededStatusReason(id)},
+              updated_at = now()
+          WHERE id = ${superseded.id}
+            AND status IN ('pending_validation', 'validation_failed', 'pending_review')
+          RETURNING id
+        `;
+        if (!flipped) {
+          throw new StoreConflictError(
+            `A publish request already exists for ${normalized.requestedName} ${normalized.requestedVersion}.`,
+          );
+        }
+        await this.audit(
+          userId,
+          "publish_request.supersede",
+          "publish_request",
+          superseded.id,
+          {
+            supersededBy: id,
+            previousStatus: superseded.status,
+            requestedName: normalized.requestedName,
+            requestedVersion: normalized.requestedVersion,
+          },
+          sql,
+        );
+      }
+      const [inserted] = await sql`
+        INSERT INTO pack_publish_requests (
+          id, submitter_user_id, status, repo_host, repo_owner, repo_name, repo_full_name,
+          repo_url, source_url, pack_path, commit_sha, requested_name, requested_version,
+          requested_ref, requested_description, submission_method, source_github_repository_id,
+          source_github_owner_id, created_at, updated_at
+        )
+        VALUES (
+          ${id}, ${userId}, 'pending_validation', 'github.com',
+          ${normalized.repository.owner}, ${normalized.repository.name}, ${normalized.repository.fullName},
+          ${normalized.repoUrl}, ${normalized.sourceUrl}, ${normalized.packPath}, ${normalized.commit},
+          ${normalized.requestedName}, ${normalized.requestedVersion}, ${normalized.requestedRef ?? null},
+          ${normalized.requestedDescription ?? null}, ${submissionMethod},
+          ${sourceIdentity?.githubRepositoryId ?? null}, ${sourceIdentity?.githubOwnerId ?? null},
+          ${now}, ${now}
+        )
+        RETURNING *
+      `;
+      await this.audit(
+        userId,
+        "publish_request.create",
+        "publish_request",
+        inserted.id,
+        {
+          requestedName: normalized.requestedName,
+          requestedVersion: normalized.requestedVersion,
+          repoFullName: normalized.repository.fullName,
+          commit: normalized.commit,
+          packPath: normalized.packPath,
+          submissionMethod,
+          supersededRequestId: superseded?.id,
+        },
+        sql,
+      );
+      return inserted;
     });
     const [user] = await this.sql`SELECT * FROM users WHERE id = ${userId}`;
     return publishRequestFromRows(row, publicUser(user as any));
@@ -2806,21 +2886,22 @@ class FileRegistryStore implements RegistryStore {
     return { starred };
   }
 
-  async getPackOwnership(packKey: string, sourceUrl: string): Promise<PackOwnership | null> {
-    const ownership = this.ownerships.get(packKey);
-    if (!ownership || ownership.sourceUrl !== sourceUrl) return null;
-    return ownership;
+  async getPackOwnership(packKey: string): Promise<PackOwnership | null> {
+    return this.ownerships.get(packKey) ?? null;
   }
 
-  async hasVerifiedRepoOwnership(userId: string, repoFullName: string): Promise<boolean> {
+  async verifiedRepoOwnershipRepositoryId(
+    userId: string,
+    repoFullName: string,
+  ): Promise<string | null> {
     // Mirror of the Postgres check: bind to the repo THIS user personally verified, not
-    // org-wide publisher membership.
+    // org-wide publisher membership, and hand back the id that was proven.
     const target = repoFullName.toLowerCase();
     for (const ownership of this.ownerships.values()) {
       if (ownership.sourceRepository?.fullName?.toLowerCase() !== target) continue;
-      if (ownership.verifiedByUserId === userId) return true;
+      if (ownership.verifiedByUserId === userId) return ownership.githubRepositoryId ?? null;
     }
-    return false;
+    return null;
   }
 
   async isOrgMember(userId: string): Promise<boolean> {
@@ -2828,11 +2909,8 @@ class FileRegistryStore implements RegistryStore {
   }
 
   async upsertVerifiedPackOwnership(userId: string, input: VerifiedPackOwnershipInput) {
-    const existing = this.ownerships.get(input.packKey);
-    if (existing && existing.sourceUrl !== input.sourceUrl) {
-      throw new StoreValidationError("Pack ownership source does not match the catalog.");
-    }
-
+    // Mirrors the Postgres lane: no source_url pin, so re-verification follows the catalog when a
+    // pack's `source` moves. See the comment there for what enforces the binding instead.
     const publisher = this.ensureGithubPublisher(input);
     const role = input.githubOwnerType === "User" ? "owner" : "publisher";
     const memberKey = `${publisher.id}:${userId}`;
@@ -2927,16 +3005,32 @@ class FileRegistryStore implements RegistryStore {
           request.status !== "withdrawn",
       )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    let superseded: PublishRequestRow | undefined;
     if (existing) {
       if (isSamePublishRequest(existing, normalized)) return existing;
-      throw new StoreConflictError(
-        `A publish request already exists for ${normalized.requestedName} ${normalized.requestedVersion}.`,
-      );
+      // Mirrors the Postgres lane: a divergent resubmit supersedes the submitter's own
+      // pre-approval row, and an approved (served) row still conflicts.
+      if (!isPreApprovalStatus(existing.status)) {
+        throw new StoreConflictError(
+          `A publish request already exists for ${normalized.requestedName} ${normalized.requestedVersion}.`,
+        );
+      }
+      superseded = existing;
     }
 
     const now = new Date().toISOString();
+    const id = newId("publishRequest");
+    if (superseded) {
+      // reviewedBy is deliberately left absent: no staff member rejected this.
+      this.publishRequests.set(superseded.id, {
+        ...superseded,
+        status: "rejected",
+        statusReason: supersededStatusReason(id),
+        updatedAt: now,
+      });
+    }
     const request: PublishRequestRow = {
-      id: newId("publishRequest"),
+      id,
       status: "pending_validation",
       repository: normalized.repository,
       repoUrl: normalized.repoUrl,

@@ -467,15 +467,12 @@ test("scoped pack route: /packs/owner/pack deep-links, and the %2F form canonica
     await viewer.goto("/");
     await expect(viewer.locator(`a[href^="/packs/${scope}/${slug}"]`).first()).toBeVisible();
 
-    // NOT expectHealthyPage. A direct-published pack's detail page fires /api/ownership, which
-    // calls requireCatalogPackSource — and that reads only the COMMITTED catalog
-    // (dist/catalog.json), never the runtime merge. So every direct publish, scoped or bare, 422s
-    // there. Pre-existing and out of scope for this slice (filed separately); asserted narrowly so
-    // that a genuine JS exception, or any NEW failing request, still fails this test.
-    expect(errors.filter((entry) => entry.startsWith("pageerror:"))).toEqual([]);
-    for (const entry of errors) {
-      expect(entry, `unexpected runtime error on ${viewer.url()}`).toMatch(/status of 422/);
-    }
+    // A direct-published pack's detail page fires /api/ownership, which used to resolve packKey
+    // against the COMMITTED catalog artifact only — and that never contains a `direct--` key, so
+    // every direct publish 422'd there. It now resolves against pack_name_claims, so the page is
+    // clean and this asserts the whole page rather than tolerating one known failure. (The previous
+    // allowance would have passed vacuously once the 422 was gone, leaving the fix uncovered.)
+    await expectHealthyPage(viewer, errors);
   } finally {
     await context.close();
   }

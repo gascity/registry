@@ -1,17 +1,8 @@
-import { RequestError } from "./http";
-
 type CatalogPackRecord = {
   pack_key?: unknown;
   name?: unknown;
   source?: unknown;
 };
-
-type CatalogRecord = {
-  packs?: unknown;
-};
-
-const distCatalogUrl = new URL("../dist/catalog.json", import.meta.url);
-const publicCatalogUrl = new URL("../public/catalog.json", import.meta.url);
 
 export type CatalogPackSource = {
   packKey: string;
@@ -19,27 +10,31 @@ export type CatalogPackSource = {
   source: string;
 };
 
-export async function requireCatalogPackSource(
-  packKey: string,
-  sourceUrl: string,
-): Promise<CatalogPackSource> {
-  const pack = (await readCatalogPacks()).find((candidate) => candidate.packKey === packKey);
-  if (!pack || pack.source !== sourceUrl) {
-    throw new RequestError(422, "VALIDATION_ERROR", "Pack source does not match the catalog.");
+// Look one pack_key up in a catalog artifact the CALLER read. No filesystem access on purpose:
+// the module constants this replaced pointed at ../dist and ../public directly and ignored the
+// request handler's injected distRoot, so what the ownership routes saw depended on whether
+// `bun run build` had ever run and no test could control it.
+//
+// A corrupt artifact returns null rather than throwing: this feeds two public reads, and a parse
+// error must not 500 them. It fails CLOSED for verification — with no base pack found the caller
+// falls through to the name-claim branch, which only ever answers for a `direct--` key, and no
+// generated base pack has one.
+export function findCatalogPackSource(catalogJson: string, packKey: string): CatalogPackSource | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(catalogJson);
+  } catch {
+    return null;
   }
-  return pack;
-}
-
-async function readCatalogPacks() {
-  const raw = JSON.parse(await readCatalogText()) as CatalogRecord;
-  const packs = Array.isArray(raw.packs) ? raw.packs : [];
-  return packs.map(normalizePack).filter((pack): pack is CatalogPackSource => Boolean(pack));
-}
-
-async function readCatalogText() {
-  const distFile = Bun.file(distCatalogUrl);
-  if (await distFile.exists()) return distFile.text();
-  return Bun.file(publicCatalogUrl).text();
+  if (!raw || typeof raw !== "object") return null;
+  const packs = Array.isArray((raw as { packs?: unknown }).packs)
+    ? ((raw as { packs: unknown[] }).packs)
+    : [];
+  for (const candidate of packs) {
+    const pack = normalizePack(candidate);
+    if (pack && pack.packKey === packKey) return pack;
+  }
+  return null;
 }
 
 function normalizePack(raw: unknown): CatalogPackSource | null {

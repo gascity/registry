@@ -16,7 +16,7 @@ import {
   PublishRequestValidationError,
 } from "./publish";
 import { computePackHash, validatePublishRequestForRegistry } from "./publish-validation";
-import { createStore, StoreConflictError } from "./store";
+import { createStore } from "./store";
 import type { ServerConfig } from "./config";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -121,16 +121,23 @@ describe("file-backed publish requests", () => {
       expect(second.submissionMethod).toBe("web_session");
       expect(await store.listAccountPublishRequests(user.id)).toHaveLength(1);
 
-      await expect(
-        store.createPublishRequest(
-          user.id,
-          {
-            ...input,
-            commit: "fedcba9876543210fedcba9876543210fedcba98",
-          },
-          "web_session",
-        ),
-      ).rejects.toBeInstanceOf(StoreConflictError);
+      // A divergent resubmit by the same submitter supersedes its own pending predecessor instead of
+      // 409ing forever; the predecessor is closed as `rejected` naming the replacement, and the
+      // approved case (which must still conflict) is covered in the conformance suite on both lanes.
+      const corrected = await store.createPublishRequest(
+        user.id,
+        {
+          ...input,
+          commit: "fedcba9876543210fedcba9876543210fedcba98",
+        },
+        "web_session",
+      );
+      expect(corrected.id).not.toBe(first.id);
+      expect(corrected.status).toBe("pending_validation");
+      const superseded = await store.getPublishRequest(first.id);
+      expect(superseded?.status).toBe("rejected");
+      expect(superseded?.statusReason).toContain(corrected.id);
+      expect(superseded?.reviewedBy).toBeUndefined();
     } finally {
       await store.close();
       await rm(dir, { recursive: true, force: true });
@@ -182,15 +189,16 @@ describe("repo ownership escape hatch (file store)", () => {
         verificationMethod: "github_app_user_token",
       });
 
-      // The maintainer proved repo-a (case-insensitive match)...
-      expect(await store.hasVerifiedRepoOwnership(maintainer.id, "org/repo-a")).toBe(true);
-      expect(await store.hasVerifiedRepoOwnership(maintainer.id, "ORG/REPO-A")).toBe(true);
+      // The maintainer proved repo-a (case-insensitive match), and the answer is the numeric id of
+      // the repo they proved — the gate needs WHICH repo, not just whether.
+      expect(await store.verifiedRepoOwnershipRepositoryId(maintainer.id, "org/repo-a")).toBe("repo_a");
+      expect(await store.verifiedRepoOwnershipRepositoryId(maintainer.id, "ORG/REPO-A")).toBe("repo_a");
       // ...but NOT repo-b, which a teammate onboarded under the same org/publisher. This is
       // the org-wide-membership escalation the gate must not permit.
-      expect(await store.hasVerifiedRepoOwnership(maintainer.id, "org/repo-b")).toBe(false);
-      expect(await store.hasVerifiedRepoOwnership(teammate.id, "org/repo-b")).toBe(true);
+      expect(await store.verifiedRepoOwnershipRepositoryId(maintainer.id, "org/repo-b")).toBeNull();
+      expect(await store.verifiedRepoOwnershipRepositoryId(teammate.id, "org/repo-b")).toBe("repo_b");
       // A user who verified nothing is never authorized.
-      expect(await store.hasVerifiedRepoOwnership("usr_nobody", "org/repo-a")).toBe(false);
+      expect(await store.verifiedRepoOwnershipRepositoryId("usr_nobody", "org/repo-a")).toBeNull();
     } finally {
       await store.close();
       await rm(dir, { recursive: true, force: true });
@@ -436,7 +444,7 @@ describe("pack name grammar", () => {
     repoUrl: "https://github.com/acme/tools",
     commit,
     requestedName,
-    requestedVersion: "1.0",
+    requestedVersion: "1.0.0",
     packPath: "packs/tools",
   });
   const accepts = (name: string) =>
@@ -509,6 +517,64 @@ describe("pack name grammar", () => {
     walk("");
     expect(accepted).toBeGreaterThan(100);
     expect(flattened.size).toBe(accepted);
+  });
+});
+
+// The version is pure client input (publish-validation compares only pack.toml's NAME) and several
+// security-relevant lookups key on it as bytes — H4's withdrawn-version guard most of all. So the
+// grammar has to admit exactly one spelling per version, or a takedown re-lands under a synonym.
+describe("release version grammar", () => {
+  const withVersion = (requestedVersion: string) => ({
+    repoUrl: "https://github.com/acme/tools",
+    commit,
+    requestedName: "acme/tools",
+    requestedVersion,
+    packPath: "packs/tools",
+  });
+
+  test("accepts canonical major.minor.patch including zeroes", () => {
+    for (const version of ["0.0.0", "0.1.0", "1.0.0", "1.2.3", "10.20.30"]) {
+      expect(normalizePublishRequestInput(withVersion(version)).requestedVersion).toBe(version);
+    }
+  });
+
+  // Each of these is a distinct string that compareVersions (server/aggregate.ts parseInts and pads
+  // to three) calls EQUAL to 0.1.0, so admitting any of them means the withdrawn-version guard
+  // looks up a spelling nobody withdrew while the site treats the release as the same version.
+  test("rejects every alternate spelling of a canonical version", () => {
+    for (const version of ["0.1", "0.01.0", "00.1.0", "0.1.00", "1.0", "01.2.3", "1.2.3.4", "1"]) {
+      expect(() => normalizePublishRequestInput(withVersion(version))).toThrow(
+        /semver major\.minor\.patch with no leading zeros/,
+      );
+    }
+  });
+
+  test("no two accepted versions collide under compareVersions", () => {
+    const accepted: string[] = [];
+    const walk = (prefix: string) => {
+      if (prefix.length > 0) {
+        try {
+          accepted.push(normalizePublishRequestInput(withVersion(prefix)).requestedVersion);
+        } catch {
+          // not a version; keep walking
+        }
+      }
+      // Depth 6 is the shallowest that reaches BOTH a two-digit part (`10.1.1`) and its
+      // leading-zero synonym (`01.1.1`) — the pair the injectivity claim is actually about.
+      if (prefix.length === 6) return;
+      for (const character of ["0", "1", "."]) walk(prefix + character);
+    };
+    walk("");
+    expect(accepted.length).toBeGreaterThan(8);
+    const canonicalKeys = new Set(
+      accepted.map((version) =>
+        version
+          .split(".")
+          .map((part) => String(Number.parseInt(part, 10)))
+          .join("."),
+      ),
+    );
+    expect(canonicalKeys.size).toBe(accepted.length);
   });
 });
 
