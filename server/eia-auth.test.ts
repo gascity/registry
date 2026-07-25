@@ -429,6 +429,7 @@ function config(): ServerConfig {
     publishValidation: { gcBin: "gc", timeoutMs: 1_000 },
     isProduction: false,
     devAuthEnabled: false,
+    publishAutoApprove: false,
   };
 }
 

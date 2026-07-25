@@ -2,7 +2,7 @@ import type { ServerConfig } from "./config";
 import { RequestError } from "./http";
 import type { SessionRecord } from "./types";
 
-type RateLimitOptions = {
+export type RateLimitOptions = {
   windowMs: number;
   max: number;
 };
@@ -35,26 +35,35 @@ export function withSecurityHeaders(response: Response, config: ServerConfig) {
   });
 }
 
+// Consume one token from `key`'s window, or report the window exhausted. Split out of
+// enforceRateLimit so a non-HTTP backstop can share the same bucket bookkeeping instead of
+// growing a second Map: the auto-approve backstop keys on a server-derived pack name, has no
+// Request or session to derive an actor from, and must DEGRADE (fall back to staff review)
+// rather than 429 a valid publish.
+export function tryConsumeRateLimit(key: string, options: RateLimitOptions): boolean {
+  const now = Date.now();
+  if (now >= nextSweepAt) sweepExpiredBuckets(now);
+
+  const current = buckets.get(key);
+  if (!current || now >= current.resetAt) {
+    buckets.set(key, { count: 1, resetAt: now + options.windowMs });
+    return true;
+  }
+  if (current.count >= options.max) return false;
+  current.count += 1;
+  return true;
+}
+
 export function enforceRateLimit(
   request: Request,
   scope: string,
   options: RateLimitOptions,
   session?: SessionRecord | null,
 ) {
-  const now = Date.now();
-  if (now >= nextSweepAt) sweepExpiredBuckets(now);
-
   const actor = session?.user.id ?? clientAddress(request) ?? "unknown";
-  const key = `${scope}:${actor}`;
-  const current = buckets.get(key);
-  if (!current || now >= current.resetAt) {
-    buckets.set(key, { count: 1, resetAt: now + options.windowMs });
-    return;
-  }
-  if (current.count >= options.max) {
+  if (!tryConsumeRateLimit(`${scope}:${actor}`, options)) {
     throw new RequestError(429, "RATE_LIMITED", "Too many requests. Try again later.");
   }
-  current.count += 1;
 }
 
 function contentSecurityPolicy(config: ServerConfig) {

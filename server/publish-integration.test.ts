@@ -3,13 +3,15 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createRegistryFetchHandler } from "./app";
+import { AUTO_APPROVED_STATUS_REASON } from "./publish";
 import { validatePublishRequestForRegistry } from "./publish-validation";
+import { tryConsumeRateLimit } from "./security";
 import postgres from "postgres";
 import { createStore } from "./store";
 import { createTestDatabase } from "./test-db";
-import type { ServerConfig } from "./config";
+import { loadConfig, type ServerConfig } from "./config";
 import type { GitHubActionsIdentity } from "./github-actions";
 import type {
   GitHubPublishCandidate,
@@ -38,6 +40,29 @@ const repoUrl = `https://github.com/${owner}/${repo}`;
 // Module-scoped so every bearer publish in the file gets its own client address (see
 // nextMachineClient) — the rate-limit buckets live in module state and outlive a harness.
 let machineCount = 0;
+// The auto-approve refusal reasons, mirrored from server/app.ts's AutoApproveRefusal (not exported —
+// it is an internal decision label, and mirroring it here is what makes a typo in a test a
+// typecheck failure rather than a silently-never-matching assertion).
+type AutoApproveRefusalName =
+  | "disabled"
+  | "no_release_context"
+  | "requeued"
+  | "request_ids_missing"
+  | "claim_missing"
+  | "claim_ids_missing"
+  | "no_served_precedent"
+  | "pack_path_changed"
+  | "withdrawn_history"
+  | "staff_refused"
+  | "gate_refused"
+  | "rate_limited";
+// The unattended-approval backstop's own bucket key + window, mirrored from server/app.ts. A test
+// that pre-consumes this exact key proves the backstop is real: a mutation that changed the key or
+// stopped consuming would let the deferred release auto-approve and fail the assertion.
+const autoApproveRateLimit = { windowMs: 60 * 60 * 1000, max: 10 };
+function autoApproveRateLimitKey(requestedName: string) {
+  return `publish-auto-approve:${requestedName}`;
+}
 
 describe("local registry publish integration", () => {
   test("accepts a locally created pack through every supported publish method", async () => {
@@ -1536,6 +1561,795 @@ describe("local registry publish integration", () => {
   });
 });
 
+// Unattended approval of REPEAT releases. Every case names the clause it kills, because the whole
+// value of the predicate is that each clause independently keeps a human in the loop; a clause that
+// only LOOKS load-bearing is worse than no clause at all. The refusal reason is asserted, not just
+// the resulting status, so two clauses that both end in "the row stays pending_review" cannot pass
+// for each other.
+describe("auto-approve repeat releases", () => {
+  test("a repeat OIDC release of an established name merges with no human, and says so", async () => {
+    // Kills: the feature not being wired into validateAndStorePublishRequest at all.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-first", "0.1.0"),
+      );
+      // The FIRST publish of a name is the decision that creates a namespace entry. It queues.
+      harness.expectDeferredToStaff(first, "claim_missing");
+      await harness.approve(admin, first.id);
+
+      const second = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-first", "0.2.0"),
+      );
+      harness.expectAutoApproved(second);
+
+      // Really served, both versions.
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; latest: string; releases: Array<{ version: string }> }>;
+      }>("/catalog.json");
+      const pack = catalog.packs.find((entry) => entry.name === first.requestedName);
+      expect(pack?.latest).toBe("0.2.0");
+      expect(pack?.releases.map((release) => release.version).sort()).toEqual(["0.1.0", "0.2.0"]);
+
+      // How STAFF see it: the admin queue carries the auto reason and no reviewer, next to the
+      // human-approved release that carries a reviewer and no reason.
+      const queue = await admin.json<{ publishRequests: PublishRequestRow[] }>(
+        "/api/admin/publish-requests",
+        { csrfToken: admin.csrfToken },
+      );
+      const autoRow = queue.publishRequests.find((row) => row.id === second.id);
+      expect(autoRow?.statusReason).toBe(AUTO_APPROVED_STATUS_REASON);
+      const staffRow = queue.publishRequests.find((row) => row.id === first.id);
+      expect(staffRow?.statusReason).toBeUndefined();
+      // Detail read (the only lane-consistent source of the reviewer — the queue list does not join
+      // it in the Postgres impl): the human-approved release names its reviewer, the unattended one
+      // names nobody rather than naming the publisher.
+      expect((await harness.store.getPublishRequest(first.id))?.reviewedBy?.handle).toBe("admin");
+      expect((await harness.store.getPublishRequest(second.id))?.reviewedBy).toBeUndefined();
+
+      // END TO END through the real mint -> submit -> validate -> approve chain, because the audit
+      // forensics travel on the publish TOKEN: api_tokens.constraints is re-normalized on read
+      // through a strict whitelist, so a field missing from that projection is dropped silently and
+      // every store-level test still passes. This is the only assertion that would catch it.
+      if (harness.dbUrl) {
+        const sql = postgres(harness.dbUrl, { max: 1 });
+        try {
+          const rows = await sql`
+            SELECT actor_user_id, metadata FROM audit_logs
+            WHERE target_id = ${second.id} AND action = 'publish_request.approve'`;
+          expect(rows).toHaveLength(1);
+          expect(rows[0]!.actor_user_id).toBeNull();
+          expect(rows[0]!.metadata.approvalMode).toBe("auto");
+          expect(rows[0]!.metadata.autoApprovedFromRequestId).toBe(first.id);
+          expect(rows[0]!.metadata.oidcRef).toBe("refs/heads/main");
+          expect(rows[0]!.metadata.oidcEventName).toBe("push");
+        } finally {
+          await sql.end();
+        }
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 2: only an OIDC release context auto-approves — token, session and import do not", async () => {
+    // Kills clause (2). Covers cacc-twin-team's exact shape (a personal token), the leaked-gcr_ and
+    // stolen-session cases, and the immortal github_import row whose recorded GitHub permission is
+    // never re-checked. Every one of these has a matching claim, precedent and packPath: the
+    // submission path is the ONLY thing refusing them.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const submitter = await harness.signIn("publisher");
+      const admin = await harness.signIn("admin", "admin");
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-method", "0.1.0"),
+      );
+      await harness.approve(admin, first.id);
+      const name = first.requestedName;
+
+      const byToken = await harness.publishWithPersonalToken(
+        submitter,
+        await harness.createPack("auto-method", "0.2.0", { name }),
+      );
+      const bySession = await harness.publishWithSession(
+        submitter,
+        await harness.createPack("auto-method", "0.3.0", { name }),
+      );
+      // github_import is REPO-PROVEN, so the merge gate would approve it with no override. It still
+      // does not auto-approve: it is a human-driven browser flow, and the row it creates outlives the
+      // GitHub permission it was created under.
+      const byImport = await harness.publishWithGitHubImport(
+        submitter,
+        await harness.createPack("auto-method", "0.4.0", { name }),
+      );
+      for (const request of [byToken, bySession, byImport]) {
+        harness.expectDeferredToStaff(request, "no_release_context");
+      }
+      expect(byImport.submissionMethod).toBe("github_import");
+
+      // And the OIDC release in the same world does auto-approve, so this test cannot pass because
+      // auto-approve is simply broken.
+      harness.expectAutoApproved(
+        await harness.publishWithGitHubActionsToken(
+          await harness.createPack("auto-method", "0.5.0", { name }),
+        ),
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 3: approving one queued item never arms another queued item for the same name", async () => {
+    // Kills clause (3) — the highest-severity mutation in the set. markPublishRequestValidated
+    // admits pending_review and leaves it pending_review, and /validate is submitter-accessible, so
+    // without the pre-state check: park a malicious @2.0.0 while the name is unclaimed, wait for
+    // staff to approve a clean @1.0.0 (which mints the claim), then re-validate @2.0.0 and it merges
+    // unread. This test drives BOTH re-entry doors.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const hostilePack = await harness.createPack("auto-parked", "2.0.0");
+      const parked = await harness.publishWithGitHubActionsToken(hostilePack);
+      harness.expectDeferredToStaff(parked, "claim_missing");
+
+      const clean = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-parked", "1.0.0"),
+      );
+      harness.expectDeferredToStaff(clean, "claim_missing");
+      await harness.approve(admin, clean.id);
+
+      // Door 1: re-POST the identical body with ?validate=1. The submitter-scoped dedup returns the
+      // PARKED row, and validate=1 re-runs validation on it — carrying a genuine release context.
+      const replayed = await harness.publishWithGitHubActionsToken(hostilePack);
+      expect(replayed.id).toBe(parked.id);
+      harness.expectDeferredToStaff(replayed, "requeued");
+
+      // Door 2: POST /api/publish-requests/:id/validate. No release context exists on that route at
+      // all, so it is refused one clause earlier.
+      const revalidated = await admin.json<{ publishRequest: PublishRequestRow }>(
+        `/api/publish-requests/${encodeURIComponent(parked.id)}/validate`,
+        { method: "POST", csrfToken: admin.csrfToken },
+      );
+      harness.expectDeferredToStaff(revalidated.publishRequest, "no_release_context");
+
+      // The malicious version never reached the catalog.
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; releases: Array<{ version: string }> }>;
+      }>("/catalog.json");
+      const pack = catalog.packs.find((entry) => entry.name === parked.requestedName);
+      expect(pack?.releases.map((release) => release.version)).toEqual(["1.0.0"]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 4: a release pinned only by repo NAME goes to a human", async () => {
+    // Kills clause (4). GitHub's repository_id / repository_owner_id are OPTIONAL claims, so a
+    // repo-proven request can arrive with neither. The merge gate then falls back to the claim's
+    // MUTABLE repo_full_name, which a transfer or a re-registered owner login can move — staff may
+    // still approve that, automation may not.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-noids", "0.1.0"),
+      );
+      await harness.approve(admin, first.id);
+      expect((await harness.store.getPackNameClaim(first.requestedName))?.githubRepositoryId).toBeTruthy();
+
+      const idless = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-noids", "0.2.0", { name: first.requestedName }),
+        { omitIds: true },
+      );
+      expect(idless.submissionMethod).toBe("github_actions_oidc");
+      expect(idless.sourceGithubRepositoryId).toBeUndefined();
+      harness.expectDeferredToStaff(idless, "request_ids_missing");
+      // Staff can still approve it — the gate admits it, which is exactly why the clause is needed.
+      expect((await harness.approve(admin, idless.id)).status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 5: the first publish of a new scoped name always faces a human", async () => {
+    // Kills clause (5). The gate's H1a reserves only BARE names, so a brand-new SCOPED name from a
+    // proven repo passes the merge gate on its own. Without this clause any repo-proven submitter
+    // would mint any unclaimed scoped name unattended — and creating a namespace entry is the
+    // decision the queue exists for.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-newname", "0.1.0"),
+      );
+      harness.expectDeferredToStaff(first, "claim_missing");
+      expect(await harness.store.getPackNameClaim(first.requestedName)).toBeNull();
+      // The gate alone WOULD have allowed it: staff approve with no override at all.
+      expect((await harness.approve(admin, first.id)).status).toBe("approved");
+      // And nothing was served in the meantime.
+      const catalog = await harness.publicClient.json<{ packs: Array<{ name: string }> }>("/catalog.json");
+      expect(catalog.packs.some((entry) => entry.name === first.requestedName)).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 6: a grandfathered claim with no ids upgrades through one staff approval", async () => {
+    // Kills clause (6) AND covers the cacc-twin-team upgrade path end to end. A claim minted by a
+    // claim-only publish knows no numeric ids, so nameClaimMatchesRequest would fall back to a
+    // case-folded repo NAME compare — the pin auto-approve depends on would not be a pin at all.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const legacyPublisher = await harness.signIn("legacy-publisher");
+      const admin = await harness.signIn("admin", "admin");
+      const pack = await harness.createPack("auto-legacy", "0.1.0");
+      // The pre-OIDC world: an approved release from a personal token / browser session, whose claim
+      // carries NULL ids.
+      await harness.seedApprovedPublish(legacyPublisher.userId, admin.userId, pack);
+      const claim = await harness.store.getPackNameClaim(pack.requestedName);
+      expect(claim?.githubRepositoryId).toBeUndefined();
+      expect(claim?.githubOwnerId).toBeUndefined();
+
+      const overOidc = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-legacy", "0.2.0", { name: pack.requestedName }),
+      );
+      harness.expectDeferredToStaff(overOidc, "claim_ids_missing");
+
+      // ONE staff approval fixes both problems: it serves the release AND enriches the claim's NULL
+      // ids (COALESCE-guarded, inside the `matched` branch), retiring the rename exposure.
+      await harness.approve(admin, overOidc.id);
+      const enriched = await harness.store.getPackNameClaim(pack.requestedName);
+      expect(enriched?.githubRepositoryId).toBe("repo_123");
+      expect(enriched?.githubOwnerId).toBe("owner_123");
+
+      // Every subsequent OIDC release is unattended. The incentive gradient points at the fix.
+      harness.expectAutoApproved(
+        await harness.publishWithGitHubActionsToken(
+          await harness.createPack("auto-legacy", "0.3.0", { name: pack.requestedName }),
+        ),
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("the grandfathered bare-name, personal-token publisher keeps every staff click", async () => {
+    // cacc-twin-team's exact production shape: a BARE name, a claim backfilled from an api_token row
+    // (so NULL ids), and releases cut with a personal token. It gets no auto-approve — by clause (2)
+    // on the submission path, and by clause (6) even if it moved to OIDC before a staff approval
+    // enriched the claim. Nothing about a personal token proves the release came from the repo.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const publisher = await harness.signIn("twin-publisher");
+      const admin = await harness.signIn("admin", "admin");
+      const bareName = "auto-twin-team";
+      const seeded = await harness.createPack("auto-twin", "1.0.0", { name: bareName });
+      await harness.seedApprovedPublish(publisher.userId, admin.userId, seeded);
+      const claim = await harness.store.getPackNameClaim(bareName);
+      expect(claim?.scope).toBeUndefined();
+      expect(claim?.githubRepositoryId).toBeUndefined();
+
+      // The next release, exactly as it ships today: personal token, claim-only.
+      const byToken = await harness.publishWithPersonalToken(
+        publisher,
+        await harness.createPack("auto-twin", "1.1.0", { name: bareName }),
+      );
+      expect(byToken.submissionMethod).toBe("api_token");
+      harness.expectDeferredToStaff(byToken, "no_release_context");
+      // ...and the pre-bead behaviour is intact: staff approve it with an audited ownership reason.
+      await harness.approveExpectingOwnershipError(admin, byToken.id);
+      await harness.approve(admin, byToken.id, "Verified twin-team ownership out of band.");
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; latest: string; releases: Array<{ version: string }> }>;
+      }>("/catalog.json");
+      const pack = catalog.packs.find((entry) => entry.name === bareName);
+      expect(pack?.latest).toBe("1.1.0");
+      expect(pack?.releases.map((release) => release.version).sort()).toEqual(["1.0.0", "1.1.0"]);
+
+      // Moving to OIDC does not skip the queue on its own: the claim still knows no ids, so the
+      // upgrade costs exactly one staff approval (which enriches it) and no more.
+      const overOidc = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-twin", "1.2.0", { name: bareName }),
+      );
+      harness.expectDeferredToStaff(overOidc, "claim_ids_missing");
+      await harness.approve(admin, overOidc.id);
+      harness.expectAutoApproved(
+        await harness.publishWithGitHubActionsToken(
+          await harness.createPack("auto-twin", "1.3.0", { name: bareName }),
+        ),
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 7: a whole-pack takedown sends the next release back to a human", async () => {
+    // Kills clause (7) — the per-pack kill switch. A withdraw drops the name claim only when staff
+    // explicitly release it, so a pack whose entire history was taken down KEEPS its claim: without
+    // this clause, taking a pack down would not stop its next release merging unread.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-killswitch", "0.1.0"),
+      );
+      await harness.approve(admin, first.id);
+      await harness.withdraw(admin, first.id, "conformance takedown");
+      // The claim survived the takedown — that is the trap this clause closes.
+      expect(await harness.store.getPackNameClaim(first.requestedName)).not.toBeNull();
+
+      const next = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-killswitch", "0.2.0", { name: first.requestedName }),
+      );
+      harness.expectDeferredToStaff(next, "no_served_precedent");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 8: an established name cannot silently point at a different directory", async () => {
+    // Kills clause (8). Two directories in one repo can declare the same pack name, and then the
+    // packPath is the only thing choosing which bits ship. A legitimate monorepo move costs one
+    // staff approval, which re-establishes the precedent.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-path-a", "0.1.0"),
+      );
+      await harness.approve(admin, first.id);
+
+      const moved = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-path-b", "0.2.0", { name: first.requestedName }),
+      );
+      expect(moved.packPath).not.toBe(first.packPath);
+      harness.expectDeferredToStaff(moved, "pack_path_changed");
+
+      // Approving the move re-establishes the precedent, and the NEXT release from the new path is
+      // unattended again.
+      await harness.approve(admin, moved.id);
+      harness.expectAutoApproved(
+        await harness.publishWithGitHubActionsToken(
+          await harness.createPack("auto-path-b", "0.3.0", { name: first.requestedName }),
+        ),
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 9: a publisher can never quietly reverse a staff takedown", async () => {
+    // Kills clause (9), in both the shapes H4 cannot see. H4 is (name, version)-scoped AND
+    // content-swap-scoped: it PERMITS an identical-bits re-publish (the staff-gated reinstatement
+    // path) and says nothing at all about the next patch version carrying the same payload.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const malware = await harness.createPack("auto-takedown", "1.0.0");
+      const served = await harness.publishWithGitHubActionsToken(malware);
+      await harness.approve(admin, served.id);
+      // A second, surviving release so clause (7) is satisfied and this test really exercises (9).
+      const survivor = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-takedown", "1.1.0", { name: malware.requestedName }),
+      );
+      harness.expectAutoApproved(survivor);
+      await harness.withdraw(admin, served.id, "malware");
+
+      // Shape 1: the IDENTICAL commit at the same version. H4 permits this as reinstatement.
+      const identical = await harness.publishWithGitHubActionsToken(malware);
+      expect(identical.id).not.toBe(served.id);
+      harness.expectDeferredToStaff(identical, "withdrawn_history");
+      // Proof that clause (9) is strictly broader than H4 here, not a duplicate of it: staff CAN
+      // approve this exact row, so H4 did not refuse it.
+      expect((await harness.approve(admin, identical.id)).status).toBe("approved");
+
+      // Shape 2: the next patch version, same payload, which H4 is not even asked about.
+      const nextPatch = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-takedown", "1.0.1", { name: malware.requestedName }),
+      );
+      harness.expectDeferredToStaff(nextPatch, "withdrawn_history");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 9: a name legitimately re-issued to another repo is not quarantined forever", async () => {
+    // Kills clause (9)'s LINEAGE FILTER. A name-scoped-forever takedown count would strand every
+    // re-issued name: the new owner's releases would need a staff click for the rest of time, for a
+    // takedown that was about somebody else's bits.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const firstHome = await harness.createPack("auto-reissue", "0.1.0", {
+        repoUrl: `https://github.com/${owner}/first-home`,
+      });
+      const original = await harness.publishWithGitHubActionsToken(firstHome);
+      await harness.approve(admin, original.id);
+      // Staff free the name as part of the takedown, which is the documented re-issue path.
+      await harness.withdraw(admin, original.id, "abandoned", { releaseNameClaim: true });
+      expect(await harness.store.getPackNameClaim(firstHome.requestedName)).toBeNull();
+
+      // A DIFFERENT repo of the same owner takes the name over, staff-approved as any first publish is.
+      const newHome = await harness.createPack("auto-reissue", "0.2.0", {
+        name: firstHome.requestedName,
+        repoUrl: `https://github.com/${owner}/second-home`,
+      });
+      const reissued = await harness.publishWithGitHubActionsToken(newHome);
+      harness.expectDeferredToStaff(reissued, "claim_missing");
+      await harness.approve(admin, reissued.id);
+
+      // And the new owner's REPEAT release is unattended: the withdrawn row belongs to a different
+      // repository and a different submitter, so it is not this lineage's history.
+      harness.expectAutoApproved(
+        await harness.publishWithGitHubActionsToken(
+          await harness.createPack("auto-reissue", "0.3.0", {
+            name: firstHome.requestedName,
+            repoUrl: `https://github.com/${owner}/second-home`,
+          }),
+        ),
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 9: a staff REJECT is durable — refused bits cannot re-publish themselves unread", async () => {
+    // Kills clause (9)'s staff_refused arm. Reject is the ONLY refusal a queued release can receive
+    // (withdrawPublishRequest requires `approved`, and the admin UI offers Reject only pre-approval),
+    // and createPublishRequest's dedup excludes rejected rows — so an identical CI re-run lands a
+    // BRAND NEW pending_validation row that clause (3) cannot see and nothing else reads. Without
+    // this arm, the one verdict staff have on a queued release is durable for nothing.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      // Staff queue a malicious release while the name is still unclaimed...
+      const hostile = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-refused", "2.0.0"),
+      );
+      harness.expectDeferredToStaff(hostile, "claim_missing");
+      const name = hostile.requestedName;
+
+      // ...approve a clean one, which mints both the claim and the served precedent...
+      const clean = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-refused", "1.0.0", { name }),
+      );
+      harness.expectDeferredToStaff(clean, "claim_missing");
+      await harness.approve(admin, clean.id);
+
+      // ...then read the malicious bits and refuse them, with a reason.
+      const refused = await harness.reject(admin, hostile.id, "exfiltrates secrets");
+      expect(refused.statusReason).toBe("exfiltrates secrets");
+
+      // The publisher re-runs the identical workflow. A fresh row, so clause (3) is silent.
+      const replay = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-refused", "2.0.0", { name }),
+      );
+      expect(replay.id).not.toBe(hostile.id);
+      harness.expectDeferredToStaff(replay, "staff_refused");
+
+      // NAME-scoped, not (name, version)-scoped: shipping the refused payload as the next patch is
+      // the same laundering with one digit changed.
+      const bumped = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-refused", "2.0.1", { name }),
+      );
+      harness.expectDeferredToStaff(bumped, "staff_refused");
+
+      // Nothing a human refused ever reached the catalog on its own.
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; latest: string; releases: Array<{ version: string }> }>;
+      }>("/catalog.json");
+      const pack = catalog.packs.find((entry) => entry.name === name);
+      expect(pack?.releases.map((release) => release.version)).toEqual(["1.0.0"]);
+
+      // Proof this is clause (9)'s own refusal and not H4 or the gate saying no downstream: staff
+      // CAN still approve the exact row, which is the documented one-click correction path.
+      expect((await harness.approve(admin, replay.id)).status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 9: a publisher's own superseded correction is not a staff refusal", async () => {
+    // Kills the reviewer discriminator inside the refusal lookup. The supersede CAS also writes
+    // status `rejected`, deliberately with reviewed_by_user_id NULL, because nobody refused those
+    // bits. Reading every rejected row as a refusal would quarantine the name of every publisher who
+    // ever corrected a pending submission — the part-(d) correction path, self-DoS'd.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const draft = await harness.createPack("auto-correct", "0.1.0");
+      const first = await harness.publishWithGitHubActionsToken(draft);
+      harness.expectDeferredToStaff(first, "claim_missing");
+      const name = first.requestedName;
+
+      // The publisher's own correction of a still-queued release: divergent bits, same name@version.
+      const corrected = await harness.publishWithGitHubActionsToken({ ...draft, commit: secondCommit });
+      expect(corrected.id).not.toBe(first.id);
+      const superseded = await harness.store.getPublishRequest(first.id);
+      expect(superseded?.status).toBe("rejected");
+      expect(superseded?.reviewedBy).toBeUndefined();
+      harness.expectDeferredToStaff(corrected, "claim_missing");
+      await harness.approve(admin, corrected.id);
+
+      // The next legitimate release still merges unattended...
+      harness.expectAutoApproved(
+        await harness.publishWithGitHubActionsToken(
+          await harness.createPack("auto-correct", "0.2.0", { name }),
+        ),
+      );
+      // ...because the quarantine lookup sees nothing at all for this name.
+      const refusals = await harness.store.listStaffRefusedPublishRequestsForName(name);
+      expect(refusals.map((row) => row.id)).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 9: an id-less takedown fails CLOSED, so a repo rename cannot reverse it", async () => {
+    // Kills clause (9)'s fail-closed lineage disjunct. sameSourceRepository compares numeric ids only
+    // when BOTH sides have them and otherwise falls back to the case-folded repo full name — and
+    // every web_session / api_token row is id-less, which is the shape of every pre-OIDC release.
+    // GitHub keeps repository_id across a RENAME and moves only the full name, so without the
+    // disjunct the withdrawn row compares as a DIFFERENT lineage and the takedown reverses itself
+    // with no human anywhere. H4 falls open the same way, so the exact withdrawn name@version comes
+    // back with a different commit — precisely what PUBLISH_VERSION_WITHDRAWN exists to refuse.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const legacyPublisher = await harness.signIn("rename-publisher");
+      const before = `https://github.com/${owner}/renamed-before`;
+      const after = `https://github.com/${owner}/renamed-after`;
+
+      // The pre-OIDC release that will be taken down: a browser-session publish, so NULL ids.
+      const seeded = await harness.seedApprovedPublish(
+        legacyPublisher.userId,
+        admin.userId,
+        await harness.createPack("auto-rename", "1.0.0", { repoUrl: before }),
+      );
+      const name = seeded.requestedName;
+      expect(seeded.sourceGithubRepositoryId).toBeUndefined();
+
+      // A surviving OIDC release from the same repo, staff-approved, which enriches the claim's ids
+      // and satisfies clause (7). Nothing here needs a staff override.
+      const survivor = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-rename", "2.0.0", { name, repoUrl: before }),
+      );
+      harness.expectDeferredToStaff(survivor, "claim_ids_missing");
+      await harness.approve(admin, survivor.id);
+      // The fixture models GitHub's real behaviour: every `{owner}/renamed-*` shares one numeric
+      // repository id, so the rename below moves the full name and nothing else.
+      expect((await harness.store.getPackNameClaim(name))?.githubRepositoryId).toBe(
+        `repo_${owner}_renamed`,
+      );
+
+      // Staff take the id-less release down.
+      await harness.withdraw(admin, seeded.id, "malware");
+
+      // CONTROL, before the rename: the full names still match, so the fallback answers correctly and
+      // the takedown holds. This is the shape the shipped test already covered.
+      harness.expectDeferredToStaff(
+        await harness.publishWithGitHubActionsToken(
+          await harness.createPack("auto-rename", "2.1.0", { name, repoUrl: before }),
+        ),
+        "withdrawn_history",
+      );
+
+      // The rename: same numeric repository id, new full name. The claim still matches on ids, so
+      // clause (9) is the only barrier left.
+      const escape = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-rename", "3.0.0", { name, repoUrl: after }),
+      );
+      expect(escape.sourceGithubRepositoryId).toBe(`repo_${owner}_renamed`);
+      expect(escape.repository.fullName).toBe(`${owner}/renamed-after`);
+      harness.expectDeferredToStaff(escape, "withdrawn_history");
+
+      // The worse shape: the exact withdrawn version returning with DIFFERENT bits, which H4 also
+      // fails to catch once the lineage compare falls open.
+      const resurrected = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-rename", "1.0.0", {
+          name,
+          repoUrl: after,
+          commit: secondCommit,
+        }),
+      );
+      harness.expectDeferredToStaff(resurrected, "withdrawn_history");
+
+      // Only the surviving release is served: neither the resurrected takedown nor anything from the
+      // renamed repo reached the catalog.
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; latest: string; releases: Array<{ version: string }> }>;
+      }>("/catalog.json");
+      const pack = catalog.packs.find((entry) => entry.name === name);
+      expect(pack?.latest).toBe("2.0.0");
+      expect(pack?.releases.map((release) => release.version)).toEqual(["2.0.0"]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 10: legality is the staff gate's, and auto-approve can never create a pack", async () => {
+    // Kills clause (10) — the delegation itself. No id EQUALITY is written in the predicate because
+    // H2 inside the gate already refuses every mismatch with no override supplied; asserting the
+    // gate_refused REASON is what proves the gate ran, rather than the store's own claim re-check
+    // catching it downstream (which would leave no refusal recorded at all).
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const held = await harness.createPack("auto-held", "0.1.0", {
+        repoUrl: `https://github.com/${owner}/held-pack`,
+      });
+      const owned = await harness.publishWithGitHubActionsToken(held);
+      await harness.approve(admin, owned.id);
+
+      // A SIBLING repo of the same owner. Same claim, same precedent, same packPath — the only thing
+      // wrong with it is which repository it came from.
+      const sibling = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-held", "0.2.0", {
+          name: held.requestedName,
+          repoUrl: `https://github.com/${owner}/sibling-pack`,
+        }),
+      );
+      harness.expectDeferredToStaff(sibling, "gate_refused");
+      // Staff cannot wave it through either without the audited re-pin.
+      await harness.approveExpectingError(admin, sibling.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+
+      // The structural invariant: an unattended path can never CREATE a pack or move a name.
+      const unclaimed = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-unclaimed", "0.1.0"),
+      );
+      harness.expectDeferredToStaff(unclaimed, "claim_missing");
+      const catalog = await harness.publicClient.json<{
+        packs: Array<{ name: string; releases: Array<{ version: string }> }>;
+      }>("/catalog.json");
+      expect(catalog.packs.some((entry) => entry.name === unclaimed.requestedName)).toBe(false);
+      const heldPack = catalog.packs.find((entry) => entry.name === held.requestedName);
+      expect(heldPack?.releases.map((release) => release.version)).toEqual(["0.1.0"]);
+      expect((await harness.store.getPackNameClaim(held.requestedName))?.githubRepositoryId).toBe(
+        "repo_acme_held-pack",
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 11: a runaway publisher degrades to staff review, never to a 429", async () => {
+    // Kills clause (11) and its ORDERING. The backstop is consumed LAST, after the gate, so a
+    // release the gate refused never burns a token — otherwise an attacker could exhaust a
+    // publisher's window with submissions that were never going to merge.
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const floodRepoUrl = `https://github.com/${owner}/flood-pack`;
+      const pack = await harness.createPack("auto-flood", "0.1.0", { repoUrl: floodRepoUrl });
+      const first = await harness.publishWithGitHubActionsToken(pack);
+      await harness.approve(admin, first.id);
+      const name = pack.requestedName;
+      const floodRelease = (version: string) =>
+        harness.createPack("auto-flood", version, { name, repoUrl: floodRepoUrl });
+
+      // Burn 9 of the 10 tokens in this pack name's window directly, so the test does not have to
+      // drive ten real releases. Keying on this exact bucket is deliberate: a mutation that changed
+      // the key or stopped consuming would let the final release below auto-approve.
+      for (let index = 0; index < 9; index += 1) {
+        expect(tryConsumeRateLimit(autoApproveRateLimitKey(name), autoApproveRateLimit)).toBe(true);
+      }
+
+      // A gate-refused release (foreign scope) must NOT consume the 10th token.
+      const hostile = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-flood", "0.2.0", {
+          name,
+          repoUrl: "https://github.com/evil/flood-pack",
+        }),
+      );
+      harness.expectDeferredToStaff(hostile, "gate_refused");
+
+      // ...so the 10th token is still there for a legitimate release.
+      harness.expectAutoApproved(await harness.publishWithGitHubActionsToken(await floodRelease("0.2.0")));
+
+      // The 11th auto-approvable release in the window degrades to review. Note the status: a 429
+      // would have failed publishWithGitHubActionsToken's 2xx assertion — the publish is valid, only
+      // the automation is suspect.
+      const deferred = await harness.publishWithGitHubActionsToken(await floodRelease("0.3.0"));
+      harness.expectDeferredToStaff(deferred, "rate_limited");
+      // And the deferred row can never re-enter through its own validate: it is pending_review now.
+      const replay = await harness.publishWithGitHubActionsToken(await floodRelease("0.3.0"));
+      expect(replay.id).toBe(deferred.id);
+      harness.expectDeferredToStaff(replay, "requeued");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("clause 1: the kill switch is off by default and fails closed", async () => {
+    // Kills clause (1). Reading the flag as `!== false`, or ignoring it, would arm the riskiest
+    // change in the epic by deploy rather than by decision. The harness default mirrors the shipped
+    // default: OFF.
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-off", "0.1.0"),
+      );
+      await harness.approve(admin, first.id);
+      // Identical world to the happy-path test above — claim, precedent, packPath, OIDC context all
+      // match. The only difference is the flag.
+      const second = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-off", "0.2.0", { name: first.requestedName }),
+      );
+      harness.expectDeferredToStaff(second, "disabled");
+      expect((await harness.approve(admin, second.id)).status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("loadConfig arms auto-approve only for an explicit 1", () => {
+    // The env parse, separately from the predicate: every spelling other than "1" is OFF.
+    const base = { APP_URL: "http://127.0.0.1:8080", SESSION_SECRET: "x".repeat(40) };
+    expect(loadConfig({ ...base }).publishAutoApprove).toBe(false);
+    expect(loadConfig({ ...base, REGISTRY_PUBLISH_AUTO_APPROVE: "" }).publishAutoApprove).toBe(false);
+    expect(loadConfig({ ...base, REGISTRY_PUBLISH_AUTO_APPROVE: "0" }).publishAutoApprove).toBe(false);
+    expect(loadConfig({ ...base, REGISTRY_PUBLISH_AUTO_APPROVE: "true" }).publishAutoApprove).toBe(false);
+    expect(loadConfig({ ...base, REGISTRY_PUBLISH_AUTO_APPROVE: "yes" }).publishAutoApprove).toBe(false);
+    expect(loadConfig({ ...base, REGISTRY_PUBLISH_AUTO_APPROVE: " 1 " }).publishAutoApprove).toBe(false);
+    expect(loadConfig({ ...base, REGISTRY_PUBLISH_AUTO_APPROVE: "1" }).publishAutoApprove).toBe(true);
+  });
+
+  test("an approval failure never marks a valid release validation_failed, and CI re-runs replay", async () => {
+    // Kills the narrowed-try trap. validateAndStorePublishRequest wraps validation in a try whose
+    // catch calls markPublishRequestValidationFailed; if auto-approve sat inside it, a bug anywhere
+    // in the approval path would tell the publisher their pack is broken and burn the row (a
+    // validation_failed row is only correctable by superseding it).
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const first = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("auto-crash", "0.1.0"),
+      );
+      await harness.approve(admin, first.id);
+
+      const boom = new Error("auto-approve exploded");
+      const original = harness.store.getServedPublishPrecedent.bind(harness.store);
+      harness.store.getServedPublishPrecedent = async () => {
+        throw boom;
+      };
+      let crashedId: string;
+      try {
+        const response = await harness.publishWithGitHubActionsTokenRaw(
+          await harness.createPack("auto-crash", "0.2.0", { name: first.requestedName }),
+        );
+        // The failure surfaces as a 500 rather than being swallowed...
+        expect(response.status).toBe(500);
+        const rows = await harness.store.listPublishRequests();
+        const crashed = rows.find((row) => row.requestedVersion === "0.2.0");
+        expect(crashed).toBeTruthy();
+        crashedId = crashed!.id;
+      } finally {
+        harness.store.getServedPublishPrecedent = original;
+      }
+      // ...and the row is left exactly where a valid, validated release belongs.
+      const row = await harness.store.getPublishRequest(crashedId);
+      expect(row?.status).toBe("pending_review");
+      expect(row?.validationError).toBeUndefined();
+      expect(row?.registryEntry?.release.version).toBe("0.2.0");
+      // Staff can still approve it, so nothing was burned.
+      expect((await harness.approve(admin, crashedId)).status).toBe("approved");
+
+      // A CI re-run of an already-published release replays the approved row instead of 422-ing on
+      // markPublishRequestValidated's status guard.
+      const replayPack = await harness.createPack("auto-crash", "0.3.0", { name: first.requestedName });
+      const merged = await harness.publishWithGitHubActionsToken(replayPack);
+      harness.expectAutoApproved(merged);
+      const replayed = await harness.publishWithGitHubActionsToken(replayPack);
+      expect(replayed.id).toBe(merged.id);
+      expect(replayed.status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
 type TestPack = PublishRequestInput & {
   slug: string;
 };
@@ -1570,7 +2384,9 @@ function baseCatalogPack(slug: string) {
   };
 }
 
-async function createPublishHarness(options: { basePackSlugs?: string[] } = {}) {
+async function createPublishHarness(
+  options: { basePackSlugs?: string[]; autoApprove?: boolean } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), "registry-publish-integration-"));
   const distRoot = join(dir, "dist");
   const repoRoot = join(dir, "repo");
@@ -1602,11 +2418,27 @@ async function createPublishHarness(options: { basePackSlugs?: string[] } = {}) 
   }
 
   const config = testConfig();
+  // Unattended approval is armed per harness, never by default: the shipped default is OFF and the
+  // config read is `=== true`, so every pre-existing test in this file keeps the staff queue.
+  config.publishAutoApprove = options.autoApprove === true;
+  // Auto-approve refusals are logged, not returned, and the log names WHICH clause refused. The
+  // tests below assert that reason, because several clauses share the observable outcome ("the row
+  // stays pending_review") and could not otherwise be killed independently of each other.
+  const autoApproveDeclines: Array<{ requestId: string; reason: string }> = [];
+  const consoleInfoSpy = spyOn(console, "info").mockImplementation((...args: unknown[]) => {
+    const line = args.map((value) => String(value)).join(" ");
+    const match = /^\[registry\] auto-approve declined (\S+) \(.*\): (\S+)$/.exec(line);
+    if (match?.[1] && match[2]) autoApproveDeclines.push({ requestId: match[1], reason: match[2] });
+  });
   let importCandidate: GitHubPublishCandidate | null = null;
   // The repo + commit the next minted GitHub Actions token proves. publishWithGitHubActionsToken
   // points this at whatever repo the pack claims, so a test can hold a repo-proven token for a
-  // repo OTHER than the one that owns the name it is attacking.
-  let oidcSource = { repository: `${owner}/${repo}`, sha: commit };
+  // repo OTHER than the one that owns the name it is attacking. `omitIds` reproduces the shape
+  // where GitHub's OPTIONAL repository_id / repository_owner_id claims are simply absent.
+  let oidcSource: { repository: string; sha: string; ref?: string; omitIds?: boolean } = {
+    repository: `${owner}/${repo}`,
+    sha: commit,
+  };
   const handler = createRegistryFetchHandler({
     config,
     store,
@@ -1621,13 +2453,14 @@ async function createPublishHarness(options: { basePackSlugs?: string[] } = {}) 
       const ids = repoIdentityFor(oidcSource.repository);
       return {
         repository: oidcSource.repository,
-        repositoryId: ids.repositoryId,
+        repositoryId: oidcSource.omitIds ? undefined : ids.repositoryId,
         repositoryOwner: identityOwner,
-        repositoryOwnerId: ids.ownerId,
+        repositoryOwnerId: oidcSource.omitIds ? undefined : ids.ownerId,
         workflowRef: `${oidcSource.repository}/.github/workflows/release.yml@refs/heads/main`,
         runId: "1",
         runAttempt: "1",
         sha: oidcSource.sha,
+        ref: oidcSource.ref ?? "refs/heads/main",
         actor: "publisher",
         actorId: "actor_123",
         eventName: "push",
@@ -1793,17 +2626,41 @@ async function createPublishHarness(options: { basePackSlugs?: string[] } = {}) 
     return publishWithBearerToken(token.access_token, pack);
   }
 
-  async function publishWithGitHubActionsToken(pack: TestPack) {
+  async function publishWithGitHubActionsToken(
+    pack: TestPack,
+    over: { omitIds?: boolean; ref?: string } = {},
+  ) {
     // The token proves the pack's OWN repo — that is what a real workflow running in that repo
     // gets. A test attacks a foreign name by pointing the pack at its own hostile repo, never by
     // holding a token for one repo and asserting another (the mint path already refuses that).
-    oidcSource = { repository: new URL(pack.repoUrl).pathname.slice(1), sha: pack.commit };
+    oidcSource = {
+      repository: new URL(pack.repoUrl).pathname.slice(1),
+      sha: pack.commit,
+      ref: over.ref,
+      omitIds: over.omitIds,
+    };
     const runner = nextMachineClient();
     const minted = await runner.json<{ access_token: string }>("/api/publish-tokens/github-actions/mint", {
       method: "POST",
       body: { ...pack, oidcToken: "test-oidc-token" },
     });
     return publishWithBearerToken(minted.access_token, pack, runner);
+  }
+
+  // The same submit, but returning the raw Response so a test can pin a non-2xx status. Used to
+  // prove that a THROWING auto-approve leaves the row pending_review rather than validation_failed.
+  async function publishWithGitHubActionsTokenRaw(pack: TestPack) {
+    oidcSource = { repository: new URL(pack.repoUrl).pathname.slice(1), sha: pack.commit };
+    const runner = nextMachineClient();
+    const minted = await runner.json<{ access_token: string }>("/api/publish-tokens/github-actions/mint", {
+      method: "POST",
+      body: { ...pack, oidcToken: "test-oidc-token" },
+    });
+    return runner.request("/api/publish-requests?validate=1", {
+      method: "POST",
+      bearerToken: minted.access_token,
+      body: pack,
+    });
   }
 
   async function publishWithEiaToken(pack: TestPack) {
@@ -1940,6 +2797,17 @@ async function createPublishHarness(options: { basePackSlugs?: string[] } = {}) 
     return payload.error;
   }
 
+  // The only refusal a QUEUED release can receive — staff cannot withdraw what was never served.
+  async function reject(client: SignedInClient, requestId: string, reason: string) {
+    const res = await client.json<{ publishRequest: PublishRequestRow }>(
+      `/api/publish-requests/${encodeURIComponent(requestId)}/reject`,
+      { method: "POST", csrfToken: client.csrfToken, body: { reason } },
+    );
+    expect(res.publishRequest.status).toBe("rejected");
+    expect(res.publishRequest.reviewedBy?.handle).toBe("admin");
+    return res.publishRequest;
+  }
+
   async function withdraw(
     client: SignedInClient,
     requestId: string,
@@ -1958,10 +2826,42 @@ async function createPublishHarness(options: { basePackSlugs?: string[] } = {}) 
     return res.publishRequest;
   }
 
+  // The reason the LAST auto-approve refusal for this request recorded, or undefined if the release
+  // was never declined. A request that auto-approved has no entry.
+  function autoApproveDeclineReason(requestId: string) {
+    return autoApproveDeclines.filter((row) => row.requestId === requestId).at(-1)?.reason;
+  }
+
+  // A release that fell back to the staff queue, and WHICH clause sent it there. status_reason and
+  // reviewedBy must both be absent: an untouched pending_review row is the pre-bead outcome.
+  function expectDeferredToStaff(request: PublishRequestRow, reason: AutoApproveRefusalName) {
+    expect(request.status, `expected ${request.requestedName}@${request.requestedVersion} to defer`).toBe(
+      "pending_review",
+    );
+    expect(request.statusReason).toBeUndefined();
+    expect(request.reviewedBy).toBeUndefined();
+    expect(autoApproveDeclineReason(request.id)).toBe(reason);
+  }
+
+  // A release that merged with no human. reviewedBy stays absent (nobody reviewed it) and
+  // status_reason carries the constant every status surface renders.
+  function expectAutoApproved(request: PublishRequestRow) {
+    expect(request.status, `expected ${request.requestedName}@${request.requestedVersion} to auto-approve`).toBe(
+      "approved",
+    );
+    expect(request.statusReason).toBe(AUTO_APPROVED_STATUS_REASON);
+    expect(request.reviewedBy).toBeUndefined();
+    expect(autoApproveDeclineReason(request.id)).toBeUndefined();
+  }
+
   return {
     store,
     dbUrl: testDb?.url,
     publicClient,
+    autoApproveDeclineReason,
+    expectDeferredToStaff,
+    expectAutoApproved,
+    publishWithGitHubActionsTokenRaw,
     createPack,
     seedApprovedPublish,
     signIn,
@@ -1976,8 +2876,10 @@ async function createPublishHarness(options: { basePackSlugs?: string[] } = {}) 
     approve,
     approveExpectingOwnershipError,
     approveExpectingError,
+    reject,
     withdraw,
     async close() {
+      consoleInfoSpy.mockRestore();
       server.stop(true);
       await store.close();
       await testDb?.drop();
@@ -2009,6 +2911,7 @@ function testConfig(): ServerConfig {
     },
     isProduction: false,
     devAuthEnabled: true,
+    publishAutoApprove: false,
   };
 }
 

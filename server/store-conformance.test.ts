@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import postgres from "postgres";
 import { CLI_DEVICE_CODE_TTL_MS, CLI_DEVICE_CODE_INTERVAL_SECONDS, generateCliDeviceCodePair } from "./cli-auth";
+import { AUTO_APPROVED_STATUS_REASON } from "./publish";
 import { StoreConflictError, StoreValidationError, createStore } from "./store";
 import { createTestDatabase } from "./test-db";
 import type {
@@ -936,6 +937,189 @@ for (const lane of lanes) {
       expect(edited.requestedDescription).toBe("Corrected release notes.");
       expect((await store.getPublishRequest(first.id))?.status).toBe("rejected");
     });
+
+    // (a) Unattended approval plumbing. Nothing here decides WHETHER a release may auto-approve —
+    // that predicate lives in app.ts — but every one of these is a store behaviour the predicate
+    // depends on, so each case names the mutation it kills.
+    test("auto-approve: the approval is recorded with no reviewer and a visible reason", async () => {
+      // Mutation killed: reusing approvePublishRequest(submitterId, ...) — an audit trail and a
+      // reviewed_by field claiming the publisher approved their own release, and an auto-approval
+      // indistinguishable from a staff one in every surface staff actually look at.
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = uid("pack");
+
+      const first = await approvedPublishRequest(store, admin.id, submitter.id, name);
+      expect(first.reviewedBy?.id).toBe(admin.id);
+      // The staff path keeps blanking status_reason: the auto reason must not leak onto it.
+      expect(first.statusReason).toBeUndefined();
+
+      const repeat = await validatedPublishRequest(store, submitter.id, name, {
+        requestedVersion: "0.2.0",
+      });
+      const auto = await store.autoApprovePublishRequest(repeat.id, {
+        ownershipBasis: "repo_proven",
+        autoApprove: { precedentRequestId: first.id, ref: "refs/tags/v0.2.0", eventName: "push" },
+      });
+      expect(auto.status).toBe("approved");
+      expect(auto.reviewedBy).toBeUndefined();
+      expect(auto.reviewedAt).toBeTruthy();
+      expect(auto.statusReason).toBe(AUTO_APPROVED_STATUS_REASON);
+      // It is really served, not just marked.
+      expect((await store.listApprovedPublishRequests()).some((r) => r.id === repeat.id)).toBe(true);
+      // Re-read: the reason and the NULL reviewer survive a round trip, which is what the three
+      // status surfaces and /api/admin/publish-requests actually read.
+      const reread = await store.getPublishRequest(repeat.id);
+      expect(reread?.statusReason).toBe(AUTO_APPROVED_STATUS_REASON);
+      expect(reread?.reviewedBy).toBeUndefined();
+      // The claim was matched, not re-minted or moved.
+      const claim = await store.getPackNameClaim(name);
+      expect(claim?.sourceRequestId).toBe(first.id);
+    });
+
+    test("auto-approve: getServedPublishPrecedent tracks the newest SERVED release", async () => {
+      // Mutations killed: returning any/oldest approved row (a publisher could revert an
+      // established name to a stale packPath unattended), and ignoring status (which would break
+      // the per-pack kill switch — withdraw everything and the next release must face a human).
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = uid("pack");
+      expect(await store.getServedPublishPrecedent(name)).toBeNull();
+
+      const first = await approvedPublishRequest(store, admin.id, submitter.id, name, {
+        packPath: "packs/original",
+      });
+      expect((await store.getServedPublishPrecedent(name))?.id).toBe(first.id);
+
+      const second = await approvedPublishRequest(store, admin.id, submitter.id, name, {
+        requestedVersion: "0.2.0",
+        packPath: "packs/moved",
+      });
+      const newest = await store.getServedPublishPrecedent(name);
+      expect(newest?.id).toBe(second.id);
+      expect(newest?.packPath).toBe("packs/moved");
+
+      // A withdrawn release is not a precedent; the older one becomes current again.
+      await store.withdrawPublishRequest(admin.id, second.id, "conformance takedown");
+      expect((await store.getServedPublishPrecedent(name))?.id).toBe(first.id);
+      // Whole-pack takedown: no precedent at all, even though the name claim survives.
+      await store.withdrawPublishRequest(admin.id, first.id, "conformance takedown");
+      expect(await store.getServedPublishPrecedent(name)).toBeNull();
+      expect(await store.getPackNameClaim(name)).not.toBeNull();
+      // Another name's releases never answer for this one.
+      expect(await store.getServedPublishPrecedent(uid("pack"))).toBeNull();
+    });
+
+    test("auto-approve: listStaffRefusedPublishRequestsForName spans every version", async () => {
+      // Mutation killed: scoping it to one version, which collapses the takedown clause into H4 —
+      // a takedown of 1.0.0 for malware would then stop nothing but a re-publish of 1.0.0.
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = uid("pack");
+      const other = uid("pack");
+
+      const takenDown = await approvedPublishRequest(store, admin.id, submitter.id, name);
+      await store.withdrawPublishRequest(admin.id, takenDown.id, "conformance takedown");
+      const laterVersion = await approvedPublishRequest(store, admin.id, submitter.id, name, {
+        requestedVersion: "0.2.0",
+      });
+      await store.withdrawPublishRequest(admin.id, laterVersion.id, "conformance takedown");
+      const served = await approvedPublishRequest(store, admin.id, submitter.id, name, {
+        requestedVersion: "0.3.0",
+      });
+      const otherName = await approvedPublishRequest(store, admin.id, submitter.id, other);
+      await store.withdrawPublishRequest(admin.id, otherName.id, "conformance takedown");
+
+      const rows = await store.listStaffRefusedPublishRequestsForName(name);
+      expect(rows.map((row) => row.id).sort()).toEqual([takenDown.id, laterVersion.id].sort());
+      // Not scoped to one version...
+      expect(rows.map((row) => row.requestedVersion).sort()).toEqual(["0.1.0", "0.2.0"]);
+      // ...and not scoped past the name, or leaking a still-served row.
+      expect(rows.some((row) => row.id === served.id)).toBe(false);
+      expect(rows.some((row) => row.id === otherName.id)).toBe(false);
+    });
+
+    test("auto-approve: a staff reject is a refusal, a supersede is not", async () => {
+      // Mutation killed: dropping `rejected` from the lookup, which makes a staff reject durable for
+      // NOTHING (the dedup excludes rejected rows, so the refused release re-publishes itself as a
+      // fresh pending_validation row). And the opposite mutation: dropping the reviewer test, which
+      // would quarantine every name whose owner ever corrected a pending submission, because the
+      // supersede CAS also writes `rejected`.
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = uid("pack");
+
+      const humanRefused = await validatedPublishRequest(store, submitter.id, name, {
+        requestedVersion: "0.4.0",
+      });
+      const rejected = await store.rejectPublishRequest(admin.id, humanRefused.id, "exfiltrates secrets");
+      expect(rejected.status).toBe("rejected");
+      expect(rejected.reviewedBy?.id).toBe(admin.id);
+
+      // A divergent resubmit of a still-pending release: the predecessor is closed as `rejected` by
+      // the supersede CAS, with nobody recorded as having reviewed it.
+      const draft = await validatedPublishRequest(store, submitter.id, name, {
+        requestedVersion: "0.5.0",
+      });
+      await store.createPublishRequest(
+        submitter.id,
+        publishInput(name, { requestedVersion: "0.5.0", commit: "c".repeat(40) }),
+        "web_session",
+      );
+      const superseded = await store.getPublishRequest(draft.id);
+      expect(superseded?.status).toBe("rejected");
+      expect(superseded?.reviewedBy).toBeUndefined();
+
+      const rows = await store.listStaffRefusedPublishRequestsForName(name);
+      expect(rows.map((row) => row.id)).toEqual([humanRefused.id]);
+    });
+
+    if (lane.name === "postgres") {
+      test("auto-approve: the audit row is attributable to nobody and marked auto", async () => {
+        const submitter = await store.ensureUser(identity());
+        const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+        const name = uid("pack");
+        const first = await approvedPublishRequest(store, admin.id, submitter.id, name);
+        const repeat = await validatedPublishRequest(store, submitter.id, name, {
+          requestedVersion: "0.2.0",
+        });
+        await store.autoApprovePublishRequest(repeat.id, {
+          ownershipBasis: "repo_proven",
+          autoApprove: { precedentRequestId: first.id, ref: "refs/tags/v0.2.0", eventName: "push" },
+        });
+
+        const sql = postgres(dbUrl!, { max: 1 });
+        try {
+          const rows = await sql`
+            SELECT actor_user_id, metadata FROM audit_logs
+            WHERE target_id = ${repeat.id} AND action = 'publish_request.approve'`;
+          expect(rows).toHaveLength(1);
+          // NULL, not the submitter: nobody approved this. Same shape auditSystem already writes.
+          expect(rows[0]!.actor_user_id).toBeNull();
+          expect(rows[0]!.metadata.approvalMode).toBe("auto");
+          expect(rows[0]!.metadata.autoApprovedFromRequestId).toBe(first.id);
+          // Recorded, never gated on: an available signal that would be indefensible to discard.
+          expect(rows[0]!.metadata.oidcRef).toBe("refs/tags/v0.2.0");
+          expect(rows[0]!.metadata.oidcEventName).toBe("push");
+          // The shared approval body still records everything a staff approval records.
+          expect(rows[0]!.metadata.ownershipBasis).toBe("repo_proven");
+          expect(rows[0]!.metadata.namePin).toBe("matched");
+          expect(rows[0]!.metadata.requestedVersion).toBe("0.2.0");
+
+          // And the staff approval of the FIRST release is still attributable to the human, with no
+          // auto marker anywhere on it.
+          const staffRows = await sql`
+            SELECT actor_user_id, metadata FROM audit_logs
+            WHERE target_id = ${first.id} AND action = 'publish_request.approve'`;
+          expect(staffRows).toHaveLength(1);
+          expect(staffRows[0]!.actor_user_id).toBe(admin.id);
+          expect(staffRows[0]!.metadata.approvalMode).toBeUndefined();
+          expect(staffRows[0]!.metadata.autoApprovedFromRequestId).toBeUndefined();
+        } finally {
+          await sql.end();
+        }
+      });
+    }
 
     test("ownership: upsert, per-user/per-repo check, and revocation", async () => {
       const ownerUser = await store.ensureUser(identity());
