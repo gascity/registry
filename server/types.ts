@@ -46,6 +46,11 @@ export type ApiTokenPublishConstraints = {
   packPath: string;
   requestedName: string;
   requestedVersion: string;
+  // GitHub's numeric ids for the repo + owner the minting OIDC token proved. Carried on the
+  // token so the submit path can stamp them server-side without trusting the request body;
+  // NOT part of the scope comparison (that stays on the request fields the client sends).
+  githubRepositoryId?: string;
+  githubOwnerId?: string;
 };
 
 export type CliDeviceCodeCreateResult = {
@@ -92,6 +97,10 @@ export type IdentityClaims = {
 export type PublishApprovalDecision = {
   ownershipOverrideReason?: string;
   ownershipBasis?: "repo_proven" | "verified_repo_ownership" | "org_member" | "override";
+  // What the approval did to the pack's name claim: minted the first claim, or matched the
+  // claim already on file. Derived by the store at approve time (never supplied by the
+  // caller) and recorded in the approve audit row.
+  namePin?: "created" | "matched" | "repinned";
 };
 
 export type ReviewInput = {
@@ -176,6 +185,28 @@ export type VerifiedPackOwnershipInput = {
   verificationMethod: "github_app_user_token" | "manual";
 };
 
+// Durable binding of a pack name to the repo/owner that first published it, written when a
+// publish request for a previously unclaimed name is approved. Names are global and permanent
+// once served, so the first approval is what every later release of that name is measured
+// against. Distinct from PackOwnership, which is keyed per catalog pack_key + immutable
+// source_url and so cannot represent a direct publish (whose sourceUrl moves every release).
+export type PackNameClaim = {
+  name: string;
+  // The `acme` of `acme/tools`; absent for a legacy bare name.
+  scope?: string;
+  repoFullName: string;
+  // GitHub's numeric ids — stable across repo and account renames, which the logins are not.
+  // Absent when the claiming publish path never proved them (claim-only submissions).
+  githubRepositoryId?: string;
+  githubOwnerId?: string;
+  githubOwnerLogin: string;
+  claimedByUserId?: string;
+  // The approved publish request the claim was derived from.
+  sourceRequestId?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type PublishRequestStatus =
   | "pending_validation"
   | "validation_failed"
@@ -218,6 +249,9 @@ export type GitHubPublishCandidate = {
     id: string;
     fullName: string;
     owner: string;
+    // GitHub's numeric owner id, when the discovery response carried it. Optional so
+    // candidates from imports created before it was captured still normalize.
+    ownerId?: string;
     name: string;
     htmlUrl: string;
     defaultBranch: string;
@@ -296,6 +330,19 @@ export type PublishRequestRow = {
   updatedAt: string;
   submittedBy: PublicUser;
   submissionMethod?: PublishSubmissionMethod;
+  // See PublishSourceIdentity: stamped server-side at submission, absent on claim-only paths
+  // and on every row that predates the columns.
+  sourceGithubRepositoryId?: string;
+  sourceGithubOwnerId?: string;
+};
+
+// GitHub's numeric ids for a publish request's source, derived server-side from the trusted
+// auth context at submission time (the OIDC-minted token's constraints, or an App-discovered
+// import candidate) — never read from the request body, same doctrine as submissionMethod.
+// Absent for claim-only paths, which prove nothing about the repo.
+export type PublishSourceIdentity = {
+  githubRepositoryId?: string;
+  githubOwnerId?: string;
 };
 
 export interface RegistryStore {
@@ -369,6 +416,7 @@ export interface RegistryStore {
     userId: string,
     input: PublishRequestInput,
     submissionMethod: PublishSubmissionMethod,
+    sourceIdentity?: PublishSourceIdentity,
   ): Promise<PublishRequestRow>;
   getPublishRequest(id: string): Promise<PublishRequestRow | null>;
   listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]>;
@@ -377,6 +425,9 @@ export interface RegistryStore {
   // Withdrawn rows for one name@version — feeds the anti-content-swap reinstatement guard. Scoped
   // (not a full list) so it stays O(index-hit) and can never truncate past the conflicting row.
   listWithdrawnPublishRequestsForVersion(name: string, version: string): Promise<PublishRequestRow[]>;
+  // The name→owner binding for a pack name, or null while the name is unclaimed. Written by
+  // approvePublishRequest (first approval of a name wins) and by the init() backfill.
+  getPackNameClaim(name: string): Promise<PackNameClaim | null>;
   markPublishRequestValidated(
     id: string,
     entry: PublishRegistryEntry,

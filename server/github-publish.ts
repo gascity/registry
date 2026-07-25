@@ -33,6 +33,7 @@ type GitHubRepository = {
   private?: boolean;
   default_branch?: string;
   owner?: {
+    id?: number;
     login?: string;
   };
   permissions?: {
@@ -259,6 +260,7 @@ async function scanRepositoryForPackTomls(
         id: normalized.id,
         fullName: normalized.fullName,
         owner: normalized.owner,
+        ownerId: normalized.ownerId,
         name: normalized.name,
         htmlUrl: normalized.htmlUrl,
         defaultBranch: normalized.defaultBranch,
@@ -290,6 +292,8 @@ function normalizeRepository(repository: GitHubRepository) {
   return {
     id: String(repository.id),
     owner,
+    // Rename-stable account id; absent if the installation response omitted the owner object.
+    ownerId: repository.owner?.id ? String(repository.owner.id) : undefined,
     name,
     fullName: repository.full_name,
     htmlUrl: repository.html_url || `https://github.com/${repository.full_name}`,
