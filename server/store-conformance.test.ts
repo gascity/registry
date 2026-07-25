@@ -1010,6 +1010,51 @@ for (const lane of lanes) {
       expect(await store.getServedPublishPrecedent(uid("pack"))).toBeNull();
     });
 
+    // The precedent decides which pack_path a repeat release is held to, so a coin flip here means a
+    // staff-approved monorepo move silently reverts to the stale directory on a fast machine and
+    // works on a slow one. Ordering by SUBMISSION made it exactly that: two releases created in the
+    // same millisecond fall through to a byte-wise compare of random ids. Approval order is both
+    // deterministic here and the semantically right answer — a human blessing the move is what
+    // establishes the new path.
+    test("auto-approve: the precedent follows APPROVAL order, not submission order", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const name = `${uid("scope")}/${uid("pack")}`;
+
+      const older = await validatedPublishRequest(store, submitter.id, name, {
+        packPath: "packs/original",
+      });
+      const newer = await validatedPublishRequest(store, submitter.id, name, {
+        requestedVersion: "0.2.0",
+        packPath: "packs/moved",
+      });
+      // Force the exact submission tie the flake needed, so the outcome cannot depend on machine
+      // speed: identical createdAt, and ids chosen so a byte-wise id tiebreak would pick the OLDER
+      // row ("b" > "a"), i.e. the wrong one.
+      const tie = "2026-02-01T00:00:00.000Z";
+      const olderId = `prq_b${uid("tie")}`;
+      const newerId = `prq_a${uid("tie")}`;
+      await rewritePublishRequestForConformance(store, dbUrl, older.id, {
+        id: olderId,
+        createdAt: tie,
+        reviewedAt: tie,
+      });
+      await rewritePublishRequestForConformance(store, dbUrl, newer.id, {
+        id: newerId,
+        createdAt: tie,
+        reviewedAt: tie,
+      });
+
+      // Approve the MOVE second, which is what a legitimate monorepo move looks like.
+      await store.approvePublishRequest(admin.id, olderId);
+      await Bun.sleep(2);
+      await store.approvePublishRequest(admin.id, newerId);
+
+      const precedent = await store.getServedPublishPrecedent(name);
+      expect(precedent?.id).toBe(newerId);
+      expect(precedent?.packPath).toBe("packs/moved");
+    });
+
     test("auto-approve: listStaffRefusedPublishRequestsForName spans every version", async () => {
       // Mutation killed: scoping it to one version, which collapses the takedown clause into H4 —
       // a takedown of 1.0.0 for malware would then stop nothing but a re-publish of 1.0.0.
