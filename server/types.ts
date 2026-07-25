@@ -51,6 +51,12 @@ export type ApiTokenPublishConstraints = {
   // NOT part of the scope comparison (that stays on the request fields the client sends).
   githubRepositoryId?: string;
   githubOwnerId?: string;
+  // The git ref and workflow event the minting OIDC token was issued for. FORENSICS ONLY: recorded
+  // in the unattended-approval audit row, never compared and never an admission input. Gating on
+  // "publishes only from a tag / protected branch" is the repo owner's control (branch protection,
+  // environment reviewers), not something the registry can guess for every publisher.
+  ref?: string;
+  eventName?: string;
 };
 
 export type CliDeviceCodeCreateResult = {
@@ -107,6 +113,26 @@ export type PublishApprovalDecision = {
   // already on file, or re-pointed it under a staff override. Derived by the store at approve
   // time (never supplied by the caller) and recorded in the approve audit row.
   namePin?: "created" | "matched" | "repinned";
+  // Present only on the unattended path. Carries what the audit row needs to reconstruct WHY no
+  // human was required: the served release the automation matched against, plus the OIDC ref/event
+  // the release was cut from. Never set by the staff approve route, and ignored by it — the store
+  // decides staff-vs-auto from WHICH entry point was called, not from this field.
+  autoApprove?: PublishAutoApproveContext;
+};
+
+// The forensic context of one unattended approval. Assembled per HTTP request from the auth context
+// that carried the OIDC-minted publish token; never persisted anywhere but the audit row.
+export type PublishAutoApproveContext = {
+  // The currently-served approved request the repeat release was measured against.
+  precedentRequestId: string;
+  ref?: string;
+  eventName?: string;
+};
+
+// An unattended approval must carry its context, so the audit row can never claim `approvalMode:
+// "auto"` without recording what it matched against.
+export type AutoPublishApprovalDecision = PublishApprovalDecision & {
+  autoApprove: PublishAutoApproveContext;
 };
 
 // Options for a staff takedown. Releasing the name claim is opt-in and separate from the
@@ -450,6 +476,21 @@ export interface RegistryStore {
   // Withdrawn rows for one name@version — feeds the anti-content-swap reinstatement guard. Scoped
   // (not a full list) so it stays O(index-hit) and can never truncate past the conflicting row.
   listWithdrawnPublishRequestsForVersion(name: string, version: string): Promise<PublishRequestRow[]>;
+  // Every staff REFUSAL of a name, across every version and spanning both refusal verbs: a
+  // `withdrawn` row (takedown of a served release) and a `rejected` row that names a reviewer (the
+  // only "no" a queued release can receive). Deliberately broader than the name@version lookup
+  // above: unattended approval refuses any name staff have ever said no to, because a takedown of
+  // 1.0.0 for malware must also stop an unread 1.0.1 carrying the same payload, and a reject staff
+  // have to re-do on every CI run is durable for nothing. Scoping this to one version would collapse
+  // it into the reinstatement guard. Rejected rows with a NULL reviewer are SUPERSEDED corrections,
+  // not refusals, and are excluded.
+  listStaffRefusedPublishRequestsForName(name: string): Promise<PublishRequestRow[]>;
+  // The most recently submitted release of `name` that is currently SERVED (status `approved`), or
+  // null when none is. NOT implied by a name claim: a withdraw drops the claim only when staff
+  // explicitly release it, so a pack whose entire history was taken down keeps its claim and loses
+  // its precedent. That is the per-pack kill switch for unattended approval — withdraw every
+  // release and the next one goes back to a human.
+  getServedPublishPrecedent(name: string): Promise<PublishRequestRow | null>;
   // The name→owner binding for a pack name, or null while the name is unclaimed. Written by
   // approvePublishRequest (first approval of a name wins; a later approval re-points it only under
   // a staff namePinOverrideReason) and by the init() backfill; dropped by a withdraw that asked to
@@ -464,6 +505,15 @@ export interface RegistryStore {
     actorUserId: string,
     id: string,
     options?: PublishApprovalDecision,
+  ): Promise<PublishRequestRow>;
+  // Unattended approval: same transaction, same advisory lock, same claim critical section as the
+  // staff route (both delegate to one private body), differing only in what it records — NULL
+  // reviewer, the auto status_reason, and an audit row marked `approvalMode: "auto"`. There is no
+  // actor id to pass because there is no actor: the audit row's actor_user_id is NULL, the same
+  // shape auditSystem already writes.
+  autoApprovePublishRequest(
+    id: string,
+    options: AutoPublishApprovalDecision,
   ): Promise<PublishRequestRow>;
   rejectPublishRequest(
     actorUserId: string,

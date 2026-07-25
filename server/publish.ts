@@ -26,6 +26,14 @@ const commitPattern = /^[0-9a-f]{40}$/;
 const safePathPattern = /^[A-Za-z0-9._/@+-]+$/;
 const safeRefPattern = /^[A-Za-z0-9._/@+-]+$/;
 
+// What an unattended approval writes into status_reason. There is no auto_approved column and no
+// SPA change: status_reason already renders in all three surfaces that show a publish request (the
+// staff queue, the publish page, the account page), so this one string is how staff, and the
+// publisher, see that no human read the release. reviewed_by is left NULL by the same path — see
+// autoApprovePublishRequest — so nothing reports the submitter as their own reviewer.
+export const AUTO_APPROVED_STATUS_REASON =
+  "Auto-approved: repeat release from the repository that owns this pack name.";
+
 // The scope segment of a pack name (`acme` of `acme/tools`); undefined for a bare name. The
 // grammar above allows at most one slash, so a name carries either exactly one scope or none —
 // which is what partitions the namespace: bare names are reserved, scoped names belong to the

@@ -50,6 +50,11 @@ export type ServerConfig = {
   };
   isProduction: boolean;
   devAuthEnabled: boolean;
+  // Arms unattended approval of repeat releases. FAIL-CLOSED and read as `=== true`, so anything
+  // other than an explicit REGISTRY_PUBLISH_AUTO_APPROVE=1 leaves every release in the staff queue.
+  // Required (not optional) on purpose: this removes a human from a security boundary, so a new
+  // ServerConfig literal has to state its answer rather than inherit one.
+  publishAutoApprove: boolean;
 };
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): ServerConfig {
@@ -234,6 +239,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     },
     isProduction,
     devAuthEnabled: devAuthRequested && !looksDeployed,
+    // Opt-in by deliberate decision, never by deploy: an unset, empty, "0", "true" or "yes" value
+    // all leave it off. Default-on would arm the approval boundary for every publisher on the next
+    // release with no production observation of the decline-reason counts first.
+    publishAutoApprove: env.REGISTRY_PUBLISH_AUTO_APPROVE === "1",
   };
 }
 

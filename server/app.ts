@@ -35,7 +35,7 @@ import {
 import { validatePublishRequestForRegistry } from "./publish-validation";
 import { StoreConflictError, StoreValidationError } from "./store";
 import { RequestError, assertOrigin, errorJson, json, readJsonBody, readOptionalJsonBody } from "./http";
-import { enforceRateLimit, withSecurityHeaders } from "./security";
+import { enforceRateLimit, tryConsumeRateLimit, withSecurityHeaders } from "./security";
 import {
   githubAppConfigured,
   githubAppClientId,
@@ -69,6 +69,7 @@ import type {
   PublishRegistryEntry,
   PublishRequestInput,
   PublishRequestRow,
+  PublishRequestStatus,
   PublishSourceIdentity,
   PublishSubmissionMethod,
   ReviewInput,
@@ -335,6 +336,10 @@ async function handleApi(request: Request) {
       // source ids on the publish request without trusting its body.
       githubRepositoryId: identity.repositoryId,
       githubOwnerId: identity.repositoryOwnerId,
+      // Forensics for the unattended-approval audit row, from the same verified claims. Carried,
+      // never compared — see autoApproveReleaseForActor.
+      ref: identity.ref,
+      eventName: identity.eventName,
     };
     const token = await store.createApiToken(user.id, {
       label: `GitHub Actions ${normalized.requestedName} ${normalized.requestedVersion}`,
@@ -551,7 +556,16 @@ async function handleApi(request: Request) {
       publishSourceIdentityForActor(actor),
     );
     if (url.searchParams.get("validate") === "1" || url.searchParams.get("validate") === "true") {
-      return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
+      // A CI re-run of an already-published release: the submitter-scoped dedup returned the
+      // approved row, and markPublishRequestValidated's status guard would 422 it. Replay the row
+      // instead — an idempotent re-run of a green workflow is not an error.
+      if (publishRequest.status === "approved") {
+        return json({ publishRequest }, { status: 201 });
+      }
+      return json(
+        await validateAndStorePublishRequest(publishRequest.id, autoApproveReleaseForActor(actor)),
+        { status: 201 },
+      );
     }
     return json(publishRequest, { status: 201 });
   }
@@ -782,6 +796,33 @@ function publishSubmissionMethodForActor(
   return "api_token";
 }
 
+// The unattended-approval credential, and the whole reason auto-approve is not keyed on a stored
+// column. Its EXISTENCE is the authorization; there is nothing to forge and nothing to replay,
+// because it is produced from the auth context of the request that carries the OIDC-minted,
+// single-release-scoped publish token (assertPublishTokenAllows has already pinned the body to that
+// token's exact repo/commit/name/version tuple), and it is passed BY VALUE into the one validation
+// that request performs. It is never persisted.
+//
+// That is load-bearing, not stylistic. markPublishRequestValidated admits `pending_review` and
+// leaves it `pending_review`, and POST /api/publish-requests/:id/validate is submitter-accessible.
+// Key auto-approve on a persisted flag or on submissionMethod alone and this works: queue a
+// malicious @2.0 while the name is unclaimed (it parks), wait for staff to approve a clean @1.0
+// (which mints the claim), then re-validate @2.0 and it merges unread. Staff approving ONE queued
+// item would silently arm every other queued item for that name. A later /validate call cannot
+// synthesize one of these, which is what keeps a parked request staff-only forever.
+type AutoApproveRelease = { ref?: string; eventName?: string };
+
+function autoApproveReleaseForActor(
+  actor: ReturnType<typeof requirePublishRequestActor>,
+): AutoApproveRelease | undefined {
+  if (actor.kind !== "api_token") return undefined;
+  // Exactly the actor shape publishSubmissionMethodForActor calls `github_actions_oidc`. An
+  // `sts_eia` or `personal` token falls through here, fail-closed.
+  if (actor.token.kind !== "github_actions_publish" || !actor.token.constraints) return undefined;
+  // Forensics only, from verified OIDC claims. NOT an admission input.
+  return { ref: actor.token.constraints.ref, eventName: actor.token.constraints.eventName };
+}
+
 // The rename-stable GitHub ids to stamp on the request, taken from the same trusted context.
 // Only an OIDC-minted CI token carries them; a browser session or personal token asserts a
 // repo URL and nothing more, so it pins nothing.
@@ -843,12 +884,16 @@ async function requireGitHubPublishImport(userId: string, id: string) {
   return imported;
 }
 
-async function validateAndStorePublishRequest(id: string) {
+async function validateAndStorePublishRequest(id: string, release?: AutoApproveRelease) {
   const publishRequest = await store.getPublishRequest(id);
   if (!publishRequest) throw new RequestError(404, "NOT_FOUND", "Publish request not found.");
+  // Read BEFORE validation, because markPublishRequestValidated overwrites it. Auto-approve clause
+  // (3) needs the pre-state: `pending_review` re-validates to `pending_review`.
+  const priorStatus = publishRequest.status;
+  let validated: PublishRequestRow;
   try {
     const entry = await validatePublishRequest(publishRequest, config);
-    return { publishRequest: await store.markPublishRequestValidated(id, entry) };
+    validated = await store.markPublishRequestValidated(id, entry);
   } catch (error) {
     const message =
       error instanceof RequestError
@@ -860,6 +905,180 @@ async function validateAndStorePublishRequest(id: string) {
       console.error("[registry] publish validation failed", error);
     }
     return { publishRequest: await store.markPublishRequestValidationFailed(id, message) };
+  }
+  // OUTSIDE that catch, deliberately: inside it, any bug in approval would mark a perfectly valid
+  // release `validation_failed` and tell the publisher their pack is broken.
+  return { publishRequest: await tryAutoApprove(validated, priorStatus, release) };
+}
+
+// Why a refusal is never an error: the row stays `pending_review`, which is the pre-bead outcome
+// for every release. Nothing a publisher can do makes this path fail their publish.
+type AutoApproveRefusal =
+  | "disabled"
+  | "no_release_context"
+  | "requeued"
+  | "request_ids_missing"
+  | "claim_missing"
+  | "claim_ids_missing"
+  | "no_served_precedent"
+  | "pack_path_changed"
+  | "withdrawn_history"
+  | "staff_refused"
+  | "gate_refused"
+  | "rate_limited";
+
+// Unattended approval of a REPEAT release. The human stays in the loop for the first publish of a
+// name — that is the decision that creates a namespace entry — and for everything the queue has
+// already seen.
+//
+// LEGALITY is delegated wholesale to assertPublishRequestCanMerge at (10) with BOTH override slots
+// empty, so an auto-approval is provably a subset of what a staff member could approve with no
+// override. The clauses below decide only whether a human is REQUIRED.
+async function tryAutoApprove(
+  validated: PublishRequestRow,
+  priorStatus: PublishRequestStatus,
+  release: AutoApproveRelease | undefined,
+): Promise<PublishRequestRow> {
+  // The reason is the observable of WHICH clause refused, and the counts are how ops watch the
+  // rollout (a flood of no_release_context / claim_ids_missing is the expected steady state before
+  // publishers adopt OIDC). The integration tests assert it for the same reason: without it two
+  // clauses that both end in "stays pending_review" could not be killed independently.
+  const decline = async (reason: AutoApproveRefusal) => {
+    console.info(
+      `[registry] auto-approve declined ${validated.id} (${validated.requestedName}): ${reason}`,
+    );
+    return validated;
+  };
+
+  // (1) Global kill switch, fail-closed: anything but an explicit true is off.
+  if (config.publishAutoApprove !== true) return decline("disabled");
+
+  // (2) The single-request OIDC release context. This IS the submission-method check: the context is
+  //     produced from exactly the actor shape that makes publishSubmissionMethodForActor return
+  //     "github_actions_oidc", so re-testing submissionMethod here would be unreachable code no test
+  //     could kill. Excludes a leaked personal gcr_ token, a stolen browser session, an sts_eia
+  //     bearer, an immortal github_import row re-validated after the GitHub permission was revoked,
+  //     and both claim-only gate escape hatches (verified_repo_ownership, org_member) — none of
+  //     which prove the release came from the repo AT THIS MOMENT.
+  if (!release) return decline("no_release_context");
+
+  // (3) FIRST validation only. pending_review re-validates to pending_review, so without this a row
+  //     a staff member has parked — or one the rate limit deferred — could be re-rolled through
+  //     auto-approve by its own submitter. A validation_failed row is corrected by SUPERSEDING it,
+  //     which lands a fresh pending_validation row.
+  if (priorStatus !== "pending_validation") return decline("requeued");
+
+  // (4) Both rename-stable ids on the request. GitHub's repository_id / repository_owner_id are
+  //     OPTIONAL claims, so a repo-proven request can arrive pinned only by case-folded full name,
+  //     which a transfer or a re-registered owner login can move. Staff may still approve that;
+  //     automation may not, because it is what forces the claim comparison onto numeric ids.
+  if (!validated.sourceGithubRepositoryId || !validated.sourceGithubOwnerId) {
+    return decline("request_ids_missing");
+  }
+
+  // (5) The name must ALREADY be claimed. This is what keeps the first publish of a NEW name
+  //     human-reviewed: H1a inside the gate reserves only BARE names, so a brand-new SCOPED name
+  //     from a proven repo passes the gate on its own.
+  const claim = await store.getPackNameClaim(validated.requestedName);
+  if (!claim) return decline("claim_missing");
+
+  // (6) The claim must know both ids too. (4)+(6) together force nameClaimMatchesRequest onto
+  //     NUMERIC IDS ONLY, never a login or a mutable full name. No id EQUALITY is compared here,
+  //     deliberately: with both sides' ids present, H2 inside the gate has already refused every
+  //     mismatch and no namePinOverrideReason is supplied, so an equality check here would be
+  //     unreachable. This is also what excludes the grandfathered claim-only packs.
+  //     `claim?.` rather than `claim.`: the two clauses stay independently revertible.
+  if (!claim?.githubRepositoryId || !claim?.githubOwnerId) return decline("claim_ids_missing");
+
+  // (7) A currently-SERVED release of this name must exist. NOT implied by (5): withdraw drops the
+  //     claim only on an explicit releaseNameClaim, so a pack whose entire history was taken down
+  //     keeps its claim. This is the per-pack kill switch — withdraw every release and the next one
+  //     goes back to a human.
+  const precedent = await store.getServedPublishPrecedent(validated.requestedName);
+  if (!precedent) return decline("no_served_precedent");
+
+  // (8) Same pack directory as the served release. validatePublishRequestForRegistry already binds
+  //     path -> name, so a path change is reachable only when the repo holds two directories
+  //     declaring the same pack name — and then the path is the only thing choosing which bits ship.
+  //     A legitimate monorepo move costs one staff approval, which re-establishes the precedent;
+  //     dropping this clause would let a repo co-maintainer point an established name at different
+  //     bits with no human ever seeing that they moved.
+  if (precedent?.packPath !== validated.packPath) return decline("pack_path_changed");
+
+  // (9) Never auto-approve a name staff have EVER said no to. NAME-scoped, not version-scoped: H4 is
+  //     (name, version)-scoped AND content-swap-scoped, so a refusal of 1.0.0 for malware stops
+  //     neither an identical-bits 1.0.0 (H4 permits that as the staff-gated reinstatement path) nor a
+  //     1.0.1 carrying the same payload. Lineage-filtered so a name legitimately re-issued to a
+  //     different repo after releaseNameClaim is not quarantined forever.
+  //     NOTE FOR FUTURE READERS: this is strictly broader than H4 within the auto-approve path, so
+  //     H4 is unreachable HERE. It stays reachable and tested on the staff approve route. Do not
+  //     "simplify" this clause into H4.
+  const refused = await store.listStaffRefusedPublishRequestsForName(validated.requestedName);
+  // H4's lineage predicate, but FAILING CLOSED on the id-less row. Every web_session / api_token
+  // row is id-less (publishSourceIdentityForActor returns {} for them), which is the ordinary shape
+  // of every pre-OIDC release, and sameSourceRepository then falls back to the case-folded repo full
+  // name — which a repo RENAME moves while the numeric id it should have been measured against does
+  // not. Clause (4) has already guaranteed the INCOMING request carries both ids, so this reads as
+  // "if the refused row cannot answer in numeric ids, automation cannot argue it into a different
+  // lineage — send it to a human." Same direction, and for the same reason, as H2's own fail-closed
+  // in assertPublishRequestCanMerge below ("the currency the pin is written in").
+  // Inside auto-approve a false positive costs one staff click; in H4 it would permanently burn a
+  // version number for the real owner, which is why H4 keeps the open fallback (registry-tr1).
+  const sameLineage = (row: PublishRequestRow) =>
+    !row.sourceGithubRepositoryId ||
+    sameSourceRepository(row, validated) ||
+    row.submittedBy.id === validated.submittedBy.id;
+  // Two refusals, not one, so a takedown and a queue rejection stay independently killable — and so
+  // ops can tell "this pack was taken down" from "staff read these bits and refused them".
+  if (refused.some((row) => row.status === "withdrawn" && sameLineage(row))) {
+    return decline("withdrawn_history");
+  }
+  if (refused.some((row) => row.status === "rejected" && sameLineage(row))) {
+    return decline("staff_refused");
+  }
+
+  // (10) THE STAFF GATE, UNCHANGED, LAST, NO OVERRIDES. PUBLISH_NAME_RESERVED /
+  //      PUBLISH_SCOPE_MISMATCH / PUBLISH_NAME_OWNER_MISMATCH / PUBLISH_VERSION_WITHDRAWN /
+  //      PUBLISH_CONFLICT all still bind. A refusal is a queue entry, not a 500; anything that is
+  //      NOT a refusal is a bug and must surface.
+  let decision: PublishApprovalDecision;
+  try {
+    decision = await assertPublishRequestCanMerge(validated, {});
+  } catch (error) {
+    if (
+      error instanceof RequestError ||
+      error instanceof StoreConflictError ||
+      error instanceof StoreValidationError
+    ) {
+      console.warn(`[registry] auto-approve gate refused ${validated.id}: ${error.message}`);
+      return decline("gate_refused");
+    }
+    throw error;
+  }
+
+  // (11) Backstop, consumed LAST so a gate-refused release never burns a token. Keyed on the pack
+  //      NAME: server-derived, and the name is what a runaway CI hammers (the create limit keys on
+  //      the client address for token actors, and CI egress pools rotate). Degrades to staff review
+  //      rather than 429 — the publish is valid, only the automation is suspect.
+  if (
+    !tryConsumeRateLimit(`publish-auto-approve:${validated.requestedName}`, {
+      windowMs: 60 * 60 * 1000,
+      max: 10,
+    })
+  ) {
+    return decline("rate_limited");
+  }
+
+  try {
+    return await store.autoApprovePublishRequest(validated.id, {
+      ...decision,
+      autoApprove: { precedentRequestId: precedent.id, ref: release.ref, eventName: release.eventName },
+    });
+  } catch (error) {
+    // The approve transaction re-checks the claim under the per-name advisory lock and can lose that
+    // race. Re-READ rather than returning the stale pre-approve row.
+    console.warn(`[registry] auto-approve failed ${validated.id}:`, error);
+    return (await store.getPublishRequest(validated.id)) ?? validated;
   }
 }
 

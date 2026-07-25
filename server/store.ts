@@ -3,11 +3,17 @@ import { dirname } from "node:path";
 import postgres, { type ISql, type Sql } from "postgres";
 import { hashCliDeviceCode, hashCliUserCode, normalizeCliUserCode } from "./cli-auth";
 import { randomToken, sha256 } from "./crypto";
-import { nameClaimMatchesRequest, normalizePublishRequestInput, packNameScope } from "./publish";
+import {
+  AUTO_APPROVED_STATUS_REASON,
+  nameClaimMatchesRequest,
+  normalizePublishRequestInput,
+  packNameScope,
+} from "./publish";
 import { generateApiToken, hashApiToken } from "./tokens";
 import type {
   AccountReview,
   ApiTokenAuthResult,
+  AutoPublishApprovalDecision,
   ApiTokenCreateResult,
   ApiTokenPublishConstraints,
   ApiTokenRow,
@@ -32,6 +38,7 @@ import type {
   ReviewListResult,
   ReviewRow,
   PublishApprovalDecision,
+  PublishAutoApproveContext,
   SessionRecord,
   SessionUser,
   VerifiedPackOwnershipInput,
@@ -179,6 +186,11 @@ function normalizeApiTokenConstraints(value: unknown): ApiTokenPublishConstraint
     requestedVersion: raw.requestedVersion,
     githubRepositoryId: typeof raw.githubRepositoryId === "string" ? raw.githubRepositoryId : undefined,
     githubOwnerId: typeof raw.githubOwnerId === "string" ? raw.githubOwnerId : undefined,
+    // This projection is a WHITELIST: a field missing from it is silently dropped on read-back, so
+    // the unattended-approval audit row would have recorded an absent ref for every release while
+    // every store-level test still passed. Carried, never compared.
+    ref: typeof raw.ref === "string" ? raw.ref : undefined,
+    eventName: typeof raw.eventName === "string" ? raw.eventName : undefined,
   };
 }
 
@@ -539,6 +551,27 @@ function isSamePublishRequest(left: PublishRequestRow, right: {
 // Rendered as-is by all three status surfaces (admin queue, /publish, /account).
 function supersededStatusReason(supersededByRequestId: string) {
   return `Superseded by a newer submission from the same publisher (${supersededByRequestId}).`;
+}
+
+// WHO approved a publish request. Both store impls run one approval body and read the staff/auto
+// difference off this discriminant, so an unattended approval cannot be recorded as a staff one (or
+// the reverse) by passing the wrong option: the entry point picks the variant, not the caller's
+// payload. A staff caller that happens to pass `autoApprove` in its decision is simply ignored.
+type ApprovalActor =
+  | { kind: "staff"; userId: string }
+  | { kind: "auto"; context: PublishAutoApproveContext };
+
+// The three audit keys that distinguish an unattended approval from a staff one, plus the forensics
+// the OIDC token carried. Absent (not `false`, not `"staff"`) on the staff path so existing audit
+// consumers see byte-identical metadata for the approvals they already understand.
+function approvalAuditMetadata(actor: ApprovalActor) {
+  if (actor.kind === "staff") return {};
+  return {
+    approvalMode: "auto" as const,
+    autoApprovedFromRequestId: actor.context.precedentRequestId,
+    oidcRef: actor.context.ref,
+    oidcEventName: actor.context.eventName,
+  };
 }
 
 function normalizeStatusReason(value: string, fallback: string) {
@@ -1978,6 +2011,31 @@ export class PostgresRegistryStore implements RegistryStore {
     id: string,
     options?: PublishApprovalDecision,
   ): Promise<PublishRequestRow> {
+    return this.approveInternal({ kind: "staff", userId: actorUserId }, id, options);
+  }
+
+  async autoApprovePublishRequest(
+    id: string,
+    options: AutoPublishApprovalDecision,
+  ): Promise<PublishRequestRow> {
+    return this.approveInternal({ kind: "auto", context: options.autoApprove }, id, options);
+  }
+
+  // ONE approval body for both entry points. The per-name advisory lock, the atomic status flip and
+  // the claim critical section (mint / re-pin / re-check / enrich) are security-relevant and were
+  // reasoned about once; a second copy for the unattended path is exactly how the two would drift.
+  private async approveInternal(
+    actor: ApprovalActor,
+    id: string,
+    options?: PublishApprovalDecision,
+  ): Promise<PublishRequestRow> {
+    // NULL for an unattended approval: nobody reviewed it. Deliberately not the submitter, which
+    // would put the publisher in reviewed_by — a field already on the wire and rendered as the
+    // approving staff member. The audit row is the system of record instead.
+    const actorUserId = actor.kind === "staff" ? actor.userId : null;
+    // The staff path keeps blanking status_reason; the unattended path stamps the constant that all
+    // three status surfaces already render, which is how an auto-approval is visible to staff.
+    const statusReason = actor.kind === "auto" ? AUTO_APPROVED_STATUS_REASON : null;
     const current = await this.getPublishRequest(id);
     if (!current) throw new StoreValidationError("Publish request not found.");
     if (!current.registryEntry || current.status !== "pending_review") {
@@ -2001,7 +2059,7 @@ export class PostgresRegistryStore implements RegistryStore {
       const [approvedRow] = await sql`
         UPDATE pack_publish_requests
         SET status = 'approved',
-            status_reason = NULL,
+            status_reason = ${statusReason},
             reviewed_by_user_id = ${actorUserId},
             reviewed_at = now(),
             updated_at = now()
@@ -2114,6 +2172,9 @@ export class PostgresRegistryStore implements RegistryStore {
           // enrichment is a refinement OF "matched", not an alternative to it, and an audit
           // consumer switching on namePin must not meet an unknown case.
           nameClaimEnriched: enriched,
+          // Unattended approvals only: how this row got approved with no reviewer, which served
+          // release it was measured against, and the OIDC ref/event it was cut from.
+          ...approvalAuditMetadata(actor),
         },
         sql,
       );
@@ -2272,6 +2333,92 @@ export class PostgresRegistryStore implements RegistryStore {
     );
   }
 
+  async listStaffRefusedPublishRequestsForName(name: string): Promise<PublishRequestRow[]> {
+    // BOTH refusal verbs staff have, across every version. `withdrawn` is the takedown of a served
+    // release; `rejected` with a reviewer is the only "no" a QUEUED release can receive, and it has
+    // to be just as durable — the dedup in createPublishRequest excludes rejected rows, so an
+    // identical CI re-run of a release staff read and refused lands a brand-new pending_validation
+    // row that no other clause can tell apart from a first submission.
+    //
+    // reviewed_by_user_id IS NOT NULL is the discriminator, and it is load-bearing: the supersede
+    // CAS also writes `rejected` (see createPublishRequest) and deliberately leaves the reviewer
+    // NULL, because nobody refused those bits. Without the NULL test, every publisher who ever
+    // corrected a pending submission would quarantine their own name forever.
+    //
+    // Every version, not one: the payload a refusal was about routinely moves to the next patch
+    // version. Same index prefix as the name@version lookup, same absence of a LIMIT.
+    const rows = await this.sql`
+      SELECT
+        pack_publish_requests.*,
+        users.id AS user_id,
+        users.handle,
+        users.display_name,
+        users.avatar_url,
+        users.email,
+        users.role
+      FROM pack_publish_requests
+      JOIN users ON users.id = pack_publish_requests.submitter_user_id
+      WHERE pack_publish_requests.requested_name = ${name}
+        AND (
+          pack_publish_requests.status = 'withdrawn'
+          OR (
+            pack_publish_requests.status = 'rejected'
+            AND pack_publish_requests.reviewed_by_user_id IS NOT NULL
+          )
+        )
+      ORDER BY pack_publish_requests.created_at ASC
+    `;
+    return rows.map((row) =>
+      publishRequestFromRows(
+        row,
+        publicUser({
+          id: row.user_id,
+          handle: row.handle,
+          display_name: row.display_name,
+          avatar_url: row.avatar_url,
+          email: row.email,
+          role: row.role,
+        }),
+      ),
+    );
+  }
+
+  async getServedPublishPrecedent(name: string): Promise<PublishRequestRow | null> {
+    // MOST RECENT, not any: the row's pack_path is what a repeat release is held to, so answering
+    // with an older release would let a publisher revert an established name to a stale directory
+    // unattended. `id COLLATE "C"` breaks a same-instant tie byte-wise, matching the file lane's
+    // comparator — localeCompare is ICU-dependent and could disagree with SQL on the same data.
+    const rows = await this.sql`
+      SELECT
+        pack_publish_requests.*,
+        users.id AS user_id,
+        users.handle,
+        users.display_name,
+        users.avatar_url,
+        users.email,
+        users.role
+      FROM pack_publish_requests
+      JOIN users ON users.id = pack_publish_requests.submitter_user_id
+      WHERE pack_publish_requests.status = 'approved'
+        AND pack_publish_requests.requested_name = ${name}
+      ORDER BY pack_publish_requests.created_at DESC, pack_publish_requests.id COLLATE "C" DESC
+      LIMIT 1
+    `;
+    return rows[0]
+      ? publishRequestFromRows(
+          rows[0],
+          publicUser({
+            id: rows[0].user_id,
+            handle: rows[0].handle,
+            display_name: rows[0].display_name,
+            avatar_url: rows[0].avatar_url,
+            email: rows[0].email,
+            role: rows[0].role,
+          }),
+        )
+      : null;
+  }
+
   async getPackNameClaim(name: string): Promise<PackNameClaim | null> {
     const rows = await this.sql`SELECT * FROM pack_name_claims WHERE name = ${name} LIMIT 1`;
     return rows[0] ? nameClaimFromRow(rows[0] as any) : null;
@@ -2338,8 +2485,10 @@ export class PostgresRegistryStore implements RegistryStore {
 
   // `executor` lets a caller inside sql.begin write its audit row in the same transaction as
   // the action it records (approve), instead of on a separate connection that could commit alone.
+  // actor_user_id is nullable (auditSystem already writes NULL), so `null` here is not a new shape:
+  // it is the honest record of an action no human took — an unattended approval.
   private async audit(
-    actorUserId: string,
+    actorUserId: string | null,
     action: string,
     targetType: string,
     targetId: string,
@@ -3125,12 +3274,26 @@ class FileRegistryStore implements RegistryStore {
     id: string,
     options?: PublishApprovalDecision,
   ) {
+    return this.approveInternal({ kind: "staff", userId: actorUserId }, id, options);
+  }
+
+  async autoApprovePublishRequest(id: string, options: AutoPublishApprovalDecision) {
+    return this.approveInternal({ kind: "auto", context: options.autoApprove }, id, options);
+  }
+
+  private async approveInternal(
+    actor: ApprovalActor,
+    id: string,
+    options?: PublishApprovalDecision,
+  ) {
     const request = this.requirePublishRequest(id);
     if (!request.registryEntry || request.status !== "pending_review") {
       throw new StoreValidationError("Publish request must be validated before approval.");
     }
-    const reviewer = this.users.get(actorUserId);
-    if (!reviewer) throw new Error("Reviewer not found.");
+    // No reviewer to resolve on the unattended path, and none is recorded — mirroring the Postgres
+    // lane's NULL reviewed_by_user_id rather than reporting the publisher as their own reviewer.
+    const reviewer = actor.kind === "staff" ? this.users.get(actor.userId) : undefined;
+    if (actor.kind === "staff" && !reviewer) throw new Error("Reviewer not found.");
     // The claim decision is taken BEFORE anything mutates, mirroring the Postgres lane where the
     // same three-way branch sits inside the approve transaction: a refused approval must leave the
     // request pending_review, which Postgres gets from rollback and this lane has to get from
@@ -3156,7 +3319,9 @@ class FileRegistryStore implements RegistryStore {
     const next: PublishRequestRow = {
       ...request,
       status: "approved",
-      statusReason: undefined,
+      // Same split as the Postgres lane: the staff path clears the reason, the unattended path
+      // stamps the constant the three status surfaces render.
+      statusReason: actor.kind === "auto" ? AUTO_APPROVED_STATUS_REASON : undefined,
       reviewedAt: now,
       reviewedBy: reviewer,
       updatedAt: now,
@@ -3265,6 +3430,33 @@ class FileRegistryStore implements RegistryStore {
           request.requestedVersion === version,
       )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async listStaffRefusedPublishRequestsForName(name: string) {
+    // Mirrors the Postgres lane: withdrawn rows plus rejected rows that name a reviewer. A
+    // superseded row is `rejected` with no reviewer (see createPublishRequest) and must NOT match.
+    return [...this.publishRequests.values()]
+      .filter(
+        (request) =>
+          request.requestedName === name &&
+          (request.status === "withdrawn" ||
+            (request.status === "rejected" && request.reviewedBy != null)),
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async getServedPublishPrecedent(name: string) {
+    // Byte-wise comparison for BOTH keys, matching the Postgres lane's `COLLATE "C"` tiebreak —
+    // localeCompare is ICU/locale-dependent and can order the same two ids differently from SQL.
+    const byCodeUnit = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
+    return (
+      [...this.publishRequests.values()]
+        .filter((request) => request.status === "approved" && request.requestedName === name)
+        .sort(
+          (left, right) =>
+            byCodeUnit(right.createdAt, left.createdAt) || byCodeUnit(right.id, left.id),
+        )[0] ?? null
+    );
   }
 
   async getPackNameClaim(name: string): Promise<PackNameClaim | null> {

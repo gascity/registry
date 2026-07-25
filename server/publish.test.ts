@@ -591,5 +591,6 @@ function testConfig(): ServerConfig {
     },
     isProduction: false,
     devAuthEnabled: true,
+    publishAutoApprove: false,
   };
 }
