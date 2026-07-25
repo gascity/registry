@@ -79,6 +79,22 @@ function App() {
     setSearchState(readSearchState(""));
   }, []);
 
+  // A pack has exactly one URL. `/packs/owner%2Fpack` still parses (shared links must keep
+  // working), so rewrite it to the canonical two-segment form in place. Not routed through
+  // updateUrl: that drops window.location.hash, and the ownership-verification callback lands on
+  // `…#trust`. Without this, og:url — built from window.location at runtime — would differ per
+  // visitor path and the encoded form would keep flowing through the edge's prefix rewrite.
+  useEffect(() => {
+    if (route.kind !== "pack") return;
+    const canonical = packPath(route.name);
+    if (stripBase(window.location.pathname) === canonical) return;
+    window.history.replaceState(
+      null,
+      "",
+      `${withBase(canonical)}${window.location.search}${window.location.hash}`,
+    );
+  }, [route]);
+
   const catalog =
     catalogStatus.state === "ready"
       ? catalogStatus.catalog

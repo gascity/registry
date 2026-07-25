@@ -237,6 +237,20 @@ export function useAuthState() {
   return { auth, isLoading, ...actions };
 }
 
+// Carries the server's machine-readable error code alongside the message, so callers can branch on
+// the code instead of pattern-matching prose. Extends Error on purpose: every existing
+// `err instanceof Error ? err.message : …` call site keeps working untouched.
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export async function apiRequest<T>(
   path: string,
   init: RequestInit = {},
@@ -252,7 +266,10 @@ export async function apiRequest<T>(
   if (!response.ok) {
     const message =
       typeof data?.error?.message === "string" ? data.error.message : "Request failed.";
-    throw new Error(message);
+    // "UNKNOWN" when the body was not our { error: { code, message } } envelope (a proxy error
+    // page, say) — a code-based branch must never fire on a response the server did not shape.
+    const code = typeof data?.error?.code === "string" ? data.error.code : "UNKNOWN";
+    throw new ApiError(response.status, code, message);
   }
   return data as T;
 }

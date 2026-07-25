@@ -33,6 +33,16 @@ describe("GitHub publish discovery", () => {
     expect(result.candidates[1].pack.version).toBe("0.2.0");
     expect(result.candidates[1].repository.permission).toBe("maintain");
     expect(calls).toContain(`/repos/acme/packs/git/trees/${tree}?recursive=1`);
+
+    // Both rename-stable GitHub ids, as strings. These are what a github_import publish stamps on
+    // its request, and therefore what the minted name claim is pinned by. Without the owner id the
+    // claim comparison silently downgrades to a case-folded LOGIN compare, which a repo transfer
+    // to a re-registered login defeats — so an unasserted `ownerId` is a security regression that
+    // leaves every other test green.
+    for (const candidate of result.candidates) {
+      expect(candidate.repository.id).toBe("12");
+      expect(candidate.repository.ownerId).toBe("4242");
+    }
   });
 
   // The fixture repo also holds pack.toml manifests named `legacy--pack` and a 65-character
@@ -134,6 +144,11 @@ function githubResponse(apiPath: string) {
           id: 12,
           full_name: "acme/packs",
           name: "packs",
+          // The installation listing always carries the owner object; capturing its numeric id
+          // here is the ONLY free source of a rename-stable account id on the import path
+          // (/repos/{o}/{n}/branches/{b}, the other call this scan makes, has no owner in its
+          // payload).
+          owner: { id: 4242, login: "acme" },
           html_url: "https://github.com/acme/packs",
           private: false,
           default_branch: "main",

@@ -64,9 +64,13 @@ jobs:
       - name: Server and integration tests
         # bun test exits 0 on a no-match glob, which would silently drop a lane if a test file
         # is renamed out of the test:unit globs. Fail loudly if the generator tests disappear.
+        # src/lib/*.test.ts is the SPA lane (routing + pack-name grammar): nothing under src/ ran
+        # here before it, so a rename that drops the glob has to be loud too.
         run: |
           test -f scripts/generate-registry.test.ts
           test -f scripts/generate-registry.parity.test.ts
+          test -f src/lib/packName.test.ts
+          test -f src/lib/urlState.test.ts
           bun run test:unit
 
       - name: Store conformance and publish integration (real Postgres)

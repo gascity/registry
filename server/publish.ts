@@ -2,7 +2,9 @@ import { posix as path } from "node:path";
 import type {
   GitHubRepositoryRef,
   NormalizedPublishRequestInput,
+  PackNameClaim,
   PublishRequestInput,
+  PublishRequestRow,
 } from "./types";
 
 // Bare or single-scoped, each segment starting alphanumeric. Ingest uses the bare-only half of
@@ -25,6 +27,60 @@ const safeRefPattern = /^[A-Za-z0-9._/@+-]+$/;
 export function packNameScope(name: string) {
   const [scope, rest] = name.split("/");
   return rest ? scope : undefined;
+}
+
+// The name split into URL path segments, and the SPA pack route built from them. Deliberately a
+// duplicate of src/lib/packName.ts + src/lib/urlState.ts's packPath: tsconfig.app.json includes
+// only `src` and tsconfig.server.json only `server`, both composite, so a cross-project import
+// fails typecheck and would leak the app project's DOM lib into the server project. The two copies
+// are pinned together by identical expectation tables in server/publish.test.ts and
+// src/lib/urlState.test.ts. Drift is bounded: the SPA accepts both URL forms and canonicalizes in
+// place, so the worst case is landing on the non-canonical URL for one replaceState.
+export function packNameSegments(name: string) {
+  return name.split("/");
+}
+
+// One real path segment per name segment. A `%2F` would not survive the apex `/registry/*` prefix
+// strip — rewriting the decoded path without keeping the raw path in sync turns the escape back
+// into a separator — and the pre-slice-5 SPA read the resulting `/packs/owner/pack` as home.
+export function packRoutePath(name: string) {
+  return `/packs/${packNameSegments(name).map(encodeURIComponent).join("/")}`;
+}
+
+// Does an incoming publish come from the repo a name claim is pinned to? Compares GitHub's
+// numeric repository id when BOTH sides know it (rename-stable), and otherwise falls back to the
+// case-folded repo full name — claim-only publishes and grandfathered claims prove no ids. The
+// owner login is checked too: a repo TRANSFER keeps its id while moving to a different account,
+// and that account must not inherit the name.
+//
+// Lives here rather than in app.ts because BOTH layers need the identical rule: the merge gate
+// reads the claim and refuses a mismatch, and approvePublishRequest re-checks it inside the
+// approve transaction (the gate's read is not serialized against a concurrent approval of the
+// same name). One Source of Truth — two copies of this predicate could admit a publish the gate
+// refused, or the reverse.
+export function nameClaimMatchesRequest(claim: PackNameClaim, request: PublishRequestRow) {
+  // Owner identity by numeric id when both sides know it, because that is what survives an account
+  // RENAME — comparing logins alone would 409 a publisher who simply renamed their GitHub account
+  // and force a staff re-pin. A TRANSFER still fails here, which is the point: it changes the owner
+  // id. Falls back to the login when either side proved no owner id (claim-only, grandfathered).
+  if (claim.githubOwnerId && request.sourceGithubOwnerId) {
+    if (claim.githubOwnerId !== request.sourceGithubOwnerId) return false;
+  } else if (claim.githubOwnerLogin.toLowerCase() !== request.repository.owner.toLowerCase()) {
+    return false;
+  }
+  if (claim.githubRepositoryId && request.sourceGithubRepositoryId) {
+    return claim.githubRepositoryId === request.sourceGithubRepositoryId;
+  }
+  return claim.repoFullName.toLowerCase() === request.repository.fullName.toLowerCase();
+}
+
+// Same rule as above, between two publish requests: the lineage filter on the withdrawn-version
+// guard. Ids first when both are stamped, else the case-folded repo full name.
+export function sameSourceRepository(left: PublishRequestRow, right: PublishRequestRow) {
+  if (left.sourceGithubRepositoryId && right.sourceGithubRepositoryId) {
+    return left.sourceGithubRepositoryId === right.sourceGithubRepositoryId;
+  }
+  return left.repository.fullName.toLowerCase() === right.repository.fullName.toLowerCase();
 }
 
 // `owner/pack` flattens to `owner--pack` for pack_key and og filenames, so the flattening must

@@ -1,4 +1,5 @@
 import { stripBase, withBase } from "./base";
+import { packNameSegments } from "./packName";
 
 export type SortKey = "featured" | "name" | "latest" | "releases";
 export type ViewMode = "list" | "grid";
@@ -37,9 +38,14 @@ export function parseRoute(rawPathname: string): RouteState {
   if (pathname === "/publish" || pathname === "/publish/") return { kind: "publish" };
   if (pathname === "/cli/auth" || pathname === "/cli/auth/") return { kind: "cliAuth" };
   if (pathname === "/cli/device" || pathname === "/cli/device/") return { kind: "cliDevice" };
-  const match = pathname.match(/^\/packs\/([^/]+)\/?$/);
-  if (!match) return { kind: "home" };
-  return { kind: "pack", name: decodeURIComponent(match[1]) };
+  // One or two REAL path segments, so a scoped `owner/pack` is `/packs/owner/pack`. The old
+  // single-segment `%2F` form still parses (the first branch decodes it), which is what keeps
+  // already-shared scoped links alive. Deeper paths and a bare `/packs/` fall through to home,
+  // exactly as before — the matcher stays anchored rather than becoming a greedy `(.+)`.
+  const match = pathname.match(/^\/packs\/([^/]+)(?:\/([^/]+))?\/?$/);
+  if (!match?.[1]) return { kind: "home" };
+  const segments = [match[1], match[2]].filter((segment): segment is string => segment !== undefined);
+  return { kind: "pack", name: segments.map(decodeURIComponent).join("/") };
 }
 
 export function readSearchState(search: string) {
@@ -82,6 +88,11 @@ export function updateUrl(pathname: string, search: string, replace = false) {
   else window.history.pushState(null, "", next);
 }
 
+// The one place a pack URL is built (navigatePack, PackLink's href, App's canonicalization all
+// route through here). One path segment per name segment: `%2F` is not safe end to end, because a
+// prefix-stripping proxy that rewrites the decoded path without keeping the raw path in sync turns
+// the escape back into a real separator — and the single-segment SPA matcher then read
+// `/packs/owner/pack` as HOME, serving a silently wrong page rather than a 404.
 export function packPath(name: string) {
-  return `/packs/${encodeURIComponent(name)}`;
+  return `/packs/${packNameSegments(name).map(encodeURIComponent).join("/")}`;
 }

@@ -15,7 +15,7 @@
     "build": "tsc -b && vite build",
     "serve": "bun server/index.ts",
     "preview": "vite preview",
-    "test:unit": "bun test server/*.test.ts scripts/*.test.ts",
+    "test:unit": "bun test server/*.test.ts scripts/*.test.ts src/lib/*.test.ts",
     "test:e2e": "playwright test",
     "test:cli": "bun test e2e/cli-publish.test.ts",
     "typecheck": "tsc -b --pretty false",
