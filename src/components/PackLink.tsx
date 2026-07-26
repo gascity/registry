@@ -7,7 +7,13 @@ import {
   type CatalogPack,
 } from "../lib/registry";
 import { buildSearchString, packPath, type SearchState } from "../lib/urlState";
-import { PackIcon, shortSource, StatusBadge } from "./RegistryPrimitives";
+import {
+  PackIcon,
+  PublisherAttribution,
+  shortSource,
+  StatusBadge,
+  TierBadge,
+} from "./RegistryPrimitives";
 
 type PackLinkProps = {
   pack: CatalogPack;
@@ -34,9 +40,13 @@ export function PackLink({ pack, searchState, view, onNavigate }: PackLinkProps)
         <Card variant="surface" interactive className="packCardInner">
           <div className="packCardHeader">
             <PackIcon pack={pack} />
-            <StatusBadge pack={pack} />
+            <div className="packBadgeGroup">
+              <TierBadge pack={pack} />
+              <StatusBadge pack={pack} />
+            </div>
           </div>
           <h3>{pack.name}</h3>
+          <PublisherAttribution pack={pack} />
           <p>{pack.description}</p>
           <div className="packMeta">
             <Chip mono={false}>{category.label}</Chip>
@@ -54,8 +64,12 @@ export function PackLink({ pack, searchState, view, onNavigate }: PackLinkProps)
       <span className="packListBody">
         <span className="packListTitle">
           <strong>{pack.name}</strong>
-          <StatusBadge pack={pack} />
+          <span className="packBadgeGroup">
+            <TierBadge pack={pack} />
+            <StatusBadge pack={pack} />
+          </span>
         </span>
+        <PublisherAttribution pack={pack} />
         <span>{pack.description}</span>
         <span className="packMeta">
           <Chip mono={false}>{category.label}</Chip>

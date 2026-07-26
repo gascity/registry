@@ -98,7 +98,12 @@ function App() {
   const catalog =
     catalogStatus.state === "ready"
       ? catalogStatus.catalog
-      : ({ packs: [], sourceUrl: "", loadedFromFallback: false } satisfies RegistryCatalogState);
+      : ({
+          packs: [],
+          featuredPackKeys: [],
+          sourceUrl: "",
+          loadedFromFallback: false,
+        } satisfies RegistryCatalogState);
 
   const activePack =
     route.kind === "pack" ? catalog.packs.find((pack) => pack.name === route.name) : undefined;

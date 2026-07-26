@@ -8,13 +8,21 @@
   margin-bottom: var(--gc-space-5);
 }
 
+.detailPage .gc-pagehead__title {
+  overflow-wrap: anywhere;
+}
+
 .detailKicker {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--gc-space-2);
-  margin-bottom: var(--gc-space-4);
+  margin-bottom: var(--gc-space-2);
   color: var(--color-text-muted);
+}
+
+.detailKicker + .publisherAttribution {
+  margin-bottom: var(--gc-space-4);
 }
 
 .detailSnapshot {
@@ -451,9 +459,11 @@
 }
 
 .metadataList dd {
+  min-width: 0;
   margin: 0;
   text-align: right;
   color: var(--color-text-primary);
+  overflow-wrap: anywhere;
 }
 
 .sourceLink {
