@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Stage 1: build the gc binary used for publish request validation.
-FROM golang:1.26.4-alpine AS gc-build
+FROM golang:1.26.5-alpine AS gc-build
 WORKDIR /src/gascity
 # gascity v1.3.3 — includes `gc … --dev-auth` (#3343), which the CLI e2e + manual-testing
 # doc rely on. The previous pin predated that flag. Bump in lockstep with the CLI contract.
