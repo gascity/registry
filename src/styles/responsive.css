@@ -154,6 +154,35 @@
     display: none;
   }
 
+  .packListTitle {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--gc-space-2);
+  }
+
+  .packListTitle strong {
+    flex-basis: auto;
+  }
+
+  .packListTitle .packBadgeGroup,
+  .detailKicker .packBadgeGroup {
+    justify-content: flex-start;
+  }
+
+  .detailKicker {
+    align-items: flex-start;
+  }
+
+  .metadataList div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--gc-space-1);
+  }
+
+  .metadataList dd {
+    text-align: left;
+  }
+
   .commandBlock {
     grid-template-columns: 1fr;
   }

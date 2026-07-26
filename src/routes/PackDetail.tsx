@@ -32,8 +32,10 @@ import {
   CatalogLoadState,
   EmptyState,
   PackIcon,
+  PublisherAttribution,
   shortSource,
   StatusBadge,
+  TierBadge,
   type CatalogStatus,
 } from "../components/RegistryPrimitives";
 import { apiRequest, type AuthState, type PackOwnership } from "../lib/api";
@@ -125,8 +127,12 @@ export function PackDetail({
         <div className="detailKicker">
           <PackIcon pack={pack} />
           <span>{categoryForPack(pack).label}</span>
-          <StatusBadge pack={pack} />
+          <span className="packBadgeGroup">
+            <TierBadge pack={pack} />
+            <StatusBadge pack={pack} />
+          </span>
         </div>
+        <PublisherAttribution pack={pack} />
 
         <StatGrid className="detailSnapshot" aria-label="Pack summary">
           <StatTile label="Registry" value={pack.registry} />
@@ -433,6 +439,14 @@ function MetadataTab({ pack, latest }: { pack: CatalogPack; latest: CatalogRelea
         <dd>{pack.registry}</dd>
       </div>
       <div>
+        <dt>Tier</dt>
+        <dd>{pack.tier === "maintained" ? "Maintained" : "Community"}</dd>
+      </div>
+      <div>
+        <dt>Publisher</dt>
+        <dd>{pack.publisher}</dd>
+      </div>
+      <div>
         <dt>Source kind</dt>
         <dd>{pack.sourceKind}</dd>
       </div>
@@ -541,6 +555,10 @@ function TrustTab({
           Releases are content-addressed by the same <code>sha256:&lt;hex&gt;</code> field validated
           by Gas City's pack registry implementation. The website catalog is regenerated from source
           registries and does not add author-managed package metadata.
+        </p>
+        <p className="mutedText">
+          Catalog tier describes registry stewardship and publisher attribution. Source verification
+          confirms control of the linked source repository; these signals are separate.
         </p>
         <a
           className="inlineDocLink"

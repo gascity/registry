@@ -1,5 +1,6 @@
 import { Box } from "lucide-react";
 import {
+  Badge,
   EmptyState as UIEmptyState,
   ErrorState,
   Spinner,
@@ -8,6 +9,7 @@ import {
   Text,
   type StateStatusMap,
 } from "@gascity/ui";
+import { UNKNOWN_PUBLISHER } from "../../shared/catalogPolicy";
 import {
   categoryForPack,
   latestActiveRelease,
@@ -46,6 +48,24 @@ export function StatusBadge({ pack }: { pack: CatalogPack }) {
     <UIStatusBadge state={state} map={StateStatusMap}>
       {state === "active" ? "Active" : "Withdrawn"}
     </UIStatusBadge>
+  );
+}
+
+export function TierBadge({ pack }: { pack: CatalogPack }) {
+  const label = pack.tier === "maintained" ? "Maintained" : "Community";
+  return (
+    <Badge status={pack.tier === "maintained" ? "info" : "neutral"}>
+      <span className="visuallyHidden">Pack tier: </span>
+      {label}
+    </Badge>
+  );
+}
+
+export function PublisherAttribution({ pack }: { pack: CatalogPack }) {
+  return (
+    <span className="publisherAttribution">
+      <span>Publisher:</span> {pack.publisher || UNKNOWN_PUBLISHER}
+    </span>
   );
 }
 

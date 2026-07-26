@@ -1,4 +1,10 @@
 import { parse } from "smol-toml";
+import {
+  normalizePackAttribution,
+  tierForTrusted,
+  UNKNOWN_PUBLISHER,
+  type PackTier,
+} from "../shared/catalogPolicy";
 import { nameClaimMatchesRequest } from "./publish";
 import type { PackNameClaim, PublishRegistryEntry, PublishRequestRow } from "./types";
 
@@ -15,6 +21,8 @@ type RuntimeRelease = {
 type RuntimePack = {
   registry: string;
   name: string;
+  tier: PackTier;
+  publisher: string;
   description: string;
   source: string;
   sourceKind: string;
@@ -23,13 +31,23 @@ type RuntimePack = {
   releases: RuntimeRelease[];
 };
 
+type RuntimeCatalog = {
+  featuredPackKeys: string[];
+  packs: RuntimePack[];
+};
+
 type RawTomlCatalog = {
   schema?: unknown;
+  featured_pack_keys?: unknown;
   pack?: unknown;
 };
 
 type RawTomlPack = {
+  pack_key?: unknown;
+  registry?: unknown;
   name?: unknown;
+  tier?: unknown;
+  publisher?: unknown;
   description?: unknown;
   source?: unknown;
   source_kind?: unknown;
@@ -50,14 +68,18 @@ type RawJsonCatalog = {
   schema?: unknown;
   source_count?: unknown;
   pack_count?: unknown;
+  featured_pack_keys?: unknown;
   sources?: unknown;
   og_image?: unknown;
   packs?: unknown;
 };
 
 type RawJsonPack = {
+  pack_key?: unknown;
   registry?: unknown;
   name?: unknown;
+  tier?: unknown;
+  publisher?: unknown;
   description?: unknown;
   source?: unknown;
   source_kind?: unknown;
@@ -90,6 +112,11 @@ export type RenderOptions = {
   // which keeps the base artifact's pack: the fail-closed direction, since the hazard being closed
   // is serving OTHER bits under a claimed name.
   nameClaims?: ReadonlyMap<string, PackNameClaim>;
+  // Current catalog attribution for direct pack names. The caller resolves this from the current
+  // name claim + stable GitHub owner id, never from a publish request. Values are intentionally
+  // normalized fail-safe here: anything except exact boolean true is community, and missing
+  // publisher identity also forces community without dropping the pack.
+  attributions?: ReadonlyMap<string, { publisher?: unknown; trusted?: unknown }>;
 };
 
 // The request row travels with the entry because claim precedence has to measure the SUBMISSION
@@ -105,16 +132,16 @@ export function renderRegistryTomlWithApprovedPublishes(
   options: RenderOptions = {},
 ) {
   const entries = approvedEntries(requests);
-  if (entries.length === 0) return baseToml;
-  let basePacks: RuntimePack[];
+  let base: RuntimeCatalog;
   try {
-    basePacks = readTomlPacks(baseToml);
+    base = readTomlCatalog(baseToml);
   } catch (error) {
     if (options.mode !== "fail-soft") throw error;
     options.onIssue?.({ kind: "base", error: asError(error) });
     return baseToml; // serve the committed artifact unmerged rather than 500
   }
-  return renderRegistryToml(mergeApprovedEntries(basePacks, entries, options));
+  const { packs } = mergeApprovedEntries(base.packs, entries, options);
+  return renderRegistryToml(packs, filterFeaturedPackKeys(base.featuredPackKeys, packs));
 }
 
 export function renderCatalogJsonWithApprovedPublishes(
@@ -123,19 +150,22 @@ export function renderCatalogJsonWithApprovedPublishes(
   options: RenderOptions = {},
 ) {
   const entries = approvedEntries(requests);
-  if (entries.length === 0) return baseJson;
   let raw: RawJsonCatalog;
-  let basePacks: RuntimePack[];
+  let base: RuntimeCatalog;
   try {
     raw = JSON.parse(baseJson) as RawJsonCatalog;
-    basePacks = readJsonPacks(raw);
+    base = readJsonCatalog(raw);
   } catch (error) {
     if (options.mode !== "fail-soft") throw error;
     options.onIssue?.({ kind: "base", error: asError(error) });
     return baseJson;
   }
-  const packs = mergeApprovedEntries(basePacks, entries, options);
-  const directPackCount = packs.filter((pack) => pack.registry === "direct").length;
+  const { packs, directPackCount } = mergeApprovedEntries(
+    base.packs,
+    entries,
+    options,
+  );
+  const featuredPackKeys = filterFeaturedPackKeys(base.featuredPackKeys, packs);
   const baseSources = (Array.isArray(raw.sources) ? raw.sources : []).map((source) =>
     withServedPackCount(source, packs),
   );
@@ -156,6 +186,7 @@ export function renderCatalogJsonWithApprovedPublishes(
       schema: 1,
       source_count: sources.length,
       pack_count: packs.length,
+      featured_pack_keys: featuredPackKeys,
       sources,
       og_image: typeof raw.og_image === "string" ? raw.og_image : "/og/registry.svg",
       packs: packs.map(catalogJsonPack),
@@ -218,7 +249,16 @@ function mergeApprovedEntries(basePacks: RuntimePack[], entries: ApprovedEntry[]
   for (const pack of packs) {
     pack.releases.sort((left, right) => compareVersions(left.version, right.version));
   }
-  return packs;
+  for (const pack of directPacks.values()) {
+    const raw = options.attributions?.get(pack.name);
+    const attribution = normalizePackAttribution(
+      tierForTrusted(raw?.trusted),
+      raw?.publisher,
+    );
+    pack.tier = attribution.tier;
+    pack.publisher = attribution.publisher;
+  }
+  return { packs, directPackCount: directPacks.size };
 }
 
 // Merge one approved direct-publish entry. Re-validates the stored registry_entry BEFORE any
@@ -326,6 +366,8 @@ function mergeApprovedEntry(
       const created: RuntimePack = {
         registry: "direct",
         name,
+        tier: "community",
+        publisher: UNKNOWN_PUBLISHER,
         description: entry.description,
         source: entry.source,
         sourceKind: entry.sourceKind,
@@ -380,17 +422,22 @@ function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
-function readTomlPacks(baseToml: string): RuntimePack[] {
+function readTomlCatalog(baseToml: string): RuntimeCatalog {
   const raw = parse(baseToml) as RawTomlCatalog;
   const rawPacks = Array.isArray(raw.pack) ? raw.pack : [];
-  return rawPacks.map((pack) => normalizeTomlPack(pack as RawTomlPack));
+  return {
+    featuredPackKeys: normalizeFeaturedPackKeys(raw.featured_pack_keys),
+    packs: rawPacks.map((pack) => normalizeTomlPack(pack as RawTomlPack)),
+  };
 }
 
 function normalizeTomlPack(raw: RawTomlPack): RuntimePack {
   const name = requireString(raw.name, "pack.name");
+  const attribution = normalizePackAttribution(raw.tier, raw.publisher);
   return {
-    registry: "gascity-packs",
+    registry: stringValue(raw.registry) ?? "gascity-packs",
     name,
+    ...attribution,
     description: requireString(raw.description, `${name}.description`),
     source: requireString(raw.source, `${name}.source`),
     sourceKind: requireString(raw.source_kind, `${name}.source_kind`),
@@ -413,16 +460,21 @@ function normalizeTomlRelease(packName: string, raw: RawTomlRelease): RuntimeRel
   };
 }
 
-function readJsonPacks(raw: RawJsonCatalog): RuntimePack[] {
+function readJsonCatalog(raw: RawJsonCatalog): RuntimeCatalog {
   const rawPacks = Array.isArray(raw.packs) ? raw.packs : [];
-  return rawPacks.map((pack) => normalizeJsonPack(pack as RawJsonPack));
+  return {
+    featuredPackKeys: normalizeFeaturedPackKeys(raw.featured_pack_keys),
+    packs: rawPacks.map((pack) => normalizeJsonPack(pack as RawJsonPack)),
+  };
 }
 
 function normalizeJsonPack(raw: RawJsonPack): RuntimePack {
   const name = requireString(raw.name, "pack.name");
+  const attribution = normalizePackAttribution(raw.tier, raw.publisher);
   return {
     registry: stringValue(raw.registry) ?? "aggregate",
     name,
+    ...attribution,
     description: requireString(raw.description, `${name}.description`),
     source: requireString(raw.source, `${name}.source`),
     sourceKind: requireString(raw.source_kind, `${name}.source_kind`),
@@ -438,11 +490,37 @@ function normalizeJsonRelease(packName: string, raw: RawTomlRelease): RuntimeRel
   return normalizeTomlRelease(packName, raw);
 }
 
-function renderRegistryToml(packs: RuntimePack[]) {
-  const lines = ["schema = 1", ""];
+function normalizeFeaturedPackKeys(raw: unknown) {
+  if (!Array.isArray(raw)) return [];
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of raw) {
+    if (typeof value !== "string" || !value.trim() || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+    if (result.length === 4) break;
+  }
+  return result;
+}
+
+function filterFeaturedPackKeys(keys: string[], packs: RuntimePack[]) {
+  const served = new Set(packs.map(packKeyFor));
+  return keys.filter((key) => served.has(key));
+}
+
+function renderRegistryToml(packs: RuntimePack[], featuredPackKeys: string[]) {
+  const lines = [
+    "schema = 1",
+    `featured_pack_keys = [${featuredPackKeys.map(quote).join(", ")}]`,
+    "",
+  ];
   for (const pack of packs) {
     lines.push("[[pack]]");
+    lines.push(`  pack_key = ${quote(packKeyFor(pack))}`);
+    lines.push(`  registry = ${quote(pack.registry)}`);
     lines.push(`  name = ${quote(pack.name)}`);
+    lines.push(`  tier = ${quote(pack.tier)}`);
+    lines.push(`  publisher = ${quote(pack.publisher)}`);
     lines.push(`  description = ${quote(pack.description)}`);
     lines.push(`  source = ${quote(pack.source)}`);
     lines.push(`  source_kind = ${quote(pack.sourceKind)}`);
@@ -513,6 +591,8 @@ function catalogJsonPack(pack: RuntimePack) {
     pack_key: packKeyFor(pack),
     registry: pack.registry,
     name: pack.name,
+    tier: pack.tier,
+    publisher: pack.publisher,
     description: pack.description,
     source: pack.source,
     source_kind: pack.sourceKind,
@@ -542,6 +622,8 @@ function searchTextFor(pack: RuntimePack) {
   return [
     pack.name,
     pack.registry,
+    pack.tier,
+    pack.publisher,
     pack.description,
     pack.source,
     pack.sourceKind,

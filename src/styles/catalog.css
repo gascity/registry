@@ -66,6 +66,12 @@
   margin-bottom: var(--gc-space-1);
 }
 
+.sectionTitle > p {
+  margin: var(--gc-space-2) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
+}
+
 h2 {
   color: var(--color-text-bright);
   margin: 0;
@@ -98,11 +104,16 @@ h3 {
 
 .packCardInner {
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr auto;
   min-height: 244px;
   gap: var(--gc-space-3);
   padding: var(--gc-space-4);
   height: 100%;
+}
+
+.packCard h3,
+.publisherAttribution {
+  overflow-wrap: anywhere;
 }
 
 .packCard p {
@@ -116,6 +127,28 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: var(--gc-space-3);
+}
+
+.packBadgeGroup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--gc-space-2);
+  min-width: 0;
+}
+
+.publisherAttribution {
+  display: block;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
+  line-height: 1.4;
+}
+
+.publisherAttribution > span {
+  color: var(--color-text-primary);
+  font-weight: 600;
 }
 
 .packMeta {
@@ -305,18 +338,20 @@ h3 {
 
 .packListTitle {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--gc-space-3);
   min-width: 0;
 }
 
-/* At very narrow widths the list body can be narrower than a long pack name or
-   source pill; truncate the title so it never forces horizontal scroll. */
 .packListTitle strong {
+  flex: 1 1 16rem;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+
+.packListTitle .packBadgeGroup {
+  flex: 0 1 auto;
 }
 
 .sourceNote {

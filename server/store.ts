@@ -17,6 +17,7 @@ import type {
   ApiTokenCreateResult,
   ApiTokenPublishConstraints,
   ApiTokenRow,
+  CatalogPublisherAttribution,
   CliDeviceCodeCreateResult,
   CliDevicePollResult,
   GitHubPublishCandidate,
@@ -80,6 +81,25 @@ function normalizeHandle(value: string | undefined) {
 
 function normalizePublisherHandle(value: string | undefined) {
   return normalizeHandle(value) ?? "publisher";
+}
+
+function publisherTrustMutation(
+  githubOwnerId: string,
+  trusted: boolean,
+  audit: { operator: string; reason: string },
+) {
+  const ownerId = githubOwnerId.trim();
+  const operator = audit.operator.trim();
+  const reason = audit.reason.trim();
+  if (!ownerId) throw new StoreValidationError("GitHub owner id is required.");
+  if (typeof trusted !== "boolean") {
+    throw new StoreValidationError("Publisher trust must be a boolean.");
+  }
+  if (!operator) throw new StoreValidationError("Trust change operator is required.");
+  if (!reason) throw new StoreValidationError("Trust change reason is required.");
+  if (operator.length > 120) throw new StoreValidationError("Trust change operator is too long.");
+  if (reason.length > 500) throw new StoreValidationError("Trust change reason is too long.");
+  return { ownerId, trusted, operator, reason };
 }
 
 function publicUser(row: {
@@ -2057,15 +2077,27 @@ export class PostgresRegistryStore implements RegistryStore {
       // pre-read name below is a stable lock key.
       await sql`SELECT pg_advisory_xact_lock(hashtextextended(${nameClaimLockKey(current.requestedName)}, 0))`;
       const [approvedRow] = await sql`
+        WITH approval_clock AS (
+          SELECT GREATEST(
+            clock_timestamp(),
+            COALESCE(
+              MAX(reviewed_at) + INTERVAL '1 millisecond',
+              '-infinity'::timestamptz
+            )
+          ) AS approved_at
+          FROM pack_publish_requests
+          WHERE requested_name = ${current.requestedName}
+        )
         UPDATE pack_publish_requests
         SET status = 'approved',
             status_reason = ${statusReason},
             reviewed_by_user_id = ${actorUserId},
-            reviewed_at = now(),
-            updated_at = now()
+            reviewed_at = approval_clock.approved_at,
+            updated_at = approval_clock.approved_at
+        FROM approval_clock
         WHERE id = ${id}
           AND status = 'pending_review'
-        RETURNING id
+        RETURNING pack_publish_requests.id
       `;
       if (!approvedRow) return false;
       // Read-then-write, under the lock above. FOR UPDATE is redundant while every writer takes
@@ -2438,6 +2470,73 @@ export class PostgresRegistryStore implements RegistryStore {
       SELECT * FROM pack_name_claims WHERE name IN ${this.sql(wanted)} ORDER BY name COLLATE "C"
     `;
     return rows.map((row) => nameClaimFromRow(row as any));
+  }
+
+  async listCatalogPublisherAttributions(
+    names: string[],
+  ): Promise<CatalogPublisherAttribution[]> {
+    const wanted = [...new Set(names)];
+    if (wanted.length === 0) return [];
+    const rows = await this.sql`
+      SELECT
+        claims.name,
+        claims.github_owner_login,
+        publishers.id AS publisher_id,
+        publishers.display_name AS publisher_display_name,
+        publishers.trusted AS publisher_trusted
+      FROM pack_name_claims claims
+      LEFT JOIN publishers
+        ON claims.github_owner_id IS NOT NULL
+       AND publishers.github_owner_id = claims.github_owner_id
+      WHERE claims.name IN ${this.sql(wanted)}
+      ORDER BY claims.name COLLATE "C"
+    `;
+    return rows.map((row) => ({
+      name: String(row.name),
+      publisher:
+        typeof row.publisher_display_name === "string" && row.publisher_display_name.trim()
+          ? row.publisher_display_name.trim()
+          : String(row.github_owner_login),
+      trusted: row.publisher_id != null && row.publisher_trusted === true,
+    }));
+  }
+
+  async setPublisherTrustByGithubOwnerId(
+    githubOwnerId: string,
+    trusted: boolean,
+    audit: { operator: string; reason: string },
+  ): Promise<PublisherSummary> {
+    const input = publisherTrustMutation(githubOwnerId, trusted, audit);
+    return this.sql.begin(async (sql) => {
+      const rows = await sql`
+        SELECT * FROM publishers WHERE github_owner_id = ${input.ownerId} LIMIT 1 FOR UPDATE
+      `;
+      if (!rows[0]) {
+        throw new StoreValidationError("Publisher with that GitHub owner id was not found.");
+      }
+      const previousTrusted = rows[0].trusted === true;
+      const [updated] = await sql`
+        UPDATE publishers
+        SET trusted = ${input.trusted}, updated_at = now()
+        WHERE id = ${rows[0].id}
+        RETURNING *
+      `;
+      await this.audit(
+        null,
+        "publisher.trust.update",
+        "publisher",
+        String(rows[0].id),
+        {
+          operator: input.operator,
+          reason: input.reason,
+          githubOwnerId: input.ownerId,
+          previousTrusted,
+          trusted: input.trusted,
+        },
+        sql,
+      );
+      return publicPublisher(updated as any);
+    });
   }
 
   private async resolveHandle(rawHandle: string | undefined, userId: string) {
@@ -3297,6 +3396,16 @@ class FileRegistryStore implements RegistryStore {
     return this.approveInternal({ kind: "auto", context: options.autoApprove }, id, options);
   }
 
+  private nextPublishReviewTimestamp(name: string) {
+    let latest = Number.NEGATIVE_INFINITY;
+    for (const candidate of this.publishRequests.values()) {
+      if (candidate.requestedName !== name || !candidate.reviewedAt) continue;
+      const reviewedAt = Date.parse(candidate.reviewedAt);
+      if (Number.isFinite(reviewedAt)) latest = Math.max(latest, reviewedAt);
+    }
+    return new Date(Math.max(Date.now(), latest + 1)).toISOString();
+  }
+
   private async approveInternal(
     actor: ApprovalActor,
     id: string,
@@ -3331,7 +3440,10 @@ class FileRegistryStore implements RegistryStore {
       // The file store keeps no audit_logs, so only the claim EFFECT is mirrored here.
       enriched = nameClaimEnrichment(existing, nameClaimBindingFromPublishRequest(request));
     }
-    const now = new Date().toISOString();
+    // ISO timestamps have only millisecond precision. Preserve the serialized approval order even
+    // when the wall clock does not advance, otherwise precedent selection falls through to random
+    // request ids and can resurrect an older pack path.
+    const now = this.nextPublishReviewTimestamp(request.requestedName);
     const next: PublishRequestRow = {
       ...request,
       status: "approved",
@@ -3501,6 +3613,45 @@ class FileRegistryStore implements RegistryStore {
       .filter((claim): claim is PackNameClaim => claim != null)
       .map((claim) => ({ ...claim }))
       .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+  }
+
+  async listCatalogPublisherAttributions(
+    names: string[],
+  ): Promise<CatalogPublisherAttribution[]> {
+    return [...new Set(names)]
+      .map((name) => this.nameClaims.get(name))
+      .filter((claim): claim is PackNameClaim => claim != null)
+      .map((claim) => {
+        const publisher = claim.githubOwnerId
+          ? [...this.publishers.values()].find(
+              (candidate) => candidate.githubOwnerId === claim.githubOwnerId,
+            )
+          : undefined;
+        return {
+          name: claim.name,
+          publisher: publisher?.displayName.trim() || claim.githubOwnerLogin,
+          trusted: publisher?.trusted === true,
+        };
+      })
+      .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+  }
+
+  async setPublisherTrustByGithubOwnerId(
+    githubOwnerId: string,
+    trusted: boolean,
+    audit: { operator: string; reason: string },
+  ): Promise<PublisherSummary> {
+    const input = publisherTrustMutation(githubOwnerId, trusted, audit);
+    const publisher = [...this.publishers.values()].find(
+      (candidate) => candidate.githubOwnerId === input.ownerId,
+    );
+    if (!publisher) {
+      throw new StoreValidationError("Publisher with that GitHub owner id was not found.");
+    }
+    const updated = { ...publisher, trusted: input.trusted };
+    this.publishers.set(updated.id, updated);
+    await this.save();
+    return { ...updated };
   }
 
   // Mirror of the Postgres backfill: first-APPROVED request per name wins, tie-broken by

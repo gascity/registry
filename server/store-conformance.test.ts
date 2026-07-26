@@ -20,7 +20,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import postgres from "postgres";
 import { CLI_DEVICE_CODE_TTL_MS, CLI_DEVICE_CODE_INTERVAL_SECONDS, generateCliDeviceCodePair } from "./cli-auth";
 import { AUTO_APPROVED_STATUS_REASON } from "./publish";
@@ -1028,30 +1028,30 @@ for (const lane of lanes) {
         requestedVersion: "0.2.0",
         packPath: "packs/moved",
       });
-      // Force the exact submission tie the flake needed, so the outcome cannot depend on machine
-      // speed: identical createdAt, and ids chosen so a byte-wise id tiebreak would pick the OLDER
-      // row ("b" > "a"), i.e. the wrong one.
-      const tie = "2026-02-01T00:00:00.000Z";
-      const olderId = `prq_b${uid("tie")}`;
-      const newerId = `prq_a${uid("tie")}`;
+      // Approve the original path, then seed its stored approval timestamp ahead of both wall
+      // clocks. This makes the regression deterministic in BOTH lanes: merely stamping `now()`
+      // on the later approval would leave the older row as the apparent precedent.
+      await store.approvePublishRequest(admin.id, older.id);
+      const priorApproval = "2099-02-01T00:00:00.000Z";
       await rewritePublishRequestForConformance(store, dbUrl, older.id, {
-        id: olderId,
-        createdAt: tie,
-        reviewedAt: tie,
-      });
-      await rewritePublishRequestForConformance(store, dbUrl, newer.id, {
-        id: newerId,
-        createdAt: tie,
-        reviewedAt: tie,
+        id: older.id,
+        createdAt: older.createdAt,
+        reviewedAt: priorApproval,
       });
 
-      // Approve the MOVE second, which is what a legitimate monorepo move looks like.
-      await store.approvePublishRequest(admin.id, olderId);
-      await Bun.sleep(2);
-      await store.approvePublishRequest(admin.id, newerId);
+      // Approve the MOVE second, which is what a legitimate monorepo move looks like. Freezing the
+      // file clock also directly covers the millisecond tie that exposed the CI flake.
+      if (store.kind === "file") setSystemTime(new Date("2026-02-02T00:00:00.000Z"));
+      try {
+        await store.approvePublishRequest(admin.id, newer.id);
+      } finally {
+        if (store.kind === "file") setSystemTime();
+      }
 
+      const reread = await store.getPublishRequest(newer.id);
+      expect(Date.parse(reread!.reviewedAt!)).toBeGreaterThan(Date.parse(priorApproval));
       const precedent = await store.getServedPublishPrecedent(name);
-      expect(precedent?.id).toBe(newerId);
+      expect(precedent?.id).toBe(newer.id);
       expect(precedent?.packPath).toBe("packs/moved");
     });
 
@@ -1297,6 +1297,111 @@ for (const lane of lanes) {
         releaseNameClaim: true,
       });
       expect((await store.listPackNameClaims([first, second])).map((claim) => claim.name)).toEqual([first]);
+    });
+
+    test("catalog attribution: stable owner ids grant live trust; login-only and id-less claims never do", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const ownership = ownershipInput("acme/registry-fixtures");
+      await store.upsertVerifiedPackOwnership(submitter.id, ownership);
+
+      async function approveWithIdentity(
+        name: string,
+        sourceIdentity?: { githubRepositoryId: string; githubOwnerId: string },
+      ) {
+        const request = await store.createPublishRequest(
+          submitter.id,
+          publishInput(name),
+          sourceIdentity ? "github_actions_oidc" : "web_session",
+          sourceIdentity,
+        );
+        await store.markPublishRequestValidated(request.id, entry(name));
+        await store.approvePublishRequest(admin.id, request.id);
+      }
+
+      const stable = `acme/${uid("stable")}`;
+      const reusedLogin = `acme/${uid("reused")}`;
+      const idless = `acme/${uid("legacy")}`;
+      await approveWithIdentity(stable, {
+        githubRepositoryId: ownership.githubRepositoryId,
+        githubOwnerId: ownership.githubOwnerId,
+      });
+      await approveWithIdentity(reusedLogin, {
+        githubRepositoryId: "repo-reused-login",
+        githubOwnerId: "owner-not-acme",
+      });
+      await approveWithIdentity(idless);
+
+      const before = await store.listCatalogPublisherAttributions([
+        reusedLogin,
+        stable,
+        idless,
+        stable,
+        "acme/unclaimed",
+      ]);
+      expect(before.map((row) => row.name)).toEqual(
+        [stable, reusedLogin, idless].sort((left, right) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+      );
+      expect(before.find((row) => row.name === stable)).toEqual({
+        name: stable,
+        publisher: "acme",
+        trusted: false,
+      });
+      expect(before.find((row) => row.name === reusedLogin)).toEqual({
+        name: reusedLogin,
+        publisher: "acme",
+        trusted: false,
+      });
+      expect(before.find((row) => row.name === idless)).toEqual({
+        name: idless,
+        publisher: "acme",
+        trusted: false,
+      });
+
+      const promoted = await store.setPublisherTrustByGithubOwnerId(
+        ownership.githubOwnerId,
+        true,
+        {
+          operator: "registry-test",
+          reason: "conformance promotion",
+        },
+      );
+      expect(promoted).toMatchObject({
+        githubOwnerId: ownership.githubOwnerId,
+        trusted: true,
+      });
+
+      const afterPromotion = await store.listCatalogPublisherAttributions([
+        stable,
+        reusedLogin,
+        idless,
+      ]);
+      expect(afterPromotion.find((row) => row.name === stable)?.trusted).toBe(true);
+      expect(afterPromotion.find((row) => row.name === reusedLogin)?.trusted).toBe(false);
+      expect(afterPromotion.find((row) => row.name === idless)?.trusted).toBe(false);
+
+      await store.setPublisherTrustByGithubOwnerId(ownership.githubOwnerId, false, {
+        operator: "registry-test",
+        reason: "conformance rollback",
+      });
+      expect(
+        (await store.listCatalogPublisherAttributions([stable]))[0]?.trusted,
+      ).toBe(false);
+
+      await expect(
+        store.setPublisherTrustByGithubOwnerId(ownership.githubOwnerId, true, {
+          operator: "registry-test",
+          reason: " ",
+        }),
+      ).rejects.toBeInstanceOf(StoreValidationError);
+      await expect(
+        store.setPublisherTrustByGithubOwnerId("owner-missing", true, {
+          operator: "registry-test",
+          reason: "must not create trust by typo",
+        }),
+      ).rejects.toBeInstanceOf(StoreValidationError);
     });
 
     test("name claims: the first approve pins the name, and a later approve never re-points it", async () => {
@@ -1799,6 +1904,63 @@ for (const lane of lanes) {
     // Documented divergence (store.ts): the file store keeps no audit_logs. This asserts the
     // Postgres audit trail — the ownership-override justification is a security/compliance record.
     if (lane.name === "postgres") {
+      test("publisher trust promotion and rollback are fully auditable", async () => {
+        const submitter = await store.ensureUser(identity());
+        const ownership = ownershipInput("acme/trust-audit");
+        await store.upsertVerifiedPackOwnership(submitter.id, ownership);
+
+        const promoted = await store.setPublisherTrustByGithubOwnerId(
+          ownership.githubOwnerId,
+          true,
+          {
+            operator: "registry-operator",
+            reason: "publisher review approved",
+          },
+        );
+        await store.setPublisherTrustByGithubOwnerId(
+          ownership.githubOwnerId,
+          false,
+          {
+            operator: "registry-operator",
+            reason: "emergency trust rollback",
+          },
+        );
+
+        const sql = postgres(dbUrl!, { max: 1 });
+        try {
+          const rows = await sql`
+            SELECT actor_user_id, target_type, target_id, metadata
+            FROM audit_logs
+            WHERE action = 'publisher.trust.update'
+              AND target_id = ${promoted.id}
+              AND metadata->>'operator' = 'registry-operator'
+          `;
+          expect(rows).toHaveLength(2);
+          for (const row of rows) {
+            expect(row.actor_user_id).toBeNull();
+            expect(row.target_type).toBe("publisher");
+            expect(row.metadata.operator).toBe("registry-operator");
+            expect(row.metadata.githubOwnerId).toBe(ownership.githubOwnerId);
+          }
+          expect(
+            rows.find((row) => row.metadata.trusted === true)?.metadata,
+          ).toMatchObject({
+            reason: "publisher review approved",
+            previousTrusted: false,
+            trusted: true,
+          });
+          expect(
+            rows.find((row) => row.metadata.trusted === false)?.metadata,
+          ).toMatchObject({
+            reason: "emergency trust rollback",
+            previousTrusted: true,
+            trusted: false,
+          });
+        } finally {
+          await sql.end();
+        }
+      });
+
       test("audit_logs record create, approve(override), reject and withdraw", async () => {
         const submitter = await store.ensureUser(identity());
         const admin = await store.ensureUser(identity({ assertedAdmin: true }));

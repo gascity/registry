@@ -1,5 +1,10 @@
 import { Bot, Database, GitBranch, MessageCircle, MessagesSquare, PackageSearch } from "lucide-react";
 import { parse } from "smol-toml";
+import {
+  compareByCodepoint,
+  normalizePackAttribution,
+  type PackTier,
+} from "../../shared/catalogPolicy";
 import { withBase } from "./base";
 
 // The UI's own catalog fetch is mount-relative (under /registry/ in the apex, the
@@ -29,6 +34,8 @@ export type CatalogPack = {
   packKey: string;
   registry: string;
   name: string;
+  tier: PackTier;
+  publisher: string;
   description: string;
   source: string;
   sourceKind: string;
@@ -40,6 +47,7 @@ export type CatalogPack = {
 
 export type RegistryCatalogState = {
   packs: CatalogPack[];
+  featuredPackKeys: string[];
   ogImage?: string;
   sourceUrl: string;
   loadedFromFallback: boolean;
@@ -47,11 +55,16 @@ export type RegistryCatalogState = {
 
 type RawCatalog = {
   schema?: unknown;
+  featured_pack_keys?: unknown;
   pack?: unknown;
 };
 
 type RawPack = {
+  pack_key?: unknown;
+  registry?: unknown;
   name?: unknown;
+  tier?: unknown;
+  publisher?: unknown;
   description?: unknown;
   source?: unknown;
   source_kind?: unknown;
@@ -70,6 +83,7 @@ type RawRelease = {
 
 type RawJsonCatalog = {
   schema?: unknown;
+  featured_pack_keys?: unknown;
   og_image?: unknown;
   packs?: unknown;
 };
@@ -78,6 +92,8 @@ type RawJsonPack = {
   pack_key?: unknown;
   registry?: unknown;
   name?: unknown;
+  tier?: unknown;
+  publisher?: unknown;
   description?: unknown;
   source?: unknown;
   source_kind?: unknown;
@@ -119,7 +135,9 @@ async function fetchCatalogFrom(sourceUrl: string, loadedFromFallback: boolean) 
   return { ...catalog, sourceUrl, loadedFromFallback };
 }
 
-function normalizeCatalog(raw: RawCatalog): { packs: CatalogPack[]; ogImage?: string } {
+function normalizeCatalog(
+  raw: RawCatalog,
+): { packs: CatalogPack[]; featuredPackKeys: string[]; ogImage?: string } {
   const schema = typeof raw.schema === "number" ? raw.schema : 1;
   if (schema !== 1) {
     throw new Error(`Unsupported registry catalog schema ${schema}.`);
@@ -127,11 +145,16 @@ function normalizeCatalog(raw: RawCatalog): { packs: CatalogPack[]; ogImage?: st
 
   const rawPacks = Array.isArray(raw.pack) ? raw.pack : [];
   return {
-    packs: rawPacks.map((pack) => normalizePack(pack as RawPack)).sort((a, b) => a.name.localeCompare(b.name)),
+    featuredPackKeys: normalizeFeaturedPackKeys(raw.featured_pack_keys),
+    packs: rawPacks
+      .map((pack) => normalizePack(pack as RawPack))
+      .sort((a, b) => compareByCodepoint(a.name, b.name)),
   };
 }
 
-function normalizeJsonCatalog(raw: RawJsonCatalog): { packs: CatalogPack[]; ogImage?: string } {
+function normalizeJsonCatalog(
+  raw: RawJsonCatalog,
+): { packs: CatalogPack[]; featuredPackKeys: string[]; ogImage?: string } {
   const schema = typeof raw.schema === "number" ? raw.schema : 1;
   if (schema !== 1) {
     throw new Error(`Unsupported registry catalog schema ${schema}.`);
@@ -140,18 +163,21 @@ function normalizeJsonCatalog(raw: RawJsonCatalog): { packs: CatalogPack[]; ogIm
   const rawPacks = Array.isArray(raw.packs) ? raw.packs : [];
   return {
     ogImage: optionalString(raw.og_image),
+    featuredPackKeys: normalizeFeaturedPackKeys(raw.featured_pack_keys),
     packs: rawPacks
       .map((pack) => normalizeJsonPack(pack as RawJsonPack))
-      .sort((a, b) => a.name.localeCompare(b.name)),
+      .sort((a, b) => compareByCodepoint(a.name, b.name)),
   };
 }
 
 function normalizeJsonPack(raw: RawJsonPack): CatalogPack {
   const name = requireString(raw.name, "pack.name");
+  const registry = optionalString(raw.registry) ?? "aggregate";
   return {
-    packKey: optionalString(raw.pack_key) ?? fallbackPackKey(optionalString(raw.registry) ?? "aggregate", name),
-    registry: optionalString(raw.registry) ?? "aggregate",
+    packKey: optionalString(raw.pack_key) ?? fallbackPackKey(registry, name),
+    registry,
     name,
+    ...normalizePackAttribution(raw.tier, raw.publisher),
     description: requireString(raw.description, `${name}.description`),
     source: requireString(raw.source, `${name}.source`),
     sourceKind: requireString(raw.source_kind, `${name}.source_kind`),
@@ -166,10 +192,12 @@ function normalizeJsonPack(raw: RawJsonPack): CatalogPack {
 
 function normalizePack(raw: RawPack): CatalogPack {
   const name = requireString(raw.name, "pack.name");
+  const registry = optionalString(raw.registry) ?? "registry.toml";
   return {
-    packKey: fallbackPackKey("registry.toml", name),
-    registry: "registry.toml",
+    packKey: optionalString(raw.pack_key) ?? fallbackPackKey(registry, name),
+    registry,
     name,
+    ...normalizePackAttribution(raw.tier, raw.publisher),
     description: requireString(raw.description, `${name}.description`),
     source: requireString(raw.source, `${name}.source`),
     sourceKind: requireString(raw.source_kind, `${name}.source_kind`),
@@ -178,6 +206,20 @@ function normalizePack(raw: RawPack): CatalogPack {
       normalizeRelease(name, release as RawRelease),
     ),
   };
+}
+
+function normalizeFeaturedPackKeys(raw: unknown) {
+  if (!Array.isArray(raw)) return [];
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of raw) {
+    const key = optionalString(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+    if (result.length === 4) break;
+  }
+  return result;
 }
 
 function normalizeJsonReadme(raw: unknown): CatalogReadme | undefined {

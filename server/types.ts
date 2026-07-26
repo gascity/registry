@@ -190,6 +190,12 @@ export type PublisherSummary = {
   githubOwnerId?: string;
 };
 
+export type CatalogPublisherAttribution = {
+  name: string;
+  publisher: string;
+  trusted: boolean;
+};
+
 export type SourceRepository = {
   host: "github.com";
   owner: string;
@@ -501,6 +507,17 @@ export interface RegistryStore {
   // every approved bare name's claim on a single request and must not degrade into one query per
   // approved pack. Never null-padded: absent means unclaimed.
   listPackNameClaims(names: string[]): Promise<PackNameClaim[]>;
+  // Current direct-pack attribution for MANY names, ordered byte-wise and deduplicated. The
+  // stable github_owner_id on the current name claim is the only trust join; an id-less or
+  // unmatched claim still returns its owner login for display but always trusted=false.
+  listCatalogPublisherAttributions(names: string[]): Promise<CatalogPublisherAttribution[]>;
+  // Operator-only trust mutation keyed by GitHub's stable owner id. There is deliberately no
+  // public HTTP route for this security-sensitive editorial decision.
+  setPublisherTrustByGithubOwnerId(
+    githubOwnerId: string,
+    trusted: boolean,
+    audit: { operator: string; reason: string },
+  ): Promise<PublisherSummary>;
   markPublishRequestValidated(
     id: string,
     entry: PublishRegistryEntry,

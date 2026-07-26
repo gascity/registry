@@ -1,7 +1,12 @@
 schema = 1
+featured_pack_keys = ["gascity-packs--gascity", "gascity-packs--gastown", "gascity-packs--bmad", "gascity-packs--slack-full"]
 
 [[pack]]
+  pack_key = "gascity-packs--bmad"
+  registry = "gascity-packs"
   name = "bmad"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "BMAD Method delivery process (PRD, architecture, epics and stories, readiness, adversarial review) as a Gas City build factory."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/bmad"
   source_kind = "git"
@@ -14,7 +19,11 @@ schema = 1
     description = "First registry release of the BMAD build factory."
 
 [[pack]]
+  pack_key = "gascity-packs--cass"
+  registry = "gascity-packs"
   name = "cass"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Coding Agent Session Search prompt fragments and skill overlays for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/cass"
   source_kind = "git"
@@ -27,7 +36,11 @@ schema = 1
     description = "Refresh CASS session-search pack release pin."
 
 [[pack]]
+  pack_key = "gascity-packs--compound-engineering"
+  registry = "gascity-packs"
   name = "compound-engineering"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Every Inc.'s Compound Engineering methodology as a Gas City build factory, with the widest reviewer-persona fanout in the catalog."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/compound-engineering"
   source_kind = "git"
@@ -40,7 +53,11 @@ schema = 1
     description = "First registry release of the Compound Engineering build factory."
 
 [[pack]]
+  pack_key = "gascity-packs--contributing"
+  registry = "gascity-packs"
   name = "contributing"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "The external-contributor lifecycle for gastownhall/gascity — write a good issue, find priority work, plan a PR, map its blast radius, and self-review against the codebase audit. Each step produces an artifact you act on; the pack stops before pushing — opening the PR is your call. Self-contained: gas-city's actual standards (the B-rule adoption-review audit, blast-radius dimensions, test tiers) are baked into the skills; no imports."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/contributing"
   source_kind = "git"
@@ -67,7 +84,11 @@ schema = 1
     description = "YAML-safe skill front matter (0.2.0 had an unquoted colon that broke parsing) plus a durability pass — removes time-pinned references (PR-number citations, dated product names, build-timeout numbers, drift-prone counts) so the skills resist staleness. No behavior change."
 
 [[pack]]
+  pack_key = "gascity-packs--discord"
+  registry = "gascity-packs"
   name = "discord"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Discord services, commands, and prompt fragments for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/discord"
   source_kind = "git"
@@ -80,7 +101,11 @@ schema = 1
     description = "Refresh Discord pack release pin."
 
 [[pack]]
+  pack_key = "gascity-packs--gascity"
+  registry = "gascity-packs"
   name = "gascity"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Gas City planning and implementation workflow pack."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
   source_kind = "git"
@@ -121,7 +146,11 @@ schema = 1
     description = "Release graph.v2 review/build prompt fixes validated by gascity RC gates."
 
 [[pack]]
+  pack_key = "gascity-packs--gastown"
+  registry = "gascity-packs"
   name = "gastown"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Default Gas Town coding workflow pack."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
   source_kind = "git"
@@ -197,7 +226,11 @@ schema = 1
     description = "Require Gastown polecats to continue claiming formula step beads until final drain."
 
 [[pack]]
+  pack_key = "gascity-packs--github"
+  registry = "gascity-packs"
   name = "github"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "GitHub webhook intake services and commands for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/github"
   source_kind = "git"
@@ -210,7 +243,11 @@ schema = 1
     description = "Refresh GitHub intake pack release pin."
 
 [[pack]]
+  pack_key = "gascity-packs--gstack"
+  registry = "gascity-packs"
   name = "gstack"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "garrytan/gstack founder sprint (office hours, autoplan, QA, security, release readiness) as a Gas City build factory."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/gstack"
   source_kind = "git"
@@ -223,7 +260,11 @@ schema = 1
     description = "First registry release of the gstack build factory."
 
 [[pack]]
+  pack_key = "gascity-packs--oversight-rig"
+  registry = "gascity-packs"
   name = "oversight-rig"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Disaggregates project-level work scoping out of the mayor — adds one always-on, rig-scoped project-lead per rig that triages its rig and dispatches its own ready work directly, with deterministic severity-based escalation (no relay agent). Composes with any slack adapter pack; ships only the oversight role and its escalation machinery, not a slack bridge."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/oversight-rig"
   source_kind = "git"
@@ -236,7 +277,11 @@ schema = 1
     description = "Initial oversight-rig release: rig-scoped project-lead + deterministic escalation machinery."
 
 [[pack]]
+  pack_key = "gascity-packs--pr-pipeline"
+  registry = "gascity-packs"
   name = "pr-pipeline"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Author-side PR discipline as a pack: planning, blast-radius mapping, outgoing-PR scorecard review, and pre-push gating (mol-pr-start / mol-pr-blast-radius / mol-pr-review / mol-pr-ship)."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/pr-pipeline"
   source_kind = "git"
@@ -249,7 +294,28 @@ schema = 1
     description = "Initial pr-pipeline release: four author-side formulas (mol-pr-start, mol-pr-blast-radius, mol-pr-review, mol-pr-ship) + wrapper commands."
 
 [[pack]]
+  pack_key = "gascity-packs--runtime-cloudflare"
+  registry = "gascity-packs"
+  name = "runtime-cloudflare"
+  tier = "maintained"
+  publisher = "Gas City"
+  description = "The Cloudflare session runtime, shipped as a pack so it versions independently of the gc binary. Declares [runtimes.cloudflare] backed by the gc-runtime-cloudflare RPP v0 provider, replacing the deleted gascity builtin."
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/runtime-cloudflare"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "ffcb02933f878c7c9ac2df470338c28a5e5d829d"
+    hash = "sha256:432a1f917c400a3497f1be7466e0297d108b5e2174eed4d7ae4a87579e45d2d1"
+    description = "First registry release of the Cloudflare session runtime as an RPP v0 pack."
+
+[[pack]]
+  pack_key = "gascity-packs--slack-channel"
+  registry = "gascity-packs"
   name = "slack-channel"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Shared Slack channel routing and session identity pack for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-channel"
   source_kind = "git"
@@ -269,7 +335,11 @@ schema = 1
     description = "Ship idempotent reply-current (stops delivered-but-timed-out double-post) and mark schema test executable to align release hash with materialized modes."
 
 [[pack]]
+  pack_key = "gascity-packs--slack-full"
+  registry = "gascity-packs"
   name = "slack-full"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Slack services, commands, and adapter integration for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-full"
   source_kind = "git"
@@ -289,7 +359,11 @@ schema = 1
     description = "Ship idempotent reply-current (stops delivered-but-timed-out double-post) and mark pack scripts/tests executable to align release hash with materialized modes."
 
 [[pack]]
+  pack_key = "gascity-packs--slack-mini"
+  registry = "gascity-packs"
   name = "slack-mini"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Minimal Slack mention bridge and outbound message pack for Gas City."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/slack-mini"
   source_kind = "git"
@@ -302,7 +376,11 @@ schema = 1
     description = "Initial Slack mini pack release with canonical content hash."
 
 [[pack]]
+  pack_key = "gascity-packs--superpowers"
+  registry = "gascity-packs"
   name = "superpowers"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "obra/superpowers TDD-first skill library as a Gas City build factory."
   source = "https://github.com/gastownhall/gascity-packs/tree/main/superpowers"
   source_kind = "git"

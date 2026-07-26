@@ -4,9 +4,15 @@ import {
   latestActiveRelease,
   type CatalogPack,
 } from "./registry";
+import { compareByCodepoint } from "../../shared/catalogPolicy";
+import { compareFeaturedPacks } from "./catalogCuration";
 import type { SearchState } from "./urlState";
 
-export function filterAndSortPacks(packs: CatalogPack[], searchState: SearchState) {
+export function filterAndSortPacks(
+  packs: CatalogPack[],
+  searchState: SearchState,
+  featuredPackKeys: string[] = [],
+) {
   const normalizedQuery = searchState.query.trim().toLowerCase();
   const filtered = packs.filter((pack) => {
     const latest = latestActiveRelease(pack);
@@ -20,6 +26,8 @@ export function filterAndSortPacks(packs: CatalogPack[], searchState: SearchStat
       [
         pack.name,
         pack.registry,
+        pack.tier,
+        pack.publisher,
         pack.description,
         pack.source,
         categoryForPack(pack).label,
@@ -32,7 +40,7 @@ export function filterAndSortPacks(packs: CatalogPack[], searchState: SearchStat
   });
 
   return filtered.sort((a, b) => {
-    if (searchState.sort === "name") return a.name.localeCompare(b.name);
+    if (searchState.sort === "name") return compareByCodepoint(a.name, b.name);
     if (searchState.sort === "latest") {
       return compareVersions(
         latestActiveRelease(b)?.version ?? "0.0.0",
@@ -40,8 +48,6 @@ export function filterAndSortPacks(packs: CatalogPack[], searchState: SearchStat
       );
     }
     if (searchState.sort === "releases") return b.releases.length - a.releases.length;
-    const left = latestActiveRelease(a) ? 0 : 1;
-    const right = latestActiveRelease(b) ? 0 : 1;
-    return left - right || a.name.localeCompare(b.name);
+    return compareFeaturedPacks(a, b, featuredPackKeys);
   });
 }

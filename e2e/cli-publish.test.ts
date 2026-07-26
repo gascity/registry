@@ -153,6 +153,89 @@ test(
     expect(catalog.packs).toContainEqual(expect.objectContaining({ name: PACK_NAME, latest: "0.1.0" }));
     const toml = await (await fetch(`${BASE}/registry.toml`)).text();
     expect(toml).toContain(`name = "${PACK_NAME}"`);
+
+    // The pinned production gc must consume the same live aggregate that the browser does.
+    // Cover both trust tiers and both user-facing projections so Registry cannot ship fields
+    // that its deployed CLI silently drops.
+    const registryName = "e2e";
+    const cliEnv = { HOME: dir };
+    const servedRegistry = join(dir, "served-registry.toml");
+    await writeFile(servedRegistry, toml);
+    const addRegistry = run(
+      ["gc", "pack", "registry", "add", registryName, servedRegistry],
+      { env: cliEnv },
+    );
+    expect(addRegistry.code, addRegistry.stderr || addRegistry.stdout).toBe(0);
+
+    const attributionCases = [
+      {
+        name: "gascity",
+        tier: "maintained",
+        publisher: "Gas City",
+        searchTextPattern: /gascity\s+\S+\s+maintained\s+Gas City/,
+      },
+      {
+        name: PACK_NAME,
+        tier: "community",
+        publisher: "e2e-fixture",
+        searchTextPattern:
+          /e2e-fixture\/e2e-demo\s+0\.1\.0\s+community\s+e2e-fixture/,
+      },
+    ] as const;
+
+    const searchText = run(
+      ["gc", "pack", "registry", "search", "--registry", registryName, "--all"],
+      { env: cliEnv },
+    );
+    expect(searchText.code, searchText.stderr || searchText.stdout).toBe(0);
+    for (const expected of attributionCases) {
+      expect(searchText.stdout).toMatch(expected.searchTextPattern);
+    }
+
+    const searchJson = run(
+      ["gc", "pack", "registry", "search", "--registry", registryName, "--all", "--json"],
+      { env: cliEnv },
+    );
+    expect(searchJson.code, searchJson.stderr || searchJson.stdout).toBe(0);
+    const searchResult = JSON.parse(searchJson.stdout) as {
+      results: Array<{ name: string; tier: string; publisher: string }>;
+    };
+    for (const expected of attributionCases) {
+      expect(
+        searchResult.results.find((row) => row.name === expected.name),
+      ).toMatchObject({
+        tier: expected.tier,
+        publisher: expected.publisher,
+      });
+
+      const showText = run(
+        ["gc", "pack", "registry", "show", `${registryName}:${expected.name}`],
+        { env: cliEnv },
+      );
+      expect(showText.code, showText.stderr || showText.stdout).toBe(0);
+      expect(showText.stdout).toMatch(new RegExp(`^Tier:\\s+${expected.tier}$`, "m"));
+      expect(showText.stdout).toMatch(
+        new RegExp(`^Publisher:\\s+${expected.publisher}$`, "m"),
+      );
+
+      const showJson = run(
+        [
+          "gc",
+          "pack",
+          "registry",
+          "show",
+          `${registryName}:${expected.name}`,
+          "--json",
+        ],
+        { env: cliEnv },
+      );
+      expect(showJson.code, showJson.stderr || showJson.stdout).toBe(0);
+      expect(JSON.parse(showJson.stdout)).toMatchObject({
+        name: expected.name,
+        tier: expected.tier,
+        publisher: expected.publisher,
+      });
+    }
   },
   120_000,
 );

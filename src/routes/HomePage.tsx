@@ -17,6 +17,7 @@ import {
   Metric,
   type CatalogStatus,
 } from "../components/RegistryPrimitives";
+import { selectFeaturedPacks } from "../lib/catalogCuration";
 import { filterAndSortPacks } from "../lib/catalogFilters";
 import { releaseCounts, type RegistryCatalogState } from "../lib/registry";
 import { REGISTRY_PUBLIC_URL } from "../lib/links";
@@ -76,10 +77,13 @@ export function HomePage({
   const filterButtonRef = useRef<HTMLButtonElement | null>(null);
   const closeFiltersRef = useRef<HTMLButtonElement | null>(null);
   const counts = useMemo(() => releaseCounts(catalog.packs), [catalog.packs]);
-  const featuredPacks = useMemo(() => catalog.packs.slice(0, 4), [catalog.packs]);
+  const featuredPacks = useMemo(
+    () => selectFeaturedPacks(catalog.packs, catalog.featuredPackKeys),
+    [catalog.featuredPackKeys, catalog.packs],
+  );
   const filteredPacks = useMemo(
-    () => filterAndSortPacks(catalog.packs, searchState),
-    [catalog.packs, searchState],
+    () => filterAndSortPacks(catalog.packs, searchState, catalog.featuredPackKeys),
+    [catalog.featuredPackKeys, catalog.packs, searchState],
   );
 
   useEffect(() => {
@@ -223,6 +227,7 @@ export function HomePage({
             <div className="sectionTitle">
               <Eyebrow>Start here</Eyebrow>
               <h2 id="featured-title">Featured packs</h2>
+              <p>Selected by the Gas City Registry team.</p>
             </div>
             <div className="featuredGrid">
               {featuredPacks.map((pack) => (

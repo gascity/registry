@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
+import { parse } from "smol-toml";
 import {
   type CatalogRenderIssue,
   renderCatalogJsonWithApprovedPublishes,
@@ -74,9 +75,14 @@ function claims(...entries: PackNameClaim[]) {
 }
 
 const baseToml = `schema = 1
+featured_pack_keys = ["gascity-packs--alpha"]
 
 [[pack]]
+  pack_key = "gascity-packs--alpha"
+  registry = "gascity-packs"
   name = "alpha"
+  tier = "maintained"
+  publisher = "Gas City"
   description = "Alpha pack"
   source = "https://github.com/x/alpha"
   source_kind = "git"
@@ -93,11 +99,15 @@ const baseJson = JSON.stringify({
   schema: 1,
   source_count: 1,
   pack_count: 1,
+  featured_pack_keys: ["gascity-packs--alpha"],
   sources: [{ name: "gascity-packs", url: "https://example.com/registry.toml", pack_count: 1 }],
   packs: [
     {
+      pack_key: "gascity-packs--alpha",
       registry: "gascity-packs",
       name: "alpha",
+      tier: "maintained",
+      publisher: "Gas City",
       description: "Alpha pack",
       source: "https://github.com/x/alpha",
       source_kind: "git",
@@ -112,6 +122,174 @@ function collectIssues() {
   const issues: CatalogRenderIssue[] = [];
   return { issues, onIssue: (issue: CatalogRenderIssue) => issues.push(issue) };
 }
+
+describe("tier, publisher, and Featured runtime projection", () => {
+  test("normalizes malformed legacy attribution even when there are zero approved rows", () => {
+    const rawJson = JSON.parse(baseJson) as {
+      packs: Array<Record<string, unknown>>;
+    };
+    delete rawJson.packs[0].publisher;
+    const json = JSON.parse(
+      renderCatalogJsonWithApprovedPublishes(JSON.stringify(rawJson), []),
+    ) as {
+      packs: Array<{ tier: string; publisher: string }>;
+    };
+    expect(json.packs[0]).toMatchObject({
+      tier: "community",
+      publisher: "Unknown publisher",
+    });
+
+    const legacyToml = baseToml.replace('  publisher = "Gas City"\n', "");
+    const toml = parse(renderRegistryTomlWithApprovedPublishes(legacyToml, [])) as {
+      pack: Array<{ tier: string; publisher: string }>;
+    };
+    expect(toml.pack[0]).toMatchObject({
+      tier: "community",
+      publisher: "Unknown publisher",
+    });
+  });
+
+  test("preserves static attribution and curation while adding a direct pack in both surfaces", () => {
+    const approved = [approvedRow("prq_beta", entry("acme/beta", "1.0.0"))];
+    const json = JSON.parse(
+      renderCatalogJsonWithApprovedPublishes(baseJson, approved),
+    ) as {
+      featured_pack_keys: string[];
+      packs: Array<Record<string, unknown>>;
+    };
+    const toml = parse(
+      renderRegistryTomlWithApprovedPublishes(baseToml, approved),
+    ) as {
+      featured_pack_keys: string[];
+      pack: Array<Record<string, unknown>>;
+    };
+
+    expect(json.featured_pack_keys).toEqual(["gascity-packs--alpha"]);
+    expect(toml.featured_pack_keys).toEqual(json.featured_pack_keys);
+    expect(json.packs.find((pack) => pack.name === "alpha")).toMatchObject({
+      pack_key: "gascity-packs--alpha",
+      registry: "gascity-packs",
+      tier: "maintained",
+      publisher: "Gas City",
+    });
+    expect(toml.pack.find((pack) => pack.name === "alpha")).toMatchObject({
+      pack_key: "gascity-packs--alpha",
+      registry: "gascity-packs",
+      tier: "maintained",
+      publisher: "Gas City",
+    });
+  });
+
+  test("only exact boolean trusted grants a scoped direct pack maintained tier", () => {
+    const row = approvedRow("prq_tool", entry("acme/tool", "1.0.0"));
+    for (const [trusted, expectedTier] of [
+      [true, "maintained"],
+      [false, "community"],
+      ["true", "community"],
+    ] as const) {
+      const json = JSON.parse(
+        renderCatalogJsonWithApprovedPublishes(baseJson, [row], {
+          attributions: new Map([
+            ["acme/tool", { publisher: "Acme", trusted }],
+          ]),
+        }),
+      ) as { packs: Array<{ name: string; tier: string; publisher: string }> };
+      expect(json.packs.find((pack) => pack.name === "acme/tool")).toMatchObject({
+        tier: expectedTier,
+        publisher: "Acme",
+      });
+    }
+  });
+
+  test("missing direct attribution downgrades metadata without skipping the pack", () => {
+    const row = approvedRow("prq_unknown", entry("acme/unknown", "1.0.0"));
+    const json = JSON.parse(
+      renderCatalogJsonWithApprovedPublishes(baseJson, [row]),
+    ) as { packs: Array<{ name: string; tier: string; publisher: string }> };
+    expect(json.packs.find((pack) => pack.name === "acme/unknown")).toMatchObject({
+      tier: "community",
+      publisher: "Unknown publisher",
+    });
+  });
+
+  test("an id-less legacy bare-name claim displays its login but cannot become maintained", () => {
+    const row = approvedRowFrom(
+      "prq_cacc",
+      entry("cacc-twin-team", "1.0.0"),
+      "wespd/cacc-twin-team",
+    );
+    const json = JSON.parse(
+      renderCatalogJsonWithApprovedPublishes(baseJson, [row], {
+        nameClaims: claims(claim("cacc-twin-team", "wespd/cacc-twin-team")),
+        attributions: new Map([
+          ["cacc-twin-team", { publisher: "wespd", trusted: false }],
+        ]),
+      }),
+    ) as { packs: Array<{ name: string; tier: string; publisher: string }> };
+    expect(json.packs.find((pack) => pack.name === "cacc-twin-team")).toMatchObject({
+      tier: "community",
+      publisher: "wespd",
+    });
+  });
+
+  test("a community claim holder that displaces a curated maintained base inherits neither trust nor Featured", () => {
+    const row = approvedRowFrom(
+      "prq_shadow",
+      entry("alpha", "2.0.0", { commit: commitB }),
+      "community/alpha",
+      { repositoryId: "repo_community_alpha", ownerId: "owner_community" },
+    );
+    const options = {
+      nameClaims: claims(
+        claim("alpha", "community/alpha", {
+          repositoryId: "repo_community_alpha",
+          ownerId: "owner_community",
+        }),
+      ),
+      attributions: new Map([
+        ["alpha", { publisher: "community", trusted: false }],
+      ]),
+    };
+    const json = JSON.parse(
+      renderCatalogJsonWithApprovedPublishes(baseJson, [row], options),
+    ) as {
+      featured_pack_keys: string[];
+      packs: Array<{
+        name: string;
+        pack_key: string;
+        tier: string;
+        publisher: string;
+      }>;
+    };
+    const toml = parse(
+      renderRegistryTomlWithApprovedPublishes(baseToml, [row], options),
+    ) as {
+      featured_pack_keys: string[];
+      pack: Array<{
+        name: string;
+        pack_key: string;
+        tier: string;
+        publisher: string;
+      }>;
+    };
+
+    expect(json.featured_pack_keys).toEqual([]);
+    expect(toml.featured_pack_keys).toEqual([]);
+    expect(json.packs).toHaveLength(1);
+    expect(json.packs[0]).toMatchObject({
+      name: "alpha",
+      pack_key: "direct--alpha",
+      tier: "community",
+      publisher: "community",
+    });
+    expect(toml.pack[0]).toMatchObject({
+      name: "alpha",
+      pack_key: "direct--alpha",
+      tier: "community",
+      publisher: "community",
+    });
+  });
+});
 
 describe("fail-soft catalog render", () => {
   test("skips a conflicting approved entry but still serves the base + the good entries (TOML)", () => {
@@ -217,13 +395,38 @@ describe("fail-soft catalog render", () => {
       ],
     });
     const approved = [approvedRow("prq_graft2", entry("widget", "9.9.9", { commit: commitB }))];
+    const attributions = new Map([
+      ["widget", { publisher: "Direct claimant", trusted: true }],
+    ]);
 
-    expect(() => renderCatalogJsonWithApprovedPublishes(poisonedBase, approved)).toThrow(/collides with base pack/);
+    expect(() =>
+      renderCatalogJsonWithApprovedPublishes(poisonedBase, approved, { attributions }),
+    ).toThrow(/collides with base pack/);
 
     const { issues, onIssue } = collectIssues();
-    const json = renderCatalogJsonWithApprovedPublishes(poisonedBase, approved, { mode: "fail-soft", onIssue });
-    const parsed = JSON.parse(json) as { packs: Array<{ name: string; latest: string }> };
-    expect(parsed.packs.find((p) => p.name === "widget")!.latest).toBe("1.0.0"); // NOT 9.9.9
+    const json = renderCatalogJsonWithApprovedPublishes(poisonedBase, approved, {
+      mode: "fail-soft",
+      onIssue,
+      attributions,
+    });
+    const parsed = JSON.parse(json) as {
+      source_count: number;
+      sources: Array<{ name: string; pack_count: number }>;
+      packs: Array<{
+        name: string;
+        latest: string;
+        tier: string;
+        publisher: string;
+      }>;
+    };
+    const widget = parsed.packs.find((p) => p.name === "widget")!;
+    expect(widget.latest).toBe("1.0.0"); // NOT 9.9.9
+    expect(widget).toMatchObject({
+      tier: "community",
+      publisher: "Unknown publisher",
+    });
+    expect(parsed.source_count).toBe(0);
+    expect(parsed.sources).toEqual([]);
     expect(issues).toHaveLength(1);
   });
 
@@ -483,6 +686,235 @@ describe("handler serves a 200 catalog even with a poisoned approved entry", () 
       expect(names).toContain("good-pack");
       const alpha = parsed.packs.find((p) => p.name === "alpha")!;
       expect(alpha.releases.every((r) => r.commit === commitA)).toBe(true); // base kept, poison skipped
+    } finally {
+      await store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("handler resolves current publisher trust for both catalog surfaces", () => {
+  test("the committed 16-pack catalog serves 17 with the live cacc-twin-team claim", async () => {
+    const committedCatalog = (await Bun.file(
+      new URL("../public/catalog.json", import.meta.url),
+    ).json()) as {
+      pack_count: number;
+      featured_pack_keys: string[];
+      packs: Array<{ name: string; tier: string; publisher: string }>;
+    };
+    expect(committedCatalog.pack_count).toBe(16);
+    expect(committedCatalog.packs).toHaveLength(16);
+
+    const dir = await mkdtemp(join(tmpdir(), "registry-live-catalog-"));
+    const store = createStore(undefined, join(dir, "registry.local.json"));
+    await store.init();
+    try {
+      const admin = await store.ensureUser({
+        subject: "dev:live-admin",
+        gasCityUserId: "dev:live-admin",
+        handle: "live-admin",
+        displayName: "Live catalog admin",
+        assertedAdmin: true,
+      });
+      const submitter = await store.ensureUser({
+        subject: "dev:wespd",
+        gasCityUserId: "dev:wespd",
+        handle: "wespd",
+        displayName: "wespd",
+      });
+      const request = await store.createPublishRequest(
+        submitter.id,
+        {
+          repoUrl: "https://github.com/wespd/cacc-twin-team",
+          commit: commitA,
+          packPath: "packs/cacc-twin-team",
+          requestedName: "cacc-twin-team",
+          requestedVersion: "1.0.0",
+        },
+        "web_session",
+      );
+      const caccEntry = entry("cacc-twin-team", "1.0.0");
+      caccEntry.source = "https://github.com/wespd/cacc-twin-team";
+      await store.markPublishRequestValidated(request.id, caccEntry);
+      await store.approvePublishRequest(admin.id, request.id);
+
+      const handler = createRegistryFetchHandler({
+        config: {
+          port: 0,
+          appUrl: "http://127.0.0.1:0",
+          mountBase: "",
+          sessionSecret: "x".repeat(32),
+          localDataPath: "",
+          publishValidation: { gcBin: "gc", timeoutMs: 1000 },
+          isProduction: false,
+          devAuthEnabled: false,
+        } as ServerConfig,
+        store,
+        distRoot: new URL("../public/", import.meta.url),
+      });
+
+      const jsonResponse = await handler(
+        new Request("http://127.0.0.1/catalog.json"),
+      );
+      const tomlResponse = await handler(
+        new Request("http://127.0.0.1/registry.toml"),
+      );
+      const json = (await jsonResponse.json()) as {
+        pack_count: number;
+        featured_pack_keys: string[];
+        packs: Array<{ name: string; tier: string; publisher: string }>;
+      };
+      const toml = parse(await tomlResponse.text()) as {
+        featured_pack_keys: string[];
+        pack: Array<{ name: string; tier: string; publisher: string }>;
+      };
+
+      expect(json.pack_count).toBe(17);
+      expect(json.packs).toHaveLength(17);
+      expect(toml.pack).toHaveLength(17);
+      expect(json.featured_pack_keys).toEqual([
+        "gascity-packs--gascity",
+        "gascity-packs--gastown",
+        "gascity-packs--bmad",
+        "gascity-packs--slack-full",
+      ]);
+      expect(toml.featured_pack_keys).toEqual(json.featured_pack_keys);
+      for (const packs of [json.packs, toml.pack]) {
+        expect(
+          packs.find((pack) => pack.name === "cacc-twin-team"),
+        ).toMatchObject({
+          tier: "community",
+          publisher: "wespd",
+        });
+      }
+    } finally {
+      await store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("static, trusted scoped, and id-less legacy packs stay in parity and trust changes are live", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "registry-attribution-"));
+    const distRoot = join(dir, "dist");
+    await mkdir(distRoot, { recursive: true });
+    await writeFile(join(distRoot, "registry.toml"), baseToml);
+    await writeFile(join(distRoot, "catalog.json"), baseJson);
+
+    const store = createStore(undefined, join(dir, "registry.local.json"));
+    await store.init();
+    try {
+      const admin = await store.ensureUser({
+        subject: "dev:attr-admin",
+        gasCityUserId: "dev:attr-admin",
+        handle: "attr-admin",
+        displayName: "Attribution admin",
+        assertedAdmin: true,
+      });
+      const submitter = await store.ensureUser({
+        subject: "dev:attr-pub",
+        gasCityUserId: "dev:attr-pub",
+        handle: "attr-pub",
+        displayName: "Attribution publisher",
+      });
+      await store.upsertVerifiedPackOwnership(submitter.id, {
+        packKey: "acme--tool",
+        sourceUrl: "https://github.com/acme/tool/tree/main",
+        githubRepositoryId: "repo_acme_tool",
+        githubRepositoryFullName: "acme/tool",
+        githubRepositoryName: "tool",
+        githubOwnerId: "owner_acme",
+        githubOwnerLogin: "acme",
+        githubOwnerType: "Organization",
+        verificationMethod: "manual",
+      });
+
+      async function approve(
+        name: string,
+        repoUrl: string,
+        sourceIdentity?: { githubRepositoryId: string; githubOwnerId: string },
+      ) {
+        const request = await store.createPublishRequest(
+          submitter.id,
+          {
+            repoUrl,
+            commit: commitA,
+            packPath: `packs/${name.replaceAll("/", "--")}`,
+            requestedName: name,
+            requestedVersion: "1.0.0",
+          },
+          sourceIdentity ? "github_actions_oidc" : "web_session",
+          sourceIdentity,
+        );
+        await store.markPublishRequestValidated(request.id, entry(name, "1.0.0"));
+        await store.approvePublishRequest(admin.id, request.id);
+      }
+
+      await approve("acme/tool", "https://github.com/acme/tool", {
+        githubRepositoryId: "repo_acme_tool",
+        githubOwnerId: "owner_acme",
+      });
+      await approve("cacc-twin-team", "https://github.com/wespd/cacc-twin-team");
+      await store.setPublisherTrustByGithubOwnerId("owner_acme", true, {
+        operator: "aggregate-test",
+        reason: "prove live trusted projection",
+      });
+
+      const handler = createRegistryFetchHandler({
+        config: {
+          port: 0,
+          appUrl: "http://127.0.0.1:0",
+          mountBase: "",
+          sessionSecret: "x".repeat(32),
+          localDataPath: "",
+          publishValidation: { gcBin: "gc", timeoutMs: 1000 },
+          isProduction: false,
+          devAuthEnabled: false,
+        } as ServerConfig,
+        store,
+        distRoot: pathToFileURL(`${distRoot}/`),
+      });
+
+      async function projections() {
+        const jsonResponse = await handler(new Request("http://127.0.0.1/catalog.json"));
+        const tomlResponse = await handler(new Request("http://127.0.0.1/registry.toml"));
+        expect(jsonResponse.status).toBe(200);
+        expect(tomlResponse.status).toBe(200);
+        const json = (await jsonResponse.json()) as {
+          packs: Array<{ name: string; tier: string; publisher: string }>;
+        };
+        const toml = parse(await tomlResponse.text()) as {
+          pack: Array<{ name: string; tier: string; publisher: string }>;
+        };
+        return { json: json.packs, toml: toml.pack };
+      }
+
+      const promoted = await projections();
+      for (const packs of [promoted.json, promoted.toml]) {
+        expect(packs.find((pack) => pack.name === "alpha")).toMatchObject({
+          tier: "maintained",
+          publisher: "Gas City",
+        });
+        expect(packs.find((pack) => pack.name === "acme/tool")).toMatchObject({
+          tier: "maintained",
+          publisher: "acme",
+        });
+        expect(packs.find((pack) => pack.name === "cacc-twin-team")).toMatchObject({
+          tier: "community",
+          publisher: "wespd",
+        });
+      }
+
+      await store.setPublisherTrustByGithubOwnerId("owner_acme", false, {
+        operator: "aggregate-test",
+        reason: "prove emergency downgrade without another publish",
+      });
+      const downgraded = await projections();
+      for (const packs of [downgraded.json, downgraded.toml]) {
+        expect(packs.find((pack) => pack.name === "acme/tool")).toMatchObject({
+          tier: "community",
+          publisher: "acme",
+        });
+      }
     } finally {
       await store.close();
       await rm(dir, { recursive: true, force: true });

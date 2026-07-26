@@ -1,14 +1,30 @@
 import { readdir } from "node:fs/promises";
 import { parse } from "smol-toml";
+import {
+  compareByCodepoint,
+  PACK_TIERS,
+  tierForTrusted,
+  UNKNOWN_PUBLISHER,
+  type PackTier,
+} from "../shared/catalogPolicy";
 
 type SourceConfig = {
   schema?: unknown;
+  featured_pack_keys?: unknown;
   source?: unknown;
 };
 
 type RegistrySource = {
   name: string;
   url: string;
+  publisher: string;
+  trusted: boolean;
+  expectedPacks: string[];
+};
+
+export type RegistryConfig = {
+  sources: RegistrySource[];
+  featuredPackKeys: string[];
 };
 
 type RawCatalog = {
@@ -53,6 +69,8 @@ type CatalogPack = {
   packKey?: string;
   registry: string;
   name: string;
+  tier: PackTier;
+  publisher: string;
   description: string;
   source: string;
   sourceKind: string;
@@ -60,6 +78,8 @@ type CatalogPack = {
   ogImage?: string;
   releases: CatalogRelease[];
 };
+
+type IngestedPack = Omit<CatalogPack, "tier" | "publisher">;
 
 // A recoverable ingest problem: a bad pack/release was skipped, or a duplicate/collision
 // was resolved. Source-level failures (fetch/parse/schema) are fatal and throw instead.
@@ -79,10 +99,13 @@ export type AggregateResult = {
   warnings: IngestWarning[];
 };
 
-type RawJsonCatalog = { schema?: unknown; packs?: unknown };
+type RawJsonCatalog = { schema?: unknown; featured_pack_keys?: unknown; packs?: unknown };
 type RawJsonPack = {
+  pack_key?: unknown;
   registry?: unknown;
   name?: unknown;
+  tier?: unknown;
+  publisher?: unknown;
   description?: unknown;
   source?: unknown;
   source_kind?: unknown;
@@ -150,7 +173,7 @@ export function outputPaths(outDir: URL) {
 const readmeCandidates = ["README.md", "README.mdx", "readme.md", "SKILL.md"];
 const maxReadmeChars = 80_000;
 
-export async function readSources(path: URL = defaultSourcesPath) {
+export async function readRegistryConfig(path: URL = defaultSourcesPath): Promise<RegistryConfig> {
   const raw = parse(await Bun.file(path).text()) as SourceConfig;
   const schema = requireSchema(raw.schema, "sources.toml");
   if (schema !== 1) {
@@ -163,10 +186,18 @@ export async function readSources(path: URL = defaultSourcesPath) {
   }
 
   const seen = new Set<string>();
-  return rawSources.map((rawSource, index): RegistrySource => {
-    const record = rawSource as { name?: unknown; url?: unknown };
+  const expectedKeyOwners = new Map<string, string>();
+  const sources = rawSources.map((rawSource, index): RegistrySource => {
+    const record = rawSource as {
+      name?: unknown;
+      url?: unknown;
+      publisher?: unknown;
+      trusted?: unknown;
+      expected_packs?: unknown;
+    };
     const name = requireString(record.name, `source[${index}].name`);
     const url = requireString(record.url, `${name}.url`);
+    const publisher = requireString(record.publisher, `${name}.publisher`).trim();
 
     if (!sourceNamePattern.test(name)) {
       throw new Error(`invalid registry source name ${JSON.stringify(name)}`);
@@ -176,8 +207,79 @@ export async function readSources(path: URL = defaultSourcesPath) {
     }
     seen.add(name);
     validateSourceUrl(name, url);
-    return { name, url };
+    if (publisher === UNKNOWN_PUBLISHER) {
+      throw new Error(`${name}.publisher must identify the configured source`);
+    }
+
+    if (record.trusted !== undefined && typeof record.trusted !== "boolean") {
+      throw new Error(`${name}.trusted must be a boolean`);
+    }
+    if (!Array.isArray(record.expected_packs)) {
+      throw new Error(`${name}.expected_packs must be an array`);
+    }
+    const expectedPacks: string[] = [];
+    const seenPacks = new Set<string>();
+    for (const [packIndex, value] of record.expected_packs.entries()) {
+      const packName = requireString(value, `${name}.expected_packs[${packIndex}]`);
+      if (!ingestedPackNamePattern.test(packName) || packName.length > maxPackNameSegment) {
+        throw new Error(`${name}: invalid expected pack name ${JSON.stringify(packName)}`);
+      }
+      assertUnreservedOgFilename(`${name}.expected_packs`, packName);
+      if (seenPacks.has(packName)) {
+        throw new Error(`${name}: duplicate expected pack ${JSON.stringify(packName)}`);
+      }
+      seenPacks.add(packName);
+      expectedPacks.push(packName);
+
+      const key = `${name}--${packName}`;
+      const previous = expectedKeyOwners.get(key);
+      if (previous) {
+        throw new Error(
+          `sources.toml: expected packs ${JSON.stringify(previous)} and ${JSON.stringify(
+            `${name}/${packName}`,
+          )} share pack_key ${key}`,
+        );
+      }
+      expectedKeyOwners.set(key, `${name}/${packName}`);
+    }
+
+    return {
+      name,
+      url,
+      publisher,
+      trusted: record.trusted === true,
+      expectedPacks,
+    };
   });
+
+  const rawFeatured = raw.featured_pack_keys ?? [];
+  if (!Array.isArray(rawFeatured)) {
+    throw new Error("featured_pack_keys must be an array");
+  }
+  const featuredPackKeys: string[] = [];
+  const seenFeatured = new Set<string>();
+  for (const [index, value] of rawFeatured.entries()) {
+    const key = requireString(value, `featured_pack_keys[${index}]`);
+    if (seenFeatured.has(key)) {
+      throw new Error(`duplicate featured pack_key ${JSON.stringify(key)}`);
+    }
+    seenFeatured.add(key);
+    featuredPackKeys.push(key);
+  }
+  if (featuredPackKeys.length > 4) {
+    throw new Error("featured_pack_keys may contain at most 4 entries");
+  }
+  for (const key of featuredPackKeys) {
+    if (!expectedKeyOwners.has(key)) {
+      throw new Error(`featured pack_key ${JSON.stringify(key)} is not declared in sources.toml`);
+    }
+  }
+
+  return { sources, featuredPackKeys };
+}
+
+export async function readSources(path: URL = defaultSourcesPath) {
+  return (await readRegistryConfig(path)).sources;
 }
 
 export async function aggregateSources(
@@ -201,15 +303,40 @@ export async function aggregateSources(
     // Source-level failures (fetch, TOML parse, schema) throw and abort the whole run —
     // we never silently drop a source's entire contribution.
     const text = await readSourceText(source);
-    const { packs: sourcePacks, declaredCount } = normalizeCatalog(source.name, text, emit);
+    const { packs: normalizedPacks, declaredCount } = normalizeCatalog(source.name, text, emit);
 
     // Fail-safe: a source that declared packs but yielded none valid signals systematic
     // format drift, not one bad pack. Refuse rather than silently shrink the catalog.
-    if (declaredCount > 0 && sourcePacks.length === 0) {
+    if (declaredCount > 0 && normalizedPacks.length === 0) {
       throw new Error(
         `${source.name}: all ${declaredCount} declared pack(s) failed validation; refusing to drop the entire source`,
       );
     }
+
+    if (Array.isArray(source.expectedPacks)) {
+      const expected = new Set(source.expectedPacks);
+      for (const pack of normalizedPacks) {
+        if (!expected.has(pack.name)) {
+          throw new Error(
+            `${source.name}: unexpected pack ${JSON.stringify(
+              pack.name,
+            )} is not declared in expected_packs`,
+          );
+        }
+      }
+      const actual = new Set(normalizedPacks.map((pack) => pack.name));
+      for (const expectedName of source.expectedPacks) {
+        if (!actual.has(expectedName)) {
+          throw new Error(`${source.name}: expected pack ${JSON.stringify(expectedName)} is absent`);
+        }
+      }
+    }
+
+    const sourcePacks = normalizedPacks.map((pack) => ({
+      ...pack,
+      tier: tierForTrusted(source.trusted),
+      publisher: source.publisher,
+    }));
 
     let contributed = 0;
     for (const pack of sourcePacks) {
@@ -269,14 +396,6 @@ export async function aggregateSources(
     sourceSummaries,
     warnings,
   };
-}
-
-// Deterministic, environment-independent ordering. localeCompare uses ICU collation,
-// which varies by runtime/locale — that would make the offline check re-sort packs
-// differently from the cron that wrote them and false-fail. Pack names are ASCII
-// ([a-z0-9-/]), so code-unit order equals codepoint order here.
-function compareByCodepoint(a: string, b: string) {
-  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 async function readSourceText(source: RegistrySource) {
@@ -381,7 +500,7 @@ function normalizeCatalog(
   registry: string,
   text: string,
   emit: (warning: IngestWarning) => void,
-): { packs: CatalogPack[]; declaredCount: number } {
+): { packs: IngestedPack[]; declaredCount: number } {
   // TOML parse failure and schema mismatch are source-level → fatal (throw).
   const raw = parse(text) as RawCatalog;
   const schema = requireSchema(raw.schema, `${registry}: registry catalog`);
@@ -397,7 +516,7 @@ function normalizeCatalog(
   }
   const rawPacks = Array.isArray(raw.pack) ? raw.pack : [];
   // Per-pack failures are recoverable: skip the bad pack, keep the rest.
-  const normalized: CatalogPack[] = [];
+  const normalized: IngestedPack[] = [];
   for (const rawPack of rawPacks) {
     try {
       normalized.push(normalizePack(registry, rawPack as RawPack, emit));
@@ -427,7 +546,7 @@ function normalizePack(
   registry: string,
   raw: RawPack,
   emit: (warning: IngestWarning) => void,
-): CatalogPack {
+): IngestedPack {
   const name = requireString(raw.name, `${registry}.pack.name`);
   // A scoped upstream name would not merely squat a publish claim, it would WIN it:
   // mergeApprovedEntry refuses an approved publish that collides with a base pack, so the served
@@ -576,11 +695,22 @@ function normalizeRelease(registry: string, packName: string, raw: RawRelease): 
   };
 }
 
-export function renderRegistryToml(packs: CatalogPack[]) {
-  const lines = ["schema = 1", ""];
+export function renderRegistryToml(
+  packs: CatalogPack[],
+  featuredPackKeys: string[] = [],
+) {
+  const lines = [
+    "schema = 1",
+    `featured_pack_keys = [${featuredPackKeys.map(quote).join(", ")}]`,
+    "",
+  ];
   for (const pack of packs) {
     lines.push("[[pack]]");
+    lines.push(`  pack_key = ${quote(packKeyFor(pack))}`);
+    lines.push(`  registry = ${quote(pack.registry)}`);
     lines.push(`  name = ${quote(pack.name)}`);
+    lines.push(`  tier = ${quote(pack.tier)}`);
+    lines.push(`  publisher = ${quote(pack.publisher)}`);
     lines.push(`  description = ${quote(pack.description)}`);
     lines.push(`  source = ${quote(pack.source)}`);
     lines.push(`  source_kind = ${quote(pack.sourceKind)}`);
@@ -608,12 +738,14 @@ export function renderRegistryToml(packs: CatalogPack[]) {
 export function renderCatalogJson(
   packs: CatalogPack[],
   sources: Array<{ name: string; url: string; packCount: number }>,
+  featuredPackKeys: string[] = [],
 ) {
   return `${JSON.stringify(
     {
       schema: 1,
       source_count: sources.length,
       pack_count: packs.length,
+      featured_pack_keys: featuredPackKeys,
       sources: sources.map((source) => ({
         name: source.name,
         url: source.url,
@@ -624,6 +756,8 @@ export function renderCatalogJson(
         pack_key: packKeyFor(pack),
         registry: pack.registry,
         name: pack.name,
+        tier: pack.tier,
+        publisher: pack.publisher,
         description: pack.description,
         source: pack.source,
         source_kind: pack.sourceKind,
@@ -832,6 +966,8 @@ function searchTextFor(pack: CatalogPack) {
   return [
     pack.name,
     pack.registry,
+    pack.tier,
+    pack.publisher,
     pack.description,
     pack.source,
     pack.sourceKind,
@@ -913,6 +1049,13 @@ function requireString(value: unknown, field: string) {
   return value;
 }
 
+function requirePackTier(value: unknown, field: string): PackTier {
+  if (typeof value !== "string" || !PACK_TIERS.includes(value as PackTier)) {
+    throw new Error(`${field} must be "maintained" or "community"`);
+  }
+  return value as PackTier;
+}
+
 function quote(value: string) {
   return JSON.stringify(value);
 }
@@ -943,7 +1086,9 @@ function assertParseableUrl(value: string, field: string) {
 // so the offline check recomputes and re-verifies them — carrying them over would make the
 // round-trip circular and able to false-pass. Validation here is strict (throws): a corrupt
 // cron-written artifact must fail the check, not be treated as ground truth.
-export async function readCatalogJson(path: URL): Promise<{ packs: CatalogPack[] }> {
+export async function readCatalogJson(
+  path: URL,
+): Promise<{ packs: CatalogPack[]; featuredPackKeys: string[] }> {
   let raw: RawJsonCatalog;
   try {
     raw = JSON.parse(await Bun.file(path).text()) as RawJsonCatalog;
@@ -954,6 +1099,19 @@ export async function readCatalogJson(path: URL): Promise<{ packs: CatalogPack[]
   const schema = requireSchema(raw.schema, "catalog.json");
   if (schema !== 1) {
     throw new Error(`catalog.json: unsupported schema ${schema}`);
+  }
+
+  if (!Array.isArray(raw.featured_pack_keys)) {
+    throw new Error("catalog.json: featured_pack_keys must be an array");
+  }
+  const featuredPackKeys = raw.featured_pack_keys.map((value, index) =>
+    requireString(value, `catalog.json featured_pack_keys[${index}]`),
+  );
+  if (featuredPackKeys.length > 4) {
+    throw new Error("catalog.json: featured_pack_keys may contain at most 4 entries");
+  }
+  if (new Set(featuredPackKeys).size !== featuredPackKeys.length) {
+    throw new Error("catalog.json: duplicate featured pack_key");
   }
 
   const rawPacks = Array.isArray(raw.packs) ? raw.packs : [];
@@ -979,7 +1137,14 @@ export async function readCatalogJson(path: URL): Promise<{ packs: CatalogPack[]
     keyOwners.set(packKey, pack.name);
   }
 
-  return { packs };
+  const servedKeys = new Set(packs.map(packKeyFor));
+  for (const key of featuredPackKeys) {
+    if (!servedKeys.has(key)) {
+      throw new Error(`catalog.json: featured pack_key ${JSON.stringify(key)} is not present`);
+    }
+  }
+
+  return { packs, featuredPackKeys };
 }
 
 function reconstructPack(raw: RawJsonPack): CatalogPack {
@@ -1001,6 +1166,23 @@ function reconstructPack(raw: RawJsonPack): CatalogPack {
 
   const source = requireString(raw.source, `catalog.json ${name}.source`);
   assertParseableUrl(source, `catalog.json ${name}.source`);
+  const packKey = requireString(raw.pack_key, `catalog.json ${name}.pack_key`);
+  const expectedPackKey = `${registry}--${name.replaceAll("/", "--")}`;
+  if (packKey !== expectedPackKey) {
+    throw new Error(
+      `catalog.json ${name}: pack_key ${JSON.stringify(packKey)} must be ${JSON.stringify(
+        expectedPackKey,
+      )}`,
+    );
+  }
+  const tier = requirePackTier(raw.tier, `catalog.json ${name}.tier`);
+  const publisher = requireString(
+    raw.publisher,
+    `catalog.json ${name}.publisher`,
+  ).trim();
+  if (publisher === UNKNOWN_PUBLISHER) {
+    throw new Error(`catalog.json ${name}.publisher must identify the configured source`);
+  }
 
   const rawReleases = Array.isArray(raw.releases) ? raw.releases : [];
   const releases = rawReleases.map((release) =>
@@ -1015,8 +1197,11 @@ function reconstructPack(raw: RawJsonPack): CatalogPack {
   }
 
   return {
+    packKey,
     registry,
     name,
+    tier,
+    publisher,
     description: requireString(raw.description, `catalog.json ${name}.description`),
     source,
     sourceKind,
@@ -1053,8 +1238,11 @@ export async function checkOutputs(
   const outDir = options.outDir ?? defaultOutDir;
   const paths = outputPaths(outDir);
 
-  const sources = await readSources(sourcesPath);
-  const { packs } = await readCatalogJson(paths.catalog);
+  const config = await readRegistryConfig(sourcesPath);
+  const { sources, featuredPackKeys } = config;
+  const { packs, featuredPackKeys: committedFeaturedPackKeys } = await readCatalogJson(
+    paths.catalog,
+  );
 
   // Mirror the generate-side wipe guard: a committed empty catalog is never legitimate, so
   // the offline check must reject it too (a wiped-but-self-consistent tree would else pass).
@@ -1063,6 +1251,7 @@ export async function checkOutputs(
   }
 
   const sourceNames = new Set(sources.map((source) => source.name));
+  const packsBySource = new Map<string, CatalogPack[]>();
   for (const pack of packs) {
     if (!sourceNames.has(pack.registry)) {
       throw new Error(
@@ -1071,6 +1260,43 @@ export async function checkOutputs(
         )} not declared in sources.toml`,
       );
     }
+    const list = packsBySource.get(pack.registry) ?? [];
+    list.push(pack);
+    packsBySource.set(pack.registry, list);
+  }
+  for (const source of sources) {
+    const sourcePacks = packsBySource.get(source.name) ?? [];
+    const actualNames = new Set(sourcePacks.map((pack) => pack.name));
+    for (const pack of sourcePacks) {
+      if (!source.expectedPacks.includes(pack.name)) {
+        throw new Error(
+          `catalog.json: pack ${JSON.stringify(pack.name)} is not assigned to source ${JSON.stringify(
+            source.name,
+          )} by sources.toml`,
+        );
+      }
+      const expectedTier = tierForTrusted(source.trusted);
+      if (pack.tier !== expectedTier || pack.publisher !== source.publisher) {
+        throw new Error(
+          `catalog.json: attribution for ${JSON.stringify(pack.name)} does not match sources.toml`,
+        );
+      }
+    }
+    for (const expectedName of source.expectedPacks) {
+      if (!actualNames.has(expectedName)) {
+        throw new Error(
+          `catalog.json: expected pack ${JSON.stringify(expectedName)} is absent from source ${JSON.stringify(
+            source.name,
+          )}`,
+        );
+      }
+    }
+  }
+  if (
+    committedFeaturedPackKeys.length !== featuredPackKeys.length ||
+    committedFeaturedPackKeys.some((key, index) => key !== featuredPackKeys[index])
+  ) {
+    throw new Error("catalog.json: featured_pack_keys do not match sources.toml");
   }
   for (let index = 1; index < packs.length; index += 1) {
     if (compareByCodepoint(packs[index - 1].name, packs[index].name) >= 0) {
@@ -1081,8 +1307,8 @@ export async function checkOutputs(
   }
 
   const sourceSummaries = summarizeSources(sources, packs);
-  const registryToml = renderRegistryToml(packs);
-  const catalogJson = renderCatalogJson(packs, sourceSummaries);
+  const registryToml = renderRegistryToml(packs, featuredPackKeys);
+  const catalogJson = renderCatalogJson(packs, sourceSummaries, featuredPackKeys);
   const ogFiles = renderOgFiles(packs, sourceSummaries);
 
   await assertCurrent(paths.registry, registryToml);

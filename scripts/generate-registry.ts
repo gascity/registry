@@ -8,7 +8,7 @@ import {
   defaultSourcesPath,
   type IngestWarning,
   outputPaths,
-  readSources,
+  readRegistryConfig,
   removeStaleOgFiles,
   renderCatalogJson,
   renderOgFiles,
@@ -67,12 +67,12 @@ async function main() {
   }
 
   const paths = outputPaths(outDir);
-  const sources = await readSources(sourcesPath);
+  const { sources, featuredPackKeys } = await readRegistryConfig(sourcesPath);
   const { packs, sourceSummaries, warnings } = await aggregateSources(sources, {
     onWarning: reportWarning,
   });
-  const registryToml = renderRegistryToml(packs);
-  const catalogJson = renderCatalogJson(packs, sourceSummaries);
+  const registryToml = renderRegistryToml(packs, featuredPackKeys);
+  const catalogJson = renderCatalogJson(packs, sourceSummaries, featuredPackKeys);
   const ogFiles = renderOgFiles(packs, sourceSummaries);
 
   await Bun.write(paths.registry, registryToml);
