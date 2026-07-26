@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import {
   aggregateSources,
   readCatalogJson,
-  readSources,
+  readRegistryConfig,
   renderCatalogJson,
   renderOgFiles,
   renderRegistryToml,
@@ -80,10 +80,10 @@ beforeAll(async () => {
   }) as typeof fetch;
 
   try {
-    const sources = await readSources();
+    const { sources, featuredPackKeys } = await readRegistryConfig();
     const { packs, sourceSummaries } = await aggregateSources(sources);
-    renderedRegistry = renderRegistryToml(packs);
-    renderedCatalog = renderCatalogJson(packs, sourceSummaries);
+    renderedRegistry = renderRegistryToml(packs, featuredPackKeys);
+    renderedCatalog = renderCatalogJson(packs, sourceSummaries, featuredPackKeys);
     renderedOg = renderOgFiles(packs, sourceSummaries).map((file) => ({
       name: file.filename,
       content: file.content,

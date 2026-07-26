@@ -1,8 +1,35 @@
 schema = 1
 
+featured_pack_keys = [
+  "gascity-packs--gascity",
+  "gascity-packs--gastown",
+  "gascity-packs--bmad",
+  "gascity-packs--slack-full",
+]
+
 # Sources are polled in listed order. On a cross-source pack-name collision the FIRST source
 # listed here wins; the later source's duplicate pack is skipped with a warning. Order matters.
 
 [[source]]
 name = "gascity-packs"
 url = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"
+publisher = "Gas City"
+trusted = true
+expected_packs = [
+  "bmad",
+  "cass",
+  "compound-engineering",
+  "contributing",
+  "discord",
+  "gascity",
+  "gastown",
+  "github",
+  "gstack",
+  "oversight-rig",
+  "pr-pipeline",
+  "runtime-cloudflare",
+  "slack-channel",
+  "slack-full",
+  "slack-mini",
+  "superpowers",
+]

@@ -3,13 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { parse } from "smol-toml";
 import {
   aggregateSources,
   checkOutputs,
   type IngestWarning,
   outputPaths,
   readCatalogJson,
-  readSources,
+  readRegistryConfig,
   renderCatalogJson,
   renderOgFiles,
   renderRegistryToml,
@@ -109,14 +110,53 @@ function catalogToml(...packBlocks: string[]) {
 
 // Write an upstream registry.toml to disk and return a file:// source plus a matching
 // sources.toml (for checkOutputs-based tests).
-async function writeUpstream(name: string, toml: string) {
+async function writeUpstream(
+  name: string,
+  toml: string,
+  options: {
+    publisher?: string;
+    trusted?: boolean;
+    expectedPacks?: string[];
+    featuredPackKeys?: string[];
+  } = {},
+) {
   const dir = await tmp();
   const upstream = join(dir, "upstream.toml");
   await writeFile(upstream, toml);
   const url = pathToFileURL(upstream).href;
+  const expectedPacks =
+    options.expectedPacks ??
+    [...toml.matchAll(/^name = "([^"]+)"$/gm)]
+      .map((match) => match[1])
+      .filter((packName) => /^[a-z0-9][a-z0-9-]*$/.test(packName) && packName.length <= 64)
+      .filter((packName, index, names) => names.indexOf(packName) === index);
+  const publisher = options.publisher ?? `${name} publisher`;
+  const trusted = options.trusted ?? false;
+  const featuredPackKeys = options.featuredPackKeys ?? [];
   const sourcesFile = join(dir, "sources.toml");
-  await writeFile(sourcesFile, `schema = 1\n\n[[source]]\nname = "${name}"\nurl = "${url}"\n`);
-  return { name, url, sourcesPath: pathToFileURL(sourcesFile) };
+  await writeFile(
+    sourcesFile,
+    [
+      "schema = 1",
+      `featured_pack_keys = ${JSON.stringify(featuredPackKeys)}`,
+      "",
+      "[[source]]",
+      `name = "${name}"`,
+      `url = "${url}"`,
+      `publisher = "${publisher}"`,
+      `trusted = ${trusted}`,
+      `expected_packs = ${JSON.stringify(expectedPacks)}`,
+      "",
+    ].join("\n"),
+  );
+  return {
+    name,
+    url,
+    publisher,
+    trusted,
+    expectedPacks: options.expectedPacks,
+    sourcesPath: pathToFileURL(sourcesFile),
+  };
 }
 
 async function aggregate(sources: Array<{ name: string; url: string }>) {
@@ -126,6 +166,217 @@ async function aggregate(sources: Array<{ name: string; url: string }>) {
   expect(collected).toEqual(result.warnings);
   return result;
 }
+
+describe("registry-controlled attribution and curation config", () => {
+  it("parses source attribution, its exact pack allowlist, and ordered Featured keys", async () => {
+    const src = await writeUpstream(
+      "curated",
+      catalogToml(
+        packBlock("alpha", [releaseBlock("1.0")]),
+        packBlock("beta", [releaseBlock("1.0")]),
+      ),
+      {
+        publisher: "Gas City",
+        trusted: true,
+        featuredPackKeys: ["curated--beta", "curated--alpha"],
+      },
+    );
+
+    await expect(readRegistryConfig(src.sourcesPath)).resolves.toEqual({
+      sources: [
+        {
+          name: "curated",
+          url: src.url,
+          publisher: "Gas City",
+          trusted: true,
+          expectedPacks: ["alpha", "beta"],
+        },
+      ],
+      featuredPackKeys: ["curated--beta", "curated--alpha"],
+    });
+  });
+
+  it("rejects a non-boolean trusted declaration instead of treating a truthy string as maintained", async () => {
+    const src = await writeUpstream(
+      "typed",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+    );
+    const text = (await Bun.file(src.sourcesPath).text()).replace(
+      "trusted = false",
+      'trusted = "false"',
+    );
+    const patched = join(await tmp(), "sources.toml");
+    await writeFile(patched, text);
+
+    await expect(readRegistryConfig(pathToFileURL(patched))).rejects.toThrow(
+      /typed\.trusted must be a boolean/,
+    );
+  });
+
+  it("rejects a missing publisher instead of minting unattributed maintained metadata", async () => {
+    const src = await writeUpstream(
+      "missing-publisher",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+      { trusted: true },
+    );
+    const text = (await Bun.file(src.sourcesPath).text()).replace(
+      /^publisher = .*$/m,
+      "",
+    );
+    const patched = join(await tmp(), "sources.toml");
+    await writeFile(patched, text);
+
+    await expect(readRegistryConfig(pathToFileURL(patched))).rejects.toThrow(
+      /missing-publisher\.publisher is required/,
+    );
+  });
+
+  it("rejects duplicate Featured keys independently of the pack allowlist", async () => {
+    const src = await writeUpstream(
+      "featured-dup",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+      { featuredPackKeys: ["featured-dup--alpha", "featured-dup--alpha"] },
+    );
+    await expect(readRegistryConfig(src.sourcesPath)).rejects.toThrow(
+      /duplicate featured pack_key "featured-dup--alpha"/,
+    );
+  });
+
+  it("rejects an unknown Featured key independently of duplicate checking", async () => {
+    const src = await writeUpstream(
+      "featured-unknown",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+      { featuredPackKeys: ["featured-unknown--ghost"] },
+    );
+    await expect(readRegistryConfig(src.sourcesPath)).rejects.toThrow(
+      /featured pack_key "featured-unknown--ghost" is not declared/,
+    );
+  });
+
+  it("rejects more than four Featured keys independently of duplicate and unknown checking", async () => {
+    const names = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    const src = await writeUpstream(
+      "featured-limit",
+      catalogToml(...names.map((name) => packBlock(name, [releaseBlock("1.0")]))),
+      { featuredPackKeys: names.map((name) => `featured-limit--${name}`) },
+    );
+    await expect(readRegistryConfig(src.sourcesPath)).rejects.toThrow(
+      /featured_pack_keys may contain at most 4 entries/,
+    );
+  });
+});
+
+describe("registry-controlled attribution and expected-pack integrity", () => {
+  it("derives maintained attribution only from a source whose trusted bit is exactly true", async () => {
+    const maintained = await writeUpstream(
+      "maintained-source",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+      { publisher: "Gas City", trusted: true },
+    );
+    const community = await writeUpstream(
+      "community-source",
+      catalogToml(packBlock("beta", [releaseBlock("1.0")])),
+      { publisher: "Community Lab", trusted: false },
+    );
+
+    const result = await aggregateSources([maintained, community]);
+    expect(result.packs.map(({ name, tier, publisher }) => ({ name, tier, publisher }))).toEqual([
+      { name: "alpha", tier: "maintained", publisher: "Gas City" },
+      { name: "beta", tier: "community", publisher: "Community Lab" },
+    ]);
+  });
+
+  it("ignores upstream self-attribution and keeps the local source policy", async () => {
+    const upstream = catalogToml(packBlock("alpha", [releaseBlock("1.0")])).replace(
+      'source_kind = "git"',
+      'source_kind = "git"\ntier = "maintained"\npublisher = "Gas City"',
+    );
+    const src = await writeUpstream("community-source", upstream, {
+      publisher: "Independent Publisher",
+      trusted: false,
+    });
+
+    const { packs } = await aggregateSources([src]);
+    expect(packs[0]).toMatchObject({
+      tier: "community",
+      publisher: "Independent Publisher",
+    });
+  });
+
+  it("fails when a trusted upstream adds an unreviewed pack outside expected_packs", async () => {
+    const src = await writeUpstream(
+      "curated",
+      catalogToml(
+        packBlock("alpha", [releaseBlock("1.0")]),
+        packBlock("surprise", [releaseBlock("1.0")]),
+      ),
+      {
+        publisher: "Gas City",
+        trusted: true,
+        expectedPacks: ["alpha"],
+      },
+    );
+
+    await expect(aggregateSources([src])).rejects.toThrow(
+      /curated: unexpected pack "surprise" is not declared in expected_packs/,
+    );
+  });
+
+  it("fails when an expected pack disappears instead of silently shrinking the curated source", async () => {
+    const src = await writeUpstream(
+      "curated",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+      {
+        publisher: "Gas City",
+        trusted: true,
+        expectedPacks: ["alpha", "missing"],
+      },
+    );
+
+    await expect(aggregateSources([src])).rejects.toThrow(
+      /curated: expected pack "missing" is absent/,
+    );
+  });
+
+  it("emits identical attribution, canonical pack keys, and curation in JSON and TOML", async () => {
+    const src = await writeUpstream(
+      "curated",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+      {
+        publisher: "Gas City",
+        trusted: true,
+        featuredPackKeys: ["curated--alpha"],
+      },
+    );
+    const config = await readRegistryConfig(src.sourcesPath);
+    const { packs, sourceSummaries } = await aggregateSources(config.sources);
+    const toml = parse(renderRegistryToml(packs, config.featuredPackKeys)) as {
+      featured_pack_keys: string[];
+      pack: Array<Record<string, unknown>>;
+    };
+    const json = JSON.parse(
+      renderCatalogJson(packs, sourceSummaries, config.featuredPackKeys),
+    ) as {
+      featured_pack_keys: string[];
+      packs: Array<Record<string, unknown>>;
+    };
+
+    expect(toml.featured_pack_keys).toEqual(["curated--alpha"]);
+    expect(json.featured_pack_keys).toEqual(toml.featured_pack_keys);
+    expect(toml.pack[0]).toMatchObject({
+      pack_key: "curated--alpha",
+      registry: "curated",
+      tier: "maintained",
+      publisher: "Gas City",
+    });
+    expect(json.packs[0]).toMatchObject({
+      pack_key: "curated--alpha",
+      registry: "curated",
+      tier: "maintained",
+      publisher: "Gas City",
+    });
+  });
+});
 
 describe("ingest policy (skip-and-warn)", () => {
   it("a clean source produces no warnings", async () => {
@@ -451,10 +702,13 @@ describe("empty-catalog guards", () => {
 // Generate a valid output tree for the offline-check tests, using the lib directly.
 async function generateInto(sourcesPath: URL, outDir: URL) {
   const paths = outputPaths(outDir);
-  const sources = await readSources(sourcesPath);
+  const { sources, featuredPackKeys } = await readRegistryConfig(sourcesPath);
   const { packs, sourceSummaries } = await aggregateSources(sources);
-  await Bun.write(paths.registry, renderRegistryToml(packs));
-  await Bun.write(paths.catalog, renderCatalogJson(packs, sourceSummaries));
+  await Bun.write(paths.registry, renderRegistryToml(packs, featuredPackKeys));
+  await Bun.write(
+    paths.catalog,
+    renderCatalogJson(packs, sourceSummaries, featuredPackKeys),
+  );
   await mkdir(paths.ogDir, { recursive: true });
   for (const file of renderOgFiles(packs, sourceSummaries)) {
     await Bun.write(new URL(file.filename, paths.ogDir), file.content);
@@ -531,7 +785,7 @@ describe("offline check (checkOutputs)", () => {
     const extra = pathToFileURL(join(await tmp(), "extra.toml")).href;
     await writeFile(
       patched,
-      `${await Bun.file(src.sourcesPath).text()}\n[[source]]\nname = "extra"\nurl = "${extra}"\n`,
+      `${await Bun.file(src.sourcesPath).text()}\n[[source]]\nname = "extra"\nurl = "${extra}"\npublisher = "Extra publisher"\ntrusted = false\nexpected_packs = []\n`,
     );
     await expect(
       checkOutputs({ sourcesPath: pathToFileURL(patched), outDir }),
@@ -551,8 +805,14 @@ describe("offline check (checkOutputs)", () => {
 // Craft a catalog.json directly to exercise the reconstruction validators.
 function jsonPack(
   name: string,
-  opts: { registry?: string; releases?: Array<{ version: string; commit?: string; hash?: string }> } = {},
+  opts: {
+    registry?: string;
+    tier?: string;
+    publisher?: string;
+    releases?: Array<{ version: string; commit?: string; hash?: string }>;
+  } = {},
 ) {
+  const registry = opts.registry ?? "s";
   const releases = (opts.releases ?? [{ version: "1.0" }]).map((r) => ({
     version: r.version,
     ref: `v${r.version}`,
@@ -562,9 +822,11 @@ function jsonPack(
     withdrawn: false,
   }));
   return {
-    pack_key: "k",
-    registry: opts.registry ?? "s",
+    pack_key: `${registry}--${name.replaceAll("/", "--")}`,
+    registry,
     name,
+    tier: opts.tier ?? "community",
+    publisher: opts.publisher ?? "Test publisher",
     description: `${name} pack`,
     source: `https://example.com/${name}`,
     source_kind: "git",
@@ -576,7 +838,7 @@ function jsonPack(
 
 async function writeCatalog(packs: unknown[], schema: unknown = 1) {
   const dir = await tmp();
-  const body = `${JSON.stringify({ schema, source_count: 1, pack_count: packs.length, sources: [], og_image: "/og/registry.svg", packs }, null, 2)}\n`;
+  const body = `${JSON.stringify({ schema, source_count: 1, pack_count: packs.length, featured_pack_keys: [], sources: [], og_image: "/og/registry.svg", packs }, null, 2)}\n`;
   const file = new URL("catalog.json", pathToFileURL(`${dir}/`));
   await writeFile(fileURLToPath(file), body);
   return file;
@@ -644,9 +906,12 @@ describe("checkOutputs structural validation", () => {
     const dir = await tmp();
     const file = join(dir, "sources.toml");
     const blocks = names
-      .map((n) => `[[source]]\nname = "${n}"\nurl = "https://example.com/${n}.toml"\n`)
+      .map(
+        (n) =>
+          `[[source]]\nname = "${n}"\nurl = "https://example.com/${n}.toml"\npublisher = "Test publisher"\ntrusted = false\nexpected_packs = ["alpha", "beta"]\n`,
+      )
       .join("\n");
-    await writeFile(file, `schema = 1\n\n${blocks}`);
+    await writeFile(file, `schema = 1\nfeatured_pack_keys = []\n\n${blocks}`);
     return pathToFileURL(file);
   }
 
