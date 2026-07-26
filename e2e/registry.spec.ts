@@ -119,6 +119,29 @@ test("footer links expose source, verifier, and publishing pages", async ({ page
   await expectHealthyPage(page, errors);
 });
 
+test("publish checklist prose stays in one flex item at phone width", async ({ page }) => {
+  const errors = trackRuntimeErrors(page);
+
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.goto("/publish");
+
+  const checklistItems = page.locator(".docsPage .checkList li");
+  await expect(checklistItems).toHaveCount(12);
+
+  for (const item of await checklistItems.all()) {
+    const body = item.locator(":scope > span");
+    await expect(body).toHaveCount(1);
+
+    const itemBox = await item.boundingBox();
+    const bodyBox = await body.boundingBox();
+    expect(itemBox).not.toBeNull();
+    expect(bodyBox).not.toBeNull();
+    expect(bodyBox!.width).toBeGreaterThan(itemBox!.width * 0.8);
+  }
+
+  await expectHealthyPage(page, errors);
+});
+
 test("detail tabs support keyboard navigation", async ({ page }) => {
   const errors = trackRuntimeErrors(page);
 

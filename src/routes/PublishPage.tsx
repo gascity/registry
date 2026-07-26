@@ -672,10 +672,18 @@ export function PublishPage({
             exchanges GitHub’s OIDC identity for a short-lived token scoped to this exact release.
           </p>
           <ul className="checkList">
-            <li>Keep the publish job in the publishing repository.</li>
-            <li>Use a GitHub-hosted runner; self-hosted runners are refused.</li>
-            <li>Run after merge from a tag or push, never from a pull request event.</li>
-            <li>Do not move this job into an organization-level reusable workflow.</li>
+            <li>
+              <span>Keep the publish job in the publishing repository.</span>
+            </li>
+            <li>
+              <span>Use a GitHub-hosted runner; self-hosted runners are refused.</span>
+            </li>
+            <li>
+              <span>Run after merge from a tag or push, never from a pull request event.</span>
+            </li>
+            <li>
+              <span>Do not move this job into an organization-level reusable workflow.</span>
+            </li>
           </ul>
         </div>
         <pre className="docsCode">
@@ -690,23 +698,31 @@ export function PublishPage({
         </div>
         <ul className="checkList">
           <li>
-            A tag may be <code>v1.2.3</code>; the workflow strips the leading <code>v</code> and
-            submits version <code>1.2.3</code>. The recorded ref remains{" "}
-            <code>refs/tags/v1.2.3</code>.
+            <span>
+              A tag may be <code>v1.2.3</code>; the workflow strips the leading <code>v</code> and
+              submits version <code>1.2.3</code>. The recorded ref remains{" "}
+              <code>refs/tags/v1.2.3</code>.
+            </span>
           </li>
           <li>
-            Registry currently accepts canonical stable versions only: exactly{" "}
-            <code>major.minor.patch</code> with no leading zeros.
+            <span>
+              Registry currently accepts canonical stable versions only: exactly{" "}
+              <code>major.minor.patch</code> with no leading zeros.
+            </span>
           </li>
           <li>
-            Prerelease or build suffixes such as <code>1.2.3-rc.1</code> and{" "}
-            <code>1.2.3+build.4</code>, shortened versions such as <code>1.2</code>, and versions
-            containing a leading <code>v</code> are rejected.
+            <span>
+              Prerelease or build suffixes such as <code>1.2.3-rc.1</code> and{" "}
+              <code>1.2.3+build.4</code>, shortened versions such as <code>1.2</code>, and versions
+              containing a leading <code>v</code> are rejected.
+            </span>
           </li>
           <li>
-            <strong>Find packs</strong> can publish only the current default-branch{" "}
-            <code>HEAD</code>. Editing its ref label does not select another commit; use Actions or
-            the CLI for a tagged or older commit.
+            <span>
+              <strong>Find packs</strong> can publish only the current default-branch{" "}
+              <code>HEAD</code>. Editing its ref label does not select another commit; use Actions
+              or the CLI for a tagged or older commit.
+            </span>
           </li>
         </ul>
       </section>
@@ -790,19 +806,29 @@ export function PublishPage({
         <ul className="checkList">
           <li>
             <TerminalSquare size={16} aria-hidden="true" />
-            Direct submission: `gc pack registry publish .`
+            <span>
+              Direct submission: <code>gc pack registry publish .</code>
+            </span>
           </li>
           <li>
             <FileCode2 size={16} aria-hidden="true" />
-            CLI-compatible aggregate: `https://registry.gascity.com/registry.toml`
+            <span>
+              CLI-compatible aggregate:{" "}
+              <code>https://registry.gascity.com/registry.toml</code>
+            </span>
           </li>
           <li>
             <FileCode2 size={16} aria-hidden="true" />
-            Website catalog and search: `https://registry.gascity.com/catalog.json`
+            <span>
+              Website catalog and search:{" "}
+              <code>https://registry.gascity.com/catalog.json</code>
+            </span>
           </li>
           <li>
             <ShieldCheck size={16} aria-hidden="true" />
-            Account and staff request history with submission method, proof basis, and next step.
+            <span>
+              Account and staff request history with submission method, proof basis, and next step.
+            </span>
           </li>
         </ul>
       </section>
