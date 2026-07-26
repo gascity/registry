@@ -93,6 +93,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           DOCKER_BUILDKIT=1 docker build --secret id=gh_token,env=NODE_AUTH_TOKEN -t registry-ci .
+          docker run --rm --entrypoint bun registry-ci -e 'await import("./server/app.ts")'
           docker run --rm --entrypoint /usr/local/bin/gc registry-ci pack release hash --help >/dev/null
 
       - name: Extract pinned gc from the production image
