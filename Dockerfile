@@ -49,5 +49,6 @@ RUN --mount=type=secret,id=gh_token \
     NODE_AUTH_TOKEN="$(cat /run/secrets/gh_token)" bun install --frozen-lockfile --production
 COPY --from=build /app/dist ./dist
 COPY server ./server
+COPY shared ./shared
 EXPOSE 8080
 CMD ["bun", "server/index.ts"]
