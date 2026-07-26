@@ -4,7 +4,7 @@ FROM golang:1.26.4-alpine AS gc-build
 WORKDIR /src/gascity
 # gascity v1.3.3 — includes `gc … --dev-auth` (#3343), which the CLI e2e + manual-testing
 # doc rely on. The previous pin predated that flag. Bump in lockstep with the CLI contract.
-ARG GASCITY_REF=55acb481229103485ba995bae6cbf283d9618af8
+ARG GASCITY_REF=c954582e7ee3e7ca3b6e05cde0be17729b6c2cd9
 RUN apk add --no-cache ca-certificates git
 RUN set -eux; \
   git clone --filter=blob:none https://github.com/gastownhall/gascity.git /src/gascity; \
