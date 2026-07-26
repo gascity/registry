@@ -1904,6 +1904,63 @@ for (const lane of lanes) {
     // Documented divergence (store.ts): the file store keeps no audit_logs. This asserts the
     // Postgres audit trail — the ownership-override justification is a security/compliance record.
     if (lane.name === "postgres") {
+      test("publisher trust promotion and rollback are fully auditable", async () => {
+        const submitter = await store.ensureUser(identity());
+        const ownership = ownershipInput("acme/trust-audit");
+        await store.upsertVerifiedPackOwnership(submitter.id, ownership);
+
+        const promoted = await store.setPublisherTrustByGithubOwnerId(
+          ownership.githubOwnerId,
+          true,
+          {
+            operator: "registry-operator",
+            reason: "publisher review approved",
+          },
+        );
+        await store.setPublisherTrustByGithubOwnerId(
+          ownership.githubOwnerId,
+          false,
+          {
+            operator: "registry-operator",
+            reason: "emergency trust rollback",
+          },
+        );
+
+        const sql = postgres(dbUrl!, { max: 1 });
+        try {
+          const rows = await sql`
+            SELECT actor_user_id, target_type, target_id, metadata
+            FROM audit_logs
+            WHERE action = 'publisher.trust.update'
+              AND target_id = ${promoted.id}
+              AND metadata->>'operator' = 'registry-operator'
+          `;
+          expect(rows).toHaveLength(2);
+          for (const row of rows) {
+            expect(row.actor_user_id).toBeNull();
+            expect(row.target_type).toBe("publisher");
+            expect(row.metadata.operator).toBe("registry-operator");
+            expect(row.metadata.githubOwnerId).toBe(ownership.githubOwnerId);
+          }
+          expect(
+            rows.find((row) => row.metadata.trusted === true)?.metadata,
+          ).toMatchObject({
+            reason: "publisher review approved",
+            previousTrusted: false,
+            trusted: true,
+          });
+          expect(
+            rows.find((row) => row.metadata.trusted === false)?.metadata,
+          ).toMatchObject({
+            reason: "emergency trust rollback",
+            previousTrusted: true,
+            trusted: false,
+          });
+        } finally {
+          await sql.end();
+        }
+      });
+
       test("audit_logs record create, approve(override), reject and withdraw", async () => {
         const submitter = await store.ensureUser(identity());
         const admin = await store.ensureUser(identity({ assertedAdmin: true }));
