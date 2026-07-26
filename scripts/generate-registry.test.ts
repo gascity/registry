@@ -15,6 +15,7 @@ import {
   renderOgFiles,
   renderRegistryToml,
   reservedOgFilenameList,
+  summarizeSources,
 } from "./generate-registry.lib.ts";
 
 // Every fixture uses file:// sources and https://example.com pack sources, so nothing here
@@ -723,6 +724,7 @@ describe("offline check (checkOutputs)", () => {
         packBlock("alpha", [releaseBlock("1.0"), releaseBlock("2.0")]),
         packBlock("beta", [releaseBlock("1.0")]),
       ),
+      { featuredPackKeys: ["fx--beta", "fx--alpha"] },
     );
     const outDir = pathToFileURL(`${await tmp()}/`);
     await generateInto(src.sourcesPath, outDir);
@@ -733,6 +735,35 @@ describe("offline check (checkOutputs)", () => {
     const dst = await tmp();
     await cp(fileURLToPath(outDir).replace(/\/+$/, ""), dst, { recursive: true });
     return pathToFileURL(`${dst}/`);
+  }
+
+  async function rerenderCommittedCatalog(
+    sourcesPath: URL,
+    outDir: URL,
+    mutate: (
+      catalog: Awaited<ReturnType<typeof readCatalogJson>>,
+    ) => void,
+  ) {
+    const paths = outputPaths(outDir);
+    const catalog = await readCatalogJson(paths.catalog);
+    mutate(catalog);
+    const { sources } = await readRegistryConfig(sourcesPath);
+    const sourceSummaries = summarizeSources(sources, catalog.packs);
+    await Bun.write(
+      paths.registry,
+      renderRegistryToml(catalog.packs, catalog.featuredPackKeys),
+    );
+    await Bun.write(
+      paths.catalog,
+      renderCatalogJson(
+        catalog.packs,
+        sourceSummaries,
+        catalog.featuredPackKeys,
+      ),
+    );
+    for (const file of renderOgFiles(catalog.packs, sourceSummaries)) {
+      await Bun.write(new URL(file.filename, paths.ogDir), file.content);
+    }
   }
 
   it("passes on freshly generated output with zero fetches", async () => {
@@ -792,6 +823,93 @@ describe("offline check (checkOutputs)", () => {
     ).rejects.toThrow(/catalog\.json is out of date/);
   });
 
+  it("rejects a self-consistent tier mutation against sources.toml policy", async () => {
+    const { src, outDir } = await goodOutput();
+    const copy = await copyOut(outDir);
+    await rerenderCommittedCatalog(src.sourcesPath, copy, ({ packs }) => {
+      packs[0]!.tier = "maintained";
+    });
+
+    await expect(
+      checkOutputs({ sourcesPath: src.sourcesPath, outDir: copy }),
+    ).rejects.toThrow(/attribution for "alpha" does not match sources\.toml/);
+  });
+
+  it("rejects a self-consistent publisher mutation against sources.toml policy", async () => {
+    const { src, outDir } = await goodOutput();
+    const copy = await copyOut(outDir);
+    await rerenderCommittedCatalog(src.sourcesPath, copy, ({ packs }) => {
+      packs[0]!.publisher = "Artifact impostor";
+    });
+
+    await expect(
+      checkOutputs({ sourcesPath: src.sourcesPath, outDir: copy }),
+    ).rejects.toThrow(/attribution for "alpha" does not match sources\.toml/);
+  });
+
+  it("rejects self-consistent Featured reordering against sources.toml policy", async () => {
+    const { src, outDir } = await goodOutput();
+    const copy = await copyOut(outDir);
+    await rerenderCommittedCatalog(
+      src.sourcesPath,
+      copy,
+      ({ featuredPackKeys }) => featuredPackKeys.reverse(),
+    );
+
+    await expect(
+      checkOutputs({ sourcesPath: src.sourcesPath, outDir: copy }),
+    ).rejects.toThrow(/featured_pack_keys do not match sources\.toml/);
+  });
+
+  it("rejects a self-consistent pack reassignment to another declared source", async () => {
+    const first = await writeUpstream(
+      "first",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+      { publisher: "First publisher", trusted: false },
+    );
+    const second = await writeUpstream(
+      "second",
+      catalogToml(packBlock("beta", [releaseBlock("1.0")])),
+      { publisher: "Second publisher", trusted: true },
+    );
+    const sourcesFile = join(await tmp(), "sources.toml");
+    await writeFile(
+      sourcesFile,
+      [
+        "schema = 1",
+        "featured_pack_keys = []",
+        "",
+        "[[source]]",
+        'name = "second"',
+        `url = "${second.url}"`,
+        'publisher = "Second publisher"',
+        "trusted = true",
+        'expected_packs = ["beta"]',
+        "",
+        "[[source]]",
+        'name = "first"',
+        `url = "${first.url}"`,
+        'publisher = "First publisher"',
+        "trusted = false",
+        'expected_packs = ["alpha"]',
+        "",
+      ].join("\n"),
+    );
+    const sourcesPath = pathToFileURL(sourcesFile);
+    const outDir = pathToFileURL(`${await tmp()}/`);
+    await generateInto(sourcesPath, outDir);
+    await rerenderCommittedCatalog(sourcesPath, outDir, ({ packs }) => {
+      const alpha = packs.find((candidate) => candidate.name === "alpha")!;
+      alpha.registry = "second";
+      alpha.tier = "maintained";
+      alpha.publisher = "Second publisher";
+    });
+
+    await expect(checkOutputs({ sourcesPath, outDir })).rejects.toThrow(
+      /pack "alpha" is not assigned to source "second" by sources\.toml/,
+    );
+  });
+
   it("fails cleanly on malformed catalog.json (no stack-trace leak)", async () => {
     const { src, outDir } = await goodOutput();
     const copy = await copyOut(outDir);
@@ -836,9 +954,13 @@ function jsonPack(
   };
 }
 
-async function writeCatalog(packs: unknown[], schema: unknown = 1) {
+async function writeCatalog(
+  packs: unknown[],
+  schema: unknown = 1,
+  featuredPackKeys: unknown = [],
+) {
   const dir = await tmp();
-  const body = `${JSON.stringify({ schema, source_count: 1, pack_count: packs.length, featured_pack_keys: [], sources: [], og_image: "/og/registry.svg", packs }, null, 2)}\n`;
+  const body = `${JSON.stringify({ schema, source_count: 1, pack_count: packs.length, featured_pack_keys: featuredPackKeys, sources: [], og_image: "/og/registry.svg", packs }, null, 2)}\n`;
   const file = new URL("catalog.json", pathToFileURL(`${dir}/`));
   await writeFile(fileURLToPath(file), body);
   return file;
@@ -898,6 +1020,40 @@ describe("catalog reconstruction validators (readCatalogJson)", () => {
   it("rejects a non-number schema", async () => {
     const file = await writeCatalog([jsonPack("a")], "1");
     await expect(readCatalogJson(file)).rejects.toThrow(/schema must be a number/);
+  });
+
+  it("rejects more than four committed Featured keys", async () => {
+    const names = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    const file = await writeCatalog(
+      names.map((name) => jsonPack(name)),
+      1,
+      names.map((name) => `s--${name}`),
+    );
+    await expect(readCatalogJson(file)).rejects.toThrow(
+      /featured_pack_keys may contain at most 4 entries/,
+    );
+  });
+
+  it("rejects duplicate committed Featured keys", async () => {
+    const file = await writeCatalog(
+      [jsonPack("alpha")],
+      1,
+      ["s--alpha", "s--alpha"],
+    );
+    await expect(readCatalogJson(file)).rejects.toThrow(
+      /duplicate featured pack_key/,
+    );
+  });
+
+  it("rejects a committed Featured key that is not served", async () => {
+    const file = await writeCatalog(
+      [jsonPack("alpha")],
+      1,
+      ["s--missing"],
+    );
+    await expect(readCatalogJson(file)).rejects.toThrow(
+      /featured pack_key "s--missing" is not present/,
+    );
   });
 });
 

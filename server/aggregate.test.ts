@@ -669,6 +669,105 @@ describe("handler serves a 200 catalog even with a poisoned approved entry", () 
 });
 
 describe("handler resolves current publisher trust for both catalog surfaces", () => {
+  test("the committed 16-pack catalog serves 17 with the live cacc-twin-team claim", async () => {
+    const committedCatalog = (await Bun.file(
+      new URL("../public/catalog.json", import.meta.url),
+    ).json()) as {
+      pack_count: number;
+      featured_pack_keys: string[];
+      packs: Array<{ name: string; tier: string; publisher: string }>;
+    };
+    expect(committedCatalog.pack_count).toBe(16);
+    expect(committedCatalog.packs).toHaveLength(16);
+
+    const dir = await mkdtemp(join(tmpdir(), "registry-live-catalog-"));
+    const store = createStore(undefined, join(dir, "registry.local.json"));
+    await store.init();
+    try {
+      const admin = await store.ensureUser({
+        subject: "dev:live-admin",
+        gasCityUserId: "dev:live-admin",
+        handle: "live-admin",
+        displayName: "Live catalog admin",
+        assertedAdmin: true,
+      });
+      const submitter = await store.ensureUser({
+        subject: "dev:wespd",
+        gasCityUserId: "dev:wespd",
+        handle: "wespd",
+        displayName: "wespd",
+      });
+      const request = await store.createPublishRequest(
+        submitter.id,
+        {
+          repoUrl: "https://github.com/wespd/cacc-twin-team",
+          commit: commitA,
+          packPath: "packs/cacc-twin-team",
+          requestedName: "cacc-twin-team",
+          requestedVersion: "1.0.0",
+        },
+        "web_session",
+      );
+      const caccEntry = entry("cacc-twin-team", "1.0.0");
+      caccEntry.source = "https://github.com/wespd/cacc-twin-team";
+      await store.markPublishRequestValidated(request.id, caccEntry);
+      await store.approvePublishRequest(admin.id, request.id);
+
+      const handler = createRegistryFetchHandler({
+        config: {
+          port: 0,
+          appUrl: "http://127.0.0.1:0",
+          mountBase: "",
+          sessionSecret: "x".repeat(32),
+          localDataPath: "",
+          publishValidation: { gcBin: "gc", timeoutMs: 1000 },
+          isProduction: false,
+          devAuthEnabled: false,
+        } as ServerConfig,
+        store,
+        distRoot: new URL("../public/", import.meta.url),
+      });
+
+      const jsonResponse = await handler(
+        new Request("http://127.0.0.1/catalog.json"),
+      );
+      const tomlResponse = await handler(
+        new Request("http://127.0.0.1/registry.toml"),
+      );
+      const json = (await jsonResponse.json()) as {
+        pack_count: number;
+        featured_pack_keys: string[];
+        packs: Array<{ name: string; tier: string; publisher: string }>;
+      };
+      const toml = parse(await tomlResponse.text()) as {
+        featured_pack_keys: string[];
+        pack: Array<{ name: string; tier: string; publisher: string }>;
+      };
+
+      expect(json.pack_count).toBe(17);
+      expect(json.packs).toHaveLength(17);
+      expect(toml.pack).toHaveLength(17);
+      expect(json.featured_pack_keys).toEqual([
+        "gascity-packs--gascity",
+        "gascity-packs--gastown",
+        "gascity-packs--bmad",
+        "gascity-packs--slack-full",
+      ]);
+      expect(toml.featured_pack_keys).toEqual(json.featured_pack_keys);
+      for (const packs of [json.packs, toml.pack]) {
+        expect(
+          packs.find((pack) => pack.name === "cacc-twin-team"),
+        ).toMatchObject({
+          tier: "community",
+          publisher: "wespd",
+        });
+      }
+    } finally {
+      await store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("static, trusted scoped, and id-less legacy packs stay in parity and trust changes are live", async () => {
     const dir = await mkdtemp(join(tmpdir(), "registry-attribution-"));
     const distRoot = join(dir, "dist");
