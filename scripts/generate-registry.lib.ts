@@ -197,7 +197,7 @@ export async function readRegistryConfig(path: URL = defaultSourcesPath): Promis
     };
     const name = requireString(record.name, `source[${index}].name`);
     const url = requireString(record.url, `${name}.url`);
-    const publisher = requireString(record.publisher, `${name}.publisher`);
+    const publisher = requireString(record.publisher, `${name}.publisher`).trim();
 
     if (!sourceNamePattern.test(name)) {
       throw new Error(`invalid registry source name ${JSON.stringify(name)}`);
@@ -207,6 +207,9 @@ export async function readRegistryConfig(path: URL = defaultSourcesPath): Promis
     }
     seen.add(name);
     validateSourceUrl(name, url);
+    if (publisher === UNKNOWN_PUBLISHER) {
+      throw new Error(`${name}.publisher must identify the configured source`);
+    }
 
     if (record.trusted !== undefined && typeof record.trusted !== "boolean") {
       throw new Error(`${name}.trusted must be a boolean`);
@@ -1173,7 +1176,10 @@ function reconstructPack(raw: RawJsonPack): CatalogPack {
     );
   }
   const tier = requirePackTier(raw.tier, `catalog.json ${name}.tier`);
-  const publisher = requireString(raw.publisher, `catalog.json ${name}.publisher`);
+  const publisher = requireString(
+    raw.publisher,
+    `catalog.json ${name}.publisher`,
+  ).trim();
   if (publisher === UNKNOWN_PUBLISHER) {
     throw new Error(`catalog.json ${name}.publisher must identify the configured source`);
   }

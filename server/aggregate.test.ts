@@ -395,13 +395,38 @@ describe("fail-soft catalog render", () => {
       ],
     });
     const approved = [approvedRow("prq_graft2", entry("widget", "9.9.9", { commit: commitB }))];
+    const attributions = new Map([
+      ["widget", { publisher: "Direct claimant", trusted: true }],
+    ]);
 
-    expect(() => renderCatalogJsonWithApprovedPublishes(poisonedBase, approved)).toThrow(/collides with base pack/);
+    expect(() =>
+      renderCatalogJsonWithApprovedPublishes(poisonedBase, approved, { attributions }),
+    ).toThrow(/collides with base pack/);
 
     const { issues, onIssue } = collectIssues();
-    const json = renderCatalogJsonWithApprovedPublishes(poisonedBase, approved, { mode: "fail-soft", onIssue });
-    const parsed = JSON.parse(json) as { packs: Array<{ name: string; latest: string }> };
-    expect(parsed.packs.find((p) => p.name === "widget")!.latest).toBe("1.0.0"); // NOT 9.9.9
+    const json = renderCatalogJsonWithApprovedPublishes(poisonedBase, approved, {
+      mode: "fail-soft",
+      onIssue,
+      attributions,
+    });
+    const parsed = JSON.parse(json) as {
+      source_count: number;
+      sources: Array<{ name: string; pack_count: number }>;
+      packs: Array<{
+        name: string;
+        latest: string;
+        tier: string;
+        publisher: string;
+      }>;
+    };
+    const widget = parsed.packs.find((p) => p.name === "widget")!;
+    expect(widget.latest).toBe("1.0.0"); // NOT 9.9.9
+    expect(widget).toMatchObject({
+      tier: "community",
+      publisher: "Unknown publisher",
+    });
+    expect(parsed.source_count).toBe(0);
+    expect(parsed.sources).toEqual([]);
     expect(issues).toHaveLength(1);
   });
 

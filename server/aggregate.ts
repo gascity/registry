@@ -140,7 +140,7 @@ export function renderRegistryTomlWithApprovedPublishes(
     options.onIssue?.({ kind: "base", error: asError(error) });
     return baseToml; // serve the committed artifact unmerged rather than 500
   }
-  const packs = mergeApprovedEntries(base.packs, entries, options);
+  const { packs } = mergeApprovedEntries(base.packs, entries, options);
   return renderRegistryToml(packs, filterFeaturedPackKeys(base.featuredPackKeys, packs));
 }
 
@@ -160,9 +160,12 @@ export function renderCatalogJsonWithApprovedPublishes(
     options.onIssue?.({ kind: "base", error: asError(error) });
     return baseJson;
   }
-  const packs = mergeApprovedEntries(base.packs, entries, options);
+  const { packs, directPackCount } = mergeApprovedEntries(
+    base.packs,
+    entries,
+    options,
+  );
   const featuredPackKeys = filterFeaturedPackKeys(base.featuredPackKeys, packs);
-  const directPackCount = packs.filter((pack) => pack.registry === "direct").length;
   const baseSources = (Array.isArray(raw.sources) ? raw.sources : []).map((source) =>
     withServedPackCount(source, packs),
   );
@@ -245,17 +248,17 @@ function mergeApprovedEntries(basePacks: RuntimePack[], entries: ApprovedEntry[]
   packs.sort((left, right) => left.name.localeCompare(right.name));
   for (const pack of packs) {
     pack.releases.sort((left, right) => compareVersions(left.version, right.version));
-    if (pack.registry === "direct") {
-      const raw = options.attributions?.get(pack.name);
-      const attribution = normalizePackAttribution(
-        tierForTrusted(raw?.trusted),
-        raw?.publisher,
-      );
-      pack.tier = attribution.tier;
-      pack.publisher = attribution.publisher;
-    }
   }
-  return packs;
+  for (const pack of directPacks.values()) {
+    const raw = options.attributions?.get(pack.name);
+    const attribution = normalizePackAttribution(
+      tierForTrusted(raw?.trusted),
+      raw?.publisher,
+    );
+    pack.tier = attribution.tier;
+    pack.publisher = attribution.publisher;
+  }
+  return { packs, directPackCount: directPacks.size };
 }
 
 // Merge one approved direct-publish entry. Re-validates the stored registry_entry BEFORE any

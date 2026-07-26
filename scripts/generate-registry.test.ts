@@ -232,6 +232,21 @@ describe("registry-controlled attribution and curation config", () => {
     );
   });
 
+  it("rejects the normalized unknown-publisher sentinel for a trusted source", async () => {
+    const src = await writeUpstream(
+      "unknown-publisher",
+      catalogToml(packBlock("alpha", [releaseBlock("1.0")])),
+      {
+        publisher: " Unknown publisher ",
+        trusted: true,
+      },
+    );
+
+    await expect(readRegistryConfig(src.sourcesPath)).rejects.toThrow(
+      /unknown-publisher\.publisher must identify the configured source/,
+    );
+  });
+
   it("rejects duplicate Featured keys independently of the pack allowlist", async () => {
     const src = await writeUpstream(
       "featured-dup",
