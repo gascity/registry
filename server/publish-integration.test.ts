@@ -156,6 +156,106 @@ describe("local registry publish integration", () => {
     }
   });
 
+  test("returns a non-2xx validation outcome while preserving the created failed request", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const submitter = await harness.signIn("validation-outcome");
+      const pack = await harness.createPack("validation-outcome", "0.1.0");
+      const requestedName = `${owner}/different-name`;
+
+      const response = await submitter.request("/api/publish-requests?validate=1", {
+        method: "POST",
+        csrfToken: submitter.csrfToken,
+        body: { ...pack, requestedName },
+      });
+      const body = (await response.json()) as {
+        error: { code: string; message: string };
+        publishRequest: PublishRequestRow;
+      };
+
+      expect(response.status).toBe(422);
+      expect(body.error.code).toBe("PACK_NAME_MISMATCH");
+      expect(body.publishRequest.status).toBe("validation_failed");
+      expect(body.publishRequest.requestedName).toBe(requestedName);
+      expect(body.publishRequest.validationError).toBe(body.error.message);
+
+      const account = await submitter.json<{ publishRequests: PublishRequestRow[] }>(
+        "/api/account/publish-requests",
+        { csrfToken: submitter.csrfToken },
+      );
+      expect(account.publishRequests).toContainEqual(
+        expect.objectContaining({
+          id: body.publishRequest.id,
+          status: "validation_failed",
+        }),
+      );
+
+      const retried = await submitter.request(
+        `/api/publish-requests/${encodeURIComponent(body.publishRequest.id)}/validate`,
+        {
+          method: "POST",
+          csrfToken: submitter.csrfToken,
+        },
+      );
+      const retriedBody = (await retried.json()) as {
+        error: { code: string };
+        publishRequest: PublishRequestRow;
+      };
+      expect(retried.status).toBe(422);
+      expect(retriedBody.error.code).toBe("PACK_NAME_MISMATCH");
+      expect(retriedBody.publishRequest.id).toBe(body.publishRequest.id);
+      expect(retriedBody.publishRequest.status).toBe("validation_failed");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test.each([
+    ["bad_hash", 502, "BAD_GC_HASH"],
+    ["unexpected", 500, "PUBLISH_VALIDATION_FAILED"],
+  ] as const)(
+    "preserves the durable request for %s validator failures on create and retry",
+    async (validationFailure, expectedStatus, expectedCode) => {
+      const harness = await createPublishHarness({ validationFailure });
+      try {
+        const fixtureSlug = `validation-${validationFailure.replaceAll("_", "-")}`;
+        const submitter = await harness.signIn(fixtureSlug);
+        const pack = await harness.createPack(fixtureSlug, "0.1.0");
+
+        const created = await submitter.request("/api/publish-requests?validate=1", {
+          method: "POST",
+          csrfToken: submitter.csrfToken,
+          body: pack,
+        });
+        const createdBody = (await created.json()) as {
+          error: { code: string };
+          publishRequest: PublishRequestRow;
+        };
+        expect(created.status).toBe(expectedStatus);
+        expect(createdBody.error.code).toBe(expectedCode);
+        expect(createdBody.publishRequest.status).toBe("validation_failed");
+
+        const retried = await submitter.request(
+          `/api/publish-requests/${encodeURIComponent(createdBody.publishRequest.id)}/validate`,
+          {
+            method: "POST",
+            csrfToken: submitter.csrfToken,
+          },
+        );
+        const retriedBody = (await retried.json()) as {
+          error: { code: string };
+          publishRequest: PublishRequestRow;
+        };
+        expect(retried.status).toBe(expectedStatus);
+        expect(retriedBody.error.code).toBe(expectedCode);
+        expect(retriedBody.publishRequest.id).toBe(createdBody.publishRequest.id);
+        expect(retriedBody.publishRequest.status).toBe("validation_failed");
+      } finally {
+        await harness.close();
+      }
+    },
+  );
+
   test("approves a claim-only publish when the submitter has verified repo ownership", async () => {
     const harness = await createPublishHarness();
     try {
@@ -2526,7 +2626,11 @@ function baseRegistryTomlPack(pack: ReturnType<typeof baseCatalogPack>) {
 }
 
 async function createPublishHarness(
-  options: { basePackSlugs?: string[]; autoApprove?: boolean } = {},
+  options: {
+    basePackSlugs?: string[];
+    autoApprove?: boolean;
+    validationFailure?: "bad_hash" | "unexpected";
+  } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "registry-publish-integration-"));
   const distRoot = join(dir, "dist");
@@ -2590,11 +2694,16 @@ async function createPublishHarness(
     config,
     store,
     distRoot: pathToFileURL(`${distRoot}/`),
-    validatePublishRequest: (request, currentConfig) =>
-      validatePublishRequestForRegistry(request, currentConfig, {
+    validatePublishRequest: async (request, currentConfig) => {
+      if (options.validationFailure === "unexpected") {
+        throw new Error("validator exploded");
+      }
+      return validatePublishRequestForRegistry(request, currentConfig, {
         fetchFn: localRawGitHubFetch(repoRoot),
-        computeHash: async (publishRequest) => packHash(publishRequest),
-      }),
+        computeHash: async (publishRequest) =>
+          options.validationFailure === "bad_hash" ? "not-a-pack-hash" : packHash(publishRequest),
+      });
+    },
     verifyGitHubActionsOidcToken: async () => {
       const [identityOwner = owner] = oidcSource.repository.split("/");
       const ids = repoIdentityFor(oidcSource.repository);

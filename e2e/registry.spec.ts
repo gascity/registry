@@ -103,9 +103,18 @@ test("footer links expose source, verifier, and publishing pages", async ({ page
 
   await page.getByRole("contentinfo").getByRole("link", { name: "Publish a pack" }).click();
   await expect(page).toHaveURL(/\/publish$/);
-  await expect(page.getByRole("heading", { name: "Publish A Pack" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Publish a Pack" })).toBeVisible();
   await expect(page.locator(".docsCode code").filter({ hasText: "gc pack registry publish ." })).toBeVisible();
-  await expect(page.getByText("gc pack release validate registry.toml --pack my-pack")).toBeVisible();
+  const workflow = page.locator(".docsCode code").filter({ hasText: "name: Publish pack" });
+  await expect(workflow).toContainText("on:");
+  await expect(workflow).toContainText("jobs:");
+  await expect(workflow).toContainText("runs-on: ubuntu-latest");
+  await expect(workflow).toContainText("actions/checkout@v4");
+  await expect(workflow).toContainText("brew install");
+  await expect(workflow).toContainText("GITHUB_PATH");
+  await expect(workflow).toContainText("id-token: write");
+  await expect(page.getByText("PACK_NAME_MISMATCH", { exact: true })).toBeVisible();
+  await expect(page.getByText("GITHUB_ACTIONS_WORKFLOW_DENIED", { exact: true })).toBeVisible();
   await expect(page.getByText("make registry-publish")).toHaveCount(0);
   await expectHealthyPage(page, errors);
 });
@@ -201,6 +210,9 @@ test("dev auth can submit and inspect a publish request", async ({ page }, testI
   await expect(page.getByRole("heading", { name: "Publish requests" })).toBeVisible();
   await expect(page.getByText(`${requestedName} 0.1.0`)).toBeVisible();
   await expect(page.getByText("Pending validation")).toBeVisible();
+  await expect(page.getByText("Manual web form")).toBeVisible();
+  await expect(page.getByText("Claim only", { exact: true })).toBeVisible();
+  await expect(page.getByText(/What happens next:/)).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 
@@ -210,7 +222,7 @@ test("dev auth publish page exposes GitHub import and manual fallback", async ({
 
   await page.setViewportSize({ width: 390, height: 1000 });
   await page.goto(`/api/dev/sign-in?handle=${handle}&redirect=/publish`);
-  await expect(page.getByRole("heading", { name: "Publish From GitHub" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Install the GitHub App, then Find packs" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Find Packs From GitHub" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Find packs" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Install app/ })).toHaveAttribute("href", /github\.com\/apps/);
@@ -223,11 +235,72 @@ test("dev auth publish page exposes GitHub import and manual fallback", async ({
   await expectHealthyPage(page, errors);
 });
 
+test("publish page retains a durable request from a non-2xx validation response", async ({ page }, testInfo) => {
+  // This deliberately fulfills the create request with HTTP 422, which browsers may report as a
+  // failed resource even though the UI handles the structured response.
+  const stamp = `${Date.now()}-${testInfo.workerIndex}`;
+  const name = `e2e-fixture/failed-${stamp}`;
+  const commit = "d".repeat(40);
+  await page.goto(`/api/dev/sign-in?handle=failed-${stamp}&redirect=/publish`);
+  await page.route("**/api/publish-requests?validate=1", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await route.fulfill({
+      status: 422,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: {
+          code: "PACK_NAME_MISMATCH",
+          message: "pack.toml declares a different name.",
+        },
+        publishRequest: {
+          id: `failed-${stamp}`,
+          status: "validation_failed",
+          repository: {
+            host: "github.com",
+            owner: "e2e-fixture",
+            name: "failed-pack",
+            fullName: "e2e-fixture/failed-pack",
+          },
+          repoUrl: "https://github.com/e2e-fixture/failed-pack",
+          sourceUrl: `https://github.com/e2e-fixture/failed-pack/tree/${commit}`,
+          packPath: ".",
+          commit,
+          requestedName: name,
+          requestedVersion: "0.1.0",
+          validationError: "pack.toml declares a different name.",
+          createdAt: "2026-07-26T00:00:00.000Z",
+          updatedAt: "2026-07-26T00:00:00.000Z",
+          submittedBy: {
+            id: `failed-${stamp}`,
+            handle: `failed-${stamp}`,
+            displayName: `failed-${stamp}`,
+            role: "user",
+          },
+          submissionMethod: "web_session",
+        },
+      }),
+    });
+  });
+
+  await page.getByText("Manual publish request").click();
+  await page.getByLabel("GitHub repository").fill("https://github.com/e2e-fixture/failed-pack");
+  await page.getByLabel("Commit SHA").fill(commit);
+  await page.getByLabel("Pack name").fill(name);
+  await page.getByLabel("Version").fill("0.1.0");
+  await page.getByRole("button", { name: "Submit publish request" }).click();
+
+  await expect(page.getByText("Validation failed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Manual web form")).toBeVisible();
+  await expect(page.getByText("Claim only", { exact: true })).toBeVisible();
+  await expect(page.getByText("Validation: pack.toml declares a different name.")).toBeVisible();
+  await expect(page.getByText("Unable to submit publish request.")).toHaveCount(0);
+});
+
 test("publish sign-in keeps the author on the publish page", async ({ page }) => {
   const errors = trackRuntimeErrors(page);
 
   await page.goto("/publish");
-  await expect(page.getByRole("heading", { name: "Publish From GitHub" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Install the GitHub App, then Find packs" })).toBeVisible();
   await page.getByRole("main").getByRole("button", { name: "Dev sign in" }).click();
   await expect(page).toHaveURL(/\/publish$/);
   await expect(page.getByRole("heading", { name: "Find Packs From GitHub" })).toBeVisible();

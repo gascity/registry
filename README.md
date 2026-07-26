@@ -167,16 +167,40 @@ store, while every other bearer is checked only as an STS assertion.
 
 Headless environments can use `gc pack registry login --device`, or pass an existing
 token with `GC_REGISTRY_TOKEN`. GitHub Actions can publish without a stored
-secret by granting OIDC:
+secret by granting OIDC. This complete tag workflow strips the tag's leading
+`v` before submitting the canonical `major.minor.patch` version:
 
 ```yaml
+name: Publish pack
+
+on:
+  push:
+    tags:
+      - "v*"
+
 permissions:
   contents: read
   id-token: write
 
-steps:
-  - uses: actions/checkout@v4
-  - run: gc pack registry publish path/to/pack
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+      - name: Install gc
+        shell: bash
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install gastownhall/gascity/gascity
+          echo "$HOMEBREW_PREFIX/bin" >> "$GITHUB_PATH"
+      - name: Publish
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gc pack registry publish path/to/pack \
+            --version "$VERSION" \
+            --ref "$GITHUB_REF"
 ```
 
 The CLI exchanges GitHub's OIDC token for a 10-minute registry publish token
@@ -186,6 +210,8 @@ metadata, and usage timestamps. Revoked or expired tokens can no longer
 authenticate publish requests. Browser sessions remain cookie + CSRF
 authenticated; bearer credentials are accepted only by routes that explicitly opt in,
 currently `/api/me` introspection and direct publish request creation.
+Production currently queues releases for staff review; repository proof is not
+a promise of automatic approval.
 
 The app defaults to the generated aggregate JSON:
 

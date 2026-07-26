@@ -149,6 +149,8 @@ export type PublishRequestRow = {
   updatedAt: string;
   submittedBy: PublicUser;
   submissionMethod?: PublishSubmissionMethod;
+  sourceGithubRepositoryId?: string;
+  sourceGithubOwnerId?: string;
 };
 
 export type GitHubPublishCandidate = {
@@ -245,6 +247,7 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly publishRequest?: PublishRequestRow,
   ) {
     super(message);
     this.name = "ApiError";
@@ -269,7 +272,15 @@ export async function apiRequest<T>(
     // "UNKNOWN" when the body was not our { error: { code, message } } envelope (a proxy error
     // page, say) — a code-based branch must never fire on a response the server did not shape.
     const code = typeof data?.error?.code === "string" ? data.error.code : "UNKNOWN";
-    throw new ApiError(response.status, code, message);
+    const publishRequest =
+      data &&
+      typeof data === "object" &&
+      "publishRequest" in data &&
+      data.publishRequest &&
+      typeof data.publishRequest === "object"
+        ? (data.publishRequest as PublishRequestRow)
+        : undefined;
+    throw new ApiError(response.status, code, message, publishRequest);
   }
   return data as T;
 }

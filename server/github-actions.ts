@@ -15,6 +15,7 @@ export type GitHubActionsIdentity = {
   repositoryOwner?: string;
   repositoryOwnerId?: string;
   workflowRef?: string;
+  jobWorkflowRef?: string;
   runId?: string;
   runAttempt?: string;
   sha: string;
@@ -73,6 +74,7 @@ export async function verifyGitHubActionsOidcToken(token: string): Promise<GitHu
     repositoryOwner: optionalStringClaim(payload, "repository_owner"),
     repositoryOwnerId: optionalStringClaim(payload, "repository_owner_id"),
     workflowRef: optionalStringClaim(payload, "workflow_ref"),
+    jobWorkflowRef: optionalStringClaim(payload, "job_workflow_ref"),
     runId: optionalStringClaim(payload, "run_id"),
     runAttempt: optionalStringClaim(payload, "run_attempt"),
     sha,
@@ -102,11 +104,15 @@ export function assertGitHubActionsCanMintPublishToken(
       "GitHub Actions token commit does not match the publish request commit.",
     );
   }
-  if (identity.workflowRef && !identity.workflowRef.startsWith(`${identity.repository}/.github/workflows/`)) {
+  const localWorkflowPrefix = `${identity.repository}/.github/workflows/`;
+  if (
+    (identity.workflowRef && !identity.workflowRef.startsWith(localWorkflowPrefix)) ||
+    (identity.jobWorkflowRef && !identity.jobWorkflowRef.startsWith(localWorkflowPrefix))
+  ) {
     throw new RequestError(
       403,
       "GITHUB_ACTIONS_WORKFLOW_DENIED",
-      "GitHub Actions workflow must run from the publishing repository.",
+      "GitHub Actions caller and reusable workflows must run from the publishing repository.",
     );
   }
   return normalized;

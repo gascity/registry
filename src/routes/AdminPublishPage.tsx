@@ -19,6 +19,7 @@ import {
 } from "@gascity/ui";
 import { ApiError, apiRequest, type AuthState, type PublishRequestRow } from "../lib/api";
 import { nameClaimReleaseBlocker } from "../lib/packName";
+import { PublishRequestGuidance } from "../components/PublishRequestGuidance";
 
 export function AdminPublishPage({
   auth,
@@ -222,6 +223,7 @@ export function AdminPublishPage({
                   <GitCommitHorizontal size={13} /> {request.commit.slice(0, 12)}
                 </span>
                 <span>Submitted by {request.submittedBy.displayName || request.submittedBy.handle}</span>
+                <PublishRequestGuidance request={request} audience="staff" />
                 {request.registryEntry ? (
                   <div className="requestPreview">
                     <span>
@@ -229,6 +231,9 @@ export function AdminPublishPage({
                     </span>
                     <p>{request.registryEntry.description}</p>
                   </div>
+                ) : null}
+                {request.validationError ? (
+                  <p className="formError">Validation: {request.validationError}</p>
                 ) : null}
                 {request.statusReason ? <p>{request.statusReason}</p> : null}
                 <div className="requestActions">

@@ -594,7 +594,7 @@
       "post": {
         "operationId": "createPublishRequest",
         "summary": "Submit a publish request",
-        "description": "Registry-native gcr_ bearer, Gasworks STS EIA, or session+CSRF. ?validate=1 for dry-run.",
+        "description": "Registry-native gcr_ bearer, Gasworks STS EIA, or session+CSRF. With ?validate=1, validation runs synchronously after the request is durably created.",
         "x-gc-enforcement": "authenticate-only",
         "x-gc-plane": "both",
         "security": [
@@ -604,6 +604,21 @@
           },
           {
             "gcrToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "validate",
+            "in": "query",
+            "required": false,
+            "description": "Set to 1 or true to validate the durable request before responding.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -618,11 +633,18 @@
         },
         "responses": {
           "201": {
-            "description": "Created",
+            "description": "Created. A synchronous validation success is wrapped as { publishRequest }; creation without validation returns the request directly.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublishRequest"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/PublishRequest"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PublishRequestResponse"
+                    }
+                  ]
                 }
               }
             }
@@ -658,11 +680,38 @@
             }
           },
           "422": {
-            "description": "Validation error.",
+            "description": "Invalid create input, or synchronous validation failed after creation. The latter includes both the machine-readable error and the durable validation_failed request.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApiError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ApiError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PublishValidationErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Synchronous validation failed unexpectedly after the request was durably created. The response includes the validation_failed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishValidationErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The validator produced an unusable pack hash after the request was durably created (`BAD_GC_HASH`). The response includes the validation_failed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishValidationErrorResponse"
                 }
               }
             }
@@ -689,9 +738,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/PublishRequest"
+                  "type": "object",
+                  "required": [
+                    "publishRequests"
+                  ],
+                  "properties": {
+                    "publishRequests": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PublishRequest"
+                      }
+                    }
                   }
                 }
               }
@@ -703,6 +760,113 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/publish-requests/{id}/validate": {
+      "post": {
+        "operationId": "validatePublishRequest",
+        "summary": "Revalidate a publish request",
+        "description": "Session + CSRF. The submitter or registry staff may rerun validation on a non-terminal request.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [
+          {
+            "cookieSession": [],
+            "csrfToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validation passed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishRequestResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The request belongs to another publisher.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Publish request not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is approved, rejected, or withdrawn and cannot re-enter validation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed. The response includes both the machine-readable error and the durable validation_failed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishValidationErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Validation failed unexpectedly. The response includes the durable validation_failed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishValidationErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The validator produced an unusable pack hash (`BAD_GC_HASH`). The response includes the durable validation_failed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishValidationErrorResponse"
                 }
               }
             }
@@ -1390,6 +1554,29 @@
           "registryEntry": {
             "$ref": "#/components/schemas/PublishRegistryEntry"
           },
+          "validationError": {
+            "type": "string"
+          },
+          "statusReason": {
+            "type": "string"
+          },
+          "submissionMethod": {
+            "type": "string",
+            "enum": [
+              "web_session",
+              "api_token",
+              "github_actions_oidc",
+              "github_import"
+            ]
+          },
+          "sourceGithubRepositoryId": {
+            "type": "string",
+            "description": "Rename-stable GitHub repository ID recorded by a repo-proven submission."
+          },
+          "sourceGithubOwnerId": {
+            "type": "string",
+            "description": "Rename-stable GitHub owner ID recorded by a repo-proven submission."
+          },
           "createdAt": {
             "type": "string"
           },
@@ -1398,6 +1585,35 @@
           }
         },
         "additionalProperties": true
+      },
+      "PublishRequestResponse": {
+        "type": "object",
+        "required": [
+          "publishRequest"
+        ],
+        "properties": {
+          "publishRequest": {
+            "$ref": "#/components/schemas/PublishRequest"
+          }
+        }
+      },
+      "PublishValidationErrorResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ApiError"
+          },
+          {
+            "type": "object",
+            "required": [
+              "publishRequest"
+            ],
+            "properties": {
+              "publishRequest": {
+                "$ref": "#/components/schemas/PublishRequest"
+              }
+            }
+          }
+        ]
       },
       "PublishRequestInput": {
         "type": "object",

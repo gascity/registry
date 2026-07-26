@@ -15,8 +15,9 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useEffect, useState } from "react";
-import { AppPage, Button, Card, CardHeader, Eyebrow, Input, Text } from "@gascity/ui";
+import { AppPage, Button, Card, Eyebrow, Input, Text } from "@gascity/ui";
 import {
+  ApiError,
   apiRequest,
   type AuthState,
   type GitHubPublishCandidate,
@@ -24,6 +25,7 @@ import {
   type PublishRequestRow,
 } from "../lib/api";
 import { GITHUB_APP_INSTALL_URL, REGISTRY_SOURCE_URL } from "../lib/links";
+import { PublishRequestGuidance } from "../components/PublishRequestGuidance";
 
 const installGcCommand = `brew install gastownhall/gascity/gascity
 gc version`;
@@ -35,34 +37,94 @@ git push
 gc pack registry login
 gc pack registry publish .`;
 
-const githubActionsCommand = `permissions:
+const githubActionsCommand = `name: Publish pack
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
   contents: read
   id-token: write
 
-steps:
-  - uses: actions/checkout@v4
-  - run: gc pack registry publish path/to/your-pack`;
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+      - name: Install gc
+        shell: bash
+        run: |
+          eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          brew install gastownhall/gascity/gascity
+          echo "$HOMEBREW_PREFIX/bin" >> "$GITHUB_PATH"
+      - name: Publish
+        shell: bash
+        run: |
+          VERSION="\${GITHUB_REF_NAME#v}"
+          gc pack registry publish path/to/your-pack \\
+            --version "$VERSION" \\
+            --ref "$GITHUB_REF"`;
 
-const validateRegistryCommand = `gc pack release validate registry.toml --pack my-pack`;
-
-const registryTomlExample = `schema = 1
-
-[[pack]]
-name = "my-pack"
-description = "Short description shown in search results."
-source = "https://github.com/example/gascity-packs/tree/main/my-pack"
-source_kind = "git"
-
-[[pack.release]]
-version = "0.1.0"
-ref = "main"
-commit = "0123456789abcdef0123456789abcdef01234567"
-hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-description = "Initial release."`;
-
-const sourcesTomlExample = `[[source]]
-name = "example-packs"
-url = "https://raw.githubusercontent.com/example/gascity-packs/main/registry.toml"`;
+const publishErrors = [
+  {
+    code: "PACK_NAME_MISMATCH",
+    meaning: "The name requested from the registry differs from [pack].name in pack.toml.",
+    action: "Make the two names identical, commit and push, then submit the new commit.",
+  },
+  {
+    code: "UPSTREAM_FETCH_FAILED",
+    meaning: "The registry could not fetch pack.toml at the submitted GitHub commit and pack path.",
+    action: "Check that the repo is public and that the full commit and pack path exist.",
+  },
+  {
+    code: "PACK_HASH_FAILED",
+    meaning: "gc could not clone or hash the submitted repository contents.",
+    action: "Check the repo, commit and path; retry only if the upstream failure was transient.",
+  },
+  {
+    code: "OWNERSHIP_NOT_VERIFIED",
+    meaning: "A claim-only request reached approval without source-repository proof.",
+    action: "Resubmit through GitHub import or Actions, use an existing verified ownership record, or ask staff for an audited override.",
+  },
+  {
+    code: "PUBLISH_TOKEN_SCOPE_DENIED",
+    meaning: "The short-lived token is for a different repo, commit, pack, name or version.",
+    action: "Mint a fresh token by rerunning gc in the matching workflow; never reuse one for another release.",
+  },
+  {
+    code: "GITHUB_ACTIONS_OIDC_INVALID",
+    meaning: "GitHub did not issue a usable OIDC token for the registry audience.",
+    action: "Grant id-token: write and let gc mint credentials; do not inject a personal registry token.",
+  },
+  {
+    code: "GITHUB_ACTIONS_RUNNER_DENIED",
+    meaning: "The workflow is running somewhere other than a GitHub-hosted runner.",
+    action: "Use runs-on: ubuntu-latest for the publish job.",
+  },
+  {
+    code: "GITHUB_ACTIONS_EVENT_DENIED",
+    meaning: "Pull-request workflows cannot mint publish tokens.",
+    action: "Publish from a push or tag workflow after the change is merged.",
+  },
+  {
+    code: "GITHUB_ACTIONS_REPOSITORY_MISMATCH",
+    meaning: "The requested source repository differs from the repository in GitHub's token.",
+    action: "Run the workflow in the repository named by the publish request.",
+  },
+  {
+    code: "GITHUB_ACTIONS_COMMIT_MISMATCH",
+    meaning: "The requested commit differs from the SHA in GitHub's token.",
+    action: "Check out and publish the current workflow commit.",
+  },
+  {
+    code: "GITHUB_ACTIONS_WORKFLOW_DENIED",
+    meaning: "The workflow file is not owned by the publishing repository.",
+    action: "Keep the publish job in that repo's .github/workflows directory; org-level reusable workflows are not accepted.",
+  },
+] as const;
 
 type CandidateDraft = {
   requestedName: string;
@@ -158,7 +220,11 @@ export function PublishPage({
       );
       setPublishRequest("publishRequest" in result ? result.publishRequest : result);
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Unable to submit publish request.");
+      if (err instanceof ApiError && err.publishRequest) {
+        setPublishRequest(err.publishRequest);
+      } else {
+        setSubmitError(err instanceof Error ? err.message : "Unable to submit publish request.");
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -214,7 +280,11 @@ export function PublishPage({
       );
       setPublishRequest(result.publishRequest);
     } catch (err) {
-      setGitHubError(err instanceof Error ? err.message : "Unable to submit GitHub candidate.");
+      if (err instanceof ApiError && err.publishRequest) {
+        setPublishRequest(err.publishRequest);
+      } else {
+        setGitHubError(err instanceof Error ? err.message : "Unable to submit GitHub candidate.");
+      }
     } finally {
       setActiveCandidateId(null);
     }
@@ -238,8 +308,8 @@ export function PublishPage({
     <AppPage
       className="docsPage"
       eyebrow="Registry · Publish"
-      title="Publish A Pack"
-      subtitle="Direct publishing uses clean Git checkouts. The CLI sends an immutable GitHub repo, commit, and pack path to Gas City Registry; the registry then derives the catalog entry and synthetic aggregate from upstream contents."
+      title="Publish a Pack"
+      subtitle="Start by installing the Registry GitHub App, then use Find packs. It proves the source repository without a personal token and gives reviewers the strongest ownership evidence."
       actions={
         <>
           <Button
@@ -260,9 +330,21 @@ export function PublishPage({
     >
       <section className="docsSection">
         <div className="sectionTitle">
-          <Eyebrow>Submit</Eyebrow>
-          <h2>Publish From GitHub</h2>
+          <Eyebrow>Recommended path</Eyebrow>
+          <h2>Install the GitHub App, then Find packs</h2>
         </div>
+        <Card variant="surface" className="docsCallout">
+          <GitBranch size={22} aria-hidden="true" />
+          <p>
+            <a href={GITHUB_APP_INSTALL_URL} rel="noreferrer">
+              Install the Registry GitHub App
+            </a>{" "}
+            on the public repository that owns your pack. Return here, sign in, and choose{" "}
+            <strong>Find packs</strong>. Registry scans that repository’s default-branch{" "}
+            <code>HEAD</code>, reads <code>pack.toml</code>, and records GitHub’s repository proof
+            with the request.
+          </p>
+        </Card>
         {!auth.user ? (
           <Card variant="surface" className="signInPromptInline">
             <UserRound size={20} />
@@ -284,14 +366,18 @@ export function PublishPage({
             <Card variant="surface" className="githubImportPanel">
               <div className="githubImportIntro">
                 <div>
-                  <Eyebrow>Fast path</Eyebrow>
+                  <Eyebrow>GitHub App</Eyebrow>
                   <h3>Find Packs From GitHub</h3>
                   <Text tone="muted">
-                    Scan public repositories where the Registry GitHub App is installed and your
-                    GitHub account can publish changes.
+                    Scan public repositories where the App is installed and your GitHub account has
+                    push, maintain, or admin permission. The scan uses default-branch HEAD only.
                   </Text>
                 </div>
                 <div className="githubImportActions">
+                  <a className="smallMutedButton" href={GITHUB_APP_INSTALL_URL} rel="noreferrer">
+                    Install app
+                    <ExternalLink size={14} aria-hidden="true" />
+                  </a>
                   <Button
                     accent
                     type="button"
@@ -301,10 +387,6 @@ export function PublishPage({
                   >
                     {isStartingGitHubImport ? "Opening GitHub" : "Find packs"}
                   </Button>
-                  <a className="smallMutedButton" href={GITHUB_APP_INSTALL_URL} rel="noreferrer">
-                    Install app
-                    <ExternalLink size={14} aria-hidden="true" />
-                  </a>
                 </div>
               </div>
 
@@ -499,6 +581,10 @@ export function PublishPage({
                   {publishRequest.requestedName} {publishRequest.requestedVersion} from{" "}
                   {publishRequest.repository.fullName}
                 </p>
+                <PublishRequestGuidance request={publishRequest} />
+                {publishRequest.validationError ? (
+                  <p className="formError">Validation: {publishRequest.validationError}</p>
+                ) : null}
                 {publishRequest.statusReason ? <p>{publishRequest.statusReason}</p> : null}
               </div>
             ) : null}
@@ -509,98 +595,88 @@ export function PublishPage({
 
       <section className="docsSection">
         <div className="sectionTitle">
-          <Eyebrow>Model</Eyebrow>
-          <h2>Author-Owned Source, Aggregated By Registry</h2>
+          <Eyebrow>Proof model</Eyebrow>
+          <h2>Know what your submission proves</h2>
         </div>
         <Card variant="surface" className="docsCallout">
           <PackagePlus size={22} aria-hidden="true" />
           <p>
-            The source repository stays canonical. The registry stores publish requests keyed to a
-            full commit SHA, then server-side validation can fetch the upstream pack and regenerate
-            `/registry.toml`, `/catalog.json`, and Open Graph preview assets from approved releases.
+            <strong>GitHub App import and GitHub Actions OIDC are repository-proven:</strong> GitHub
+            authenticated the source repository at submission time.{" "}
+            <strong>The manual form and personal or CLI tokens are claim-only:</strong> they assert a
+            public repo URL but do not prove control of it. A claim-only request needs an existing
+            verified ownership record or an audited staff override before approval.
           </p>
         </Card>
+        <Text className="mutedText" tone="muted">
+          Production currently keeps staff review in the loop. Repository proof clears the ownership
+          gate; it does not promise that this or any repeat release will be approved automatically.
+          Follow the status shown on the request.
+        </Text>
       </section>
 
       <section className="docsSection">
         <div className="sectionTitle">
-          <Eyebrow>Steps</Eyebrow>
-          <h2>Submit A New Pack</h2>
+          <Eyebrow>Request lifecycle</Eyebrow>
+          <h2>From source commit to catalog</h2>
         </div>
         <ol className="stepList">
           <li>
-            <strong>Put the pack in a GitHub repository.</strong>
-            <span>Commit and push the pack content before publishing.</span>
-          </li>
-          <li>
-            <strong>Log in with the CLI.</strong>
+            <strong>Prepare the public source.</strong>
             <span>
-              <code>gc pack registry login</code> uses the registry sign-in provider and stores a local
-              revocable token.
+              Commit and push <code>pack.toml</code> with a scoped name such as{" "}
+              <code>owner/my-pack</code>. The scope must match the GitHub owner.
             </span>
           </li>
           <li>
-            <strong>Run the publish command from the pack root.</strong>
+            <strong>Attach repository proof.</strong>
             <span>
-              The CLI reads the stored login token, verifies the checkout is clean, confirms{" "}
-              <code>HEAD</code> is pushed, and submits the repo, commit, pack path, name, and
-              version to the registry.
+              Use the GitHub App for default-branch <code>HEAD</code>, or the OIDC workflow below for
+              a tagged commit. Use the manual or token path only when staff can verify ownership
+              separately.
             </span>
           </li>
           <li>
-            <strong>Let the registry derive release metadata.</strong>
-            <span>The server validates the exact commit and manufactures the registry entry.</span>
+            <strong>Read the validation outcome.</strong>
+            <span>
+              The registry fetches <code>pack.toml</code> at the exact commit and computes the release
+              hash. A failure creates a visible <code>validation_failed</code> request and returns a
+              non-2xx response with a machine-readable error code.
+            </span>
           </li>
           <li>
-            <strong>Review the request status.</strong>
-            <span>Your account page shows whether the release is validating, queued, approved, or rejected.</span>
+            <strong>Wait for registry staff review.</strong>
+            <span>
+              Repository-proven requests already satisfy the ownership gate. A new claim-only pack
+              cannot fix ownership after merge; resubmit through a repo-proven path or coordinate an
+              audited override before approval.
+            </span>
           </li>
           <li>
-            <strong>Let CI regenerate the aggregate.</strong>
-            <span>Approved releases are folded into the synthetic aggregate consumed by the CLI.</span>
-          </li>
-          <li>
-            <strong>Verify ownership after merge.</strong>
-            <span>Use the pack Trust tab to connect the published source to your Gas City account.</span>
+            <strong>Confirm the approved status.</strong>
+            <span>
+              Only an <code>approved</code> request is served in the website catalog and CLI
+              aggregate. HTTP creation success alone is never an approval signal.
+            </span>
           </li>
         </ol>
       </section>
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <Eyebrow>Install gc</Eyebrow>
-          <h2>Use The Canonical Tool</h2>
+          <Eyebrow>Tagged releases</Eyebrow>
+          <h2>Publish with GitHub Actions OIDC</h2>
           <p className="mutedText">
-            `gc` owns the release hash format. Install it first, then use the `pack release`
-            commands below instead of hand-editing release metadata.
+            Save this as <code>.github/workflows/publish-pack.yml</code>, replace the pack path, then
+            push a tag such as <code>v1.2.3</code>. No registry secret is stored: <code>gc</code>{" "}
+            exchanges GitHub’s OIDC identity for a short-lived token scoped to this exact release.
           </p>
-        </div>
-        <pre className="docsCode">
-          <code>{installGcCommand}</code>
-        </pre>
-      </section>
-
-      <section className="docsSection twoColumnDocs">
-        <div>
-          <Eyebrow>Direct publish target</Eyebrow>
-          <h2>Submit The Request</h2>
-          <p className="mutedText">
-            Run this from the pack root after signing in and pushing the commit to GitHub.
-          </p>
-        </div>
-        <pre className="docsCode">
-          <code>{directPublishCommand}</code>
-        </pre>
-      </section>
-
-      <section className="docsSection twoColumnDocs">
-        <div>
-          <Eyebrow>Automated releases</Eyebrow>
-          <h2>Use GitHub Actions OIDC</h2>
-          <p className="mutedText">
-            CI can publish without a stored secret. The workflow grants `id-token: write`; the CLI
-            exchanges GitHub's repository identity for a short-lived registry publish token.
-          </p>
+          <ul className="checkList">
+            <li>Keep the publish job in the publishing repository.</li>
+            <li>Use a GitHub-hosted runner; self-hosted runners are refused.</li>
+            <li>Run after merge from a tag or push, never from a pull request event.</li>
+            <li>Do not move this job into an organization-level reusable workflow.</li>
+          </ul>
         </div>
         <pre className="docsCode">
           <code>{githubActionsCommand}</code>
@@ -609,50 +685,107 @@ export function PublishPage({
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <Eyebrow>Validation</Eyebrow>
-          <h2>Check The Registry File</h2>
-          <p className="mutedText">
-            Manual registry files remain useful as a fallback and for debugging aggregate output.
-            Validation re-fetches the recorded source and verifies active release hashes.
-          </p>
+          <Eyebrow>Tags and versions</Eyebrow>
+          <h2>The version is not the tag</h2>
         </div>
-        <pre className="docsCode">
-          <code>{validateRegistryCommand}</code>
-        </pre>
-      </section>
-
-      <section className="docsSection twoColumnDocs">
-        <div>
-          <Eyebrow>Canonical registry.toml</Eyebrow>
-          <h2>File Shape</h2>
-          <p className="mutedText">
-            The aggregator currently accepts `source_kind = "git"`, version strings shaped as
-            `major.minor[.patch]`, full lowercase commit SHAs, and `sha256:` release hashes.
-          </p>
-        </div>
-        <pre className="docsCode">
-          <code>{registryTomlExample}</code>
-        </pre>
+        <ul className="checkList">
+          <li>
+            A tag may be <code>v1.2.3</code>; the workflow strips the leading <code>v</code> and
+            submits version <code>1.2.3</code>. The recorded ref remains{" "}
+            <code>refs/tags/v1.2.3</code>.
+          </li>
+          <li>
+            Registry currently accepts canonical stable versions only: exactly{" "}
+            <code>major.minor.patch</code> with no leading zeros.
+          </li>
+          <li>
+            Prerelease or build suffixes such as <code>1.2.3-rc.1</code> and{" "}
+            <code>1.2.3+build.4</code>, shortened versions such as <code>1.2</code>, and versions
+            containing a leading <code>v</code> are rejected.
+          </li>
+          <li>
+            <strong>Find packs</strong> can publish only the current default-branch{" "}
+            <code>HEAD</code>. Editing its ref label does not select another commit; use Actions or
+            the CLI for a tagged or older commit.
+          </li>
+        </ul>
       </section>
 
       <section className="docsSection twoColumnDocs">
         <div>
           <Eyebrow>Manual fallback</Eyebrow>
-          <h2>sources.toml Entry</h2>
+          <h2>Install gc and submit from a clean checkout</h2>
           <p className="mutedText">
-            During the transition, authors can still submit a source pointer. The preferred path is
-            direct publishing from a pushed GitHub commit.
+            The CLI verifies that <code>HEAD</code> is pushed and sends the immutable repo, commit,
+            pack path, name and version. A personal login token makes this a claim-only request, so
+            prefer GitHub import or Actions for a new pack.
           </p>
+          <pre className="docsCode">
+            <code>{installGcCommand}</code>
+          </pre>
         </div>
         <pre className="docsCode">
-          <code>{sourcesTomlExample}</code>
+          <code>{directPublishCommand}</code>
         </pre>
+      </section>
+
+      <section className="docsSection">
+        <div className="sectionTitle">
+          <Eyebrow>Rename safety</Eyebrow>
+          <h2>Teach the claim stable GitHub IDs before a rename</h2>
+        </div>
+        <Card variant="surface" className="docsCallout">
+          <ShieldCheck size={22} aria-hidden="true" />
+          <p>
+            Before an owner or repository rename such as <code>cacc-twin-team</code>, get one
+            repository-proven release approved through GitHub App import or Actions OIDC. That
+            release permanently enriches the pack-name claim with GitHub’s stable repository and
+            owner IDs, so later releases still match after the visible login or repo name changes.
+            Manual-form and personal-token releases cannot teach those IDs.
+          </p>
+        </Card>
+      </section>
+
+      <section className="docsSection">
+        <div className="sectionTitle">
+          <Eyebrow>Troubleshooting</Eyebrow>
+          <h2>Publisher error codes</h2>
+        </div>
+        <Text className="mutedText" tone="muted">
+          Synchronous validation failures return a non-2xx HTTP status and an{" "}
+          <code>error.code</code>. The response also contains the durable{" "}
+          <code>publishRequest</code> in <code>validation_failed</code> state, so you can find it on
+          the Account page. Scripts should require a 2xx response and then inspect the request status;
+          only <code>approved</code> means the release is live.
+        </Text>
+        <div className="docsTableScroll">
+          <table className="docsTable">
+            <thead>
+              <tr>
+                <th scope="col">Code</th>
+                <th scope="col">What it means</th>
+                <th scope="col">What to do</th>
+              </tr>
+            </thead>
+            <tbody>
+              {publishErrors.map((error) => (
+                <tr key={error.code}>
+                  <th scope="row">
+                    <code>{error.code}</code>
+                  </th>
+                  <td data-label="What it means">{error.meaning}</td>
+                  <td data-label="What to do">{error.action}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section className="docsSection twoColumnDocs">
         <div>
-          <Eyebrow>After merge</Eyebrow>
-          <h2>Where It Appears</h2>
+          <Eyebrow>After approval</Eyebrow>
+          <h2>Where it appears</h2>
         </div>
         <ul className="checkList">
           <li>
@@ -669,7 +802,7 @@ export function PublishPage({
           </li>
           <li>
             <ShieldCheck size={16} aria-hidden="true" />
-            Trust tab ownership verification once the source is visible.
+            Account and staff request history with submission method, proof basis, and next step.
           </li>
         </ul>
       </section>

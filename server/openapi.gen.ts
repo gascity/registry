@@ -299,7 +299,7 @@ export interface paths {
         put?: never;
         /**
          * Submit a publish request
-         * @description Registry-native gcr_ bearer, Gasworks STS EIA, or session+CSRF. ?validate=1 for dry-run.
+         * @description Registry-native gcr_ bearer, Gasworks STS EIA, or session+CSRF. With ?validate=1, validation runs synchronously after the request is durably created.
          */
         post: operations["createPublishRequest"];
         delete?: never;
@@ -322,6 +322,26 @@ export interface paths {
         get: operations["listMyPublishRequests"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/publish-requests/{id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revalidate a publish request
+         * @description Session + CSRF. The submitter or registry staff may rerun validation on a non-terminal request.
+         */
+        post: operations["validatePublishRequest"];
         delete?: never;
         options?: never;
         head?: never;
@@ -505,10 +525,24 @@ export interface components {
             requestedVersion: string;
             requestedDescription?: string;
             registryEntry?: components["schemas"]["PublishRegistryEntry"];
+            validationError?: string;
+            statusReason?: string;
+            /** @enum {string} */
+            submissionMethod?: "web_session" | "api_token" | "github_actions_oidc" | "github_import";
+            /** @description Rename-stable GitHub repository ID recorded by a repo-proven submission. */
+            sourceGithubRepositoryId?: string;
+            /** @description Rename-stable GitHub owner ID recorded by a repo-proven submission. */
+            sourceGithubOwnerId?: string;
             createdAt: string;
             updatedAt: string;
         } & {
             [key: string]: unknown;
+        };
+        PublishRequestResponse: {
+            publishRequest: components["schemas"]["PublishRequest"];
+        };
+        PublishValidationErrorResponse: components["schemas"]["ApiError"] & {
+            publishRequest: components["schemas"]["PublishRequest"];
         };
         PublishRequestInput: {
             repoUrl: string;
@@ -1055,7 +1089,10 @@ export interface operations {
     };
     createPublishRequest: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Set to 1 or true to validate the durable request before responding. */
+                validate?: "1" | "true";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1066,13 +1103,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Created */
+            /** @description Created. A synchronous validation success is wrapped as { publishRequest }; creation without validation returns the request directly. */
             201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PublishRequest"];
+                    "application/json": components["schemas"]["PublishRequest"] | components["schemas"]["PublishRequestResponse"];
                 };
             };
             /** @description Bad request. */
@@ -1102,13 +1139,31 @@ export interface operations {
                     "application/json": components["schemas"]["ApiError"];
                 };
             };
-            /** @description Validation error. */
+            /** @description Invalid create input, or synchronous validation failed after creation. The latter includes both the machine-readable error and the durable validation_failed request. */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApiError"];
+                    "application/json": components["schemas"]["ApiError"] | components["schemas"]["PublishValidationErrorResponse"];
+                };
+            };
+            /** @description Synchronous validation failed unexpectedly after the request was durably created. The response includes the validation_failed request. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishValidationErrorResponse"];
+                };
+            };
+            /** @description The validator produced an unusable pack hash after the request was durably created (`BAD_GC_HASH`). The response includes the validation_failed request. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishValidationErrorResponse"];
                 };
             };
         };
@@ -1128,7 +1183,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PublishRequest"][];
+                    "application/json": {
+                        publishRequests: components["schemas"]["PublishRequest"][];
+                    };
                 };
             };
             /** @description Unauthenticated. */
@@ -1138,6 +1195,91 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    validatePublishRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Validation passed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishRequestResponse"];
+                };
+            };
+            /** @description Unauthenticated. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description The request belongs to another publisher. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Publish request not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description The request is approved, rejected, or withdrawn and cannot re-enter validation. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Validation failed. The response includes both the machine-readable error and the durable validation_failed request. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishValidationErrorResponse"];
+                };
+            };
+            /** @description Validation failed unexpectedly. The response includes the durable validation_failed request. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishValidationErrorResponse"];
+                };
+            };
+            /** @description The validator produced an unusable pack hash (`BAD_GC_HASH`). The response includes the durable validation_failed request. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishValidationErrorResponse"];
                 };
             };
         };

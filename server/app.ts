@@ -539,7 +539,10 @@ async function handleApi(request: Request) {
         githubOwnerId: candidate.repository.ownerId,
       },
     );
-    return json(await validateAndStorePublishRequest(publishRequest.id), { status: 201 });
+    return publishValidationOutcomeResponse(
+      await validateAndStorePublishRequest(publishRequest.id),
+      201,
+    );
   }
 
   if (request.method === "POST" && url.pathname === "/api/publish-requests") {
@@ -562,9 +565,9 @@ async function handleApi(request: Request) {
       if (publishRequest.status === "approved") {
         return json({ publishRequest }, { status: 201 });
       }
-      return json(
+      return publishValidationOutcomeResponse(
         await validateAndStorePublishRequest(publishRequest.id, autoApproveReleaseForActor(actor)),
-        { status: 201 },
+        201,
       );
     }
     return json(publishRequest, { status: 201 });
@@ -597,7 +600,7 @@ async function handleApi(request: Request) {
         throw new RequestError(409, "PUBLISH_STATE_TERMINAL", "This publish request can no longer be validated.");
       }
       enforceRateLimit(request, "publish-request-validate", { windowMs: 60 * 60 * 1000, max: 12 }, session);
-      return json(await validateAndStorePublishRequest(publishRequest.id));
+      return publishValidationOutcomeResponse(await validateAndStorePublishRequest(publishRequest.id));
     }
     requireRegistryStaff(session);
     if (action === "approve") {
@@ -884,7 +887,43 @@ async function requireGitHubPublishImport(userId: string, id: string) {
   return imported;
 }
 
-async function validateAndStorePublishRequest(id: string, release?: AutoApproveRelease) {
+type PublishValidationFailure = {
+  status: number;
+  code: string;
+  message: string;
+};
+
+type PublishValidationOutcome = {
+  publishRequest: PublishRequestRow;
+  failure?: PublishValidationFailure;
+};
+
+function publishValidationOutcomeResponse(
+  outcome: PublishValidationOutcome,
+  successStatus = 200,
+) {
+  if (outcome.failure) {
+    return json(
+      {
+        error: {
+          code: outcome.failure.code,
+          message: outcome.failure.message,
+        },
+        // Validation happens after create, so a failure is still a durable request. Returning the
+        // row alongside the non-2xx error lets browser clients render/retry it while scripts can
+        // finally trust the HTTP status.
+        publishRequest: outcome.publishRequest,
+      },
+      { status: outcome.failure.status },
+    );
+  }
+  return json({ publishRequest: outcome.publishRequest }, { status: successStatus });
+}
+
+async function validateAndStorePublishRequest(
+  id: string,
+  release?: AutoApproveRelease,
+): Promise<PublishValidationOutcome> {
   const publishRequest = await store.getPublishRequest(id);
   if (!publishRequest) throw new RequestError(404, "NOT_FOUND", "Publish request not found.");
   // Read BEFORE validation, because markPublishRequestValidated overwrites it. Auto-approve clause
@@ -904,7 +943,14 @@ async function validateAndStorePublishRequest(id: string, release?: AutoApproveR
     if (!(error instanceof RequestError)) {
       console.error("[registry] publish validation failed", error);
     }
-    return { publishRequest: await store.markPublishRequestValidationFailed(id, message) };
+    const failure: PublishValidationFailure =
+      error instanceof RequestError
+        ? { status: error.status, code: error.code, message }
+        : { status: 500, code: "PUBLISH_VALIDATION_FAILED", message };
+    return {
+      publishRequest: await store.markPublishRequestValidationFailed(id, message),
+      failure,
+    };
   }
   // OUTSIDE that catch, deliberately: inside it, any bug in approval would mark a perfectly valid
   // release `validation_failed` and tell the publisher their pack is broken.

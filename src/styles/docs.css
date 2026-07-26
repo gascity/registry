@@ -236,6 +236,49 @@
   color: inherit;
 }
 
+.docsTableScroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-surface);
+}
+
+.docsTable {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: var(--gc-text-sm);
+  line-height: 1.5;
+}
+
+.docsTable th,
+.docsTable td {
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--gc-space-3);
+  text-align: left;
+  vertical-align: top;
+}
+
+.docsTable thead th {
+  background: var(--color-bg-inset);
+  color: var(--color-text-bright);
+  font-size: var(--gc-text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.docsTable tbody th {
+  width: 25%;
+  color: var(--color-accent-text);
+  font-weight: 600;
+}
+
+.docsTable tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
 @media (max-width: 720px) {
   .docsGrid {
     grid-template-columns: minmax(0, 1fr);
@@ -244,5 +287,59 @@
   .twoColumnDocs {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--gc-space-3);
+  }
+
+  .docsTable {
+    min-width: 0;
+  }
+
+  .docsTable thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .docsTable,
+  .docsTable tbody,
+  .docsTable tr,
+  .docsTable th,
+  .docsTable td {
+    display: block;
+    width: auto;
+  }
+
+  .docsTable tbody tr {
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--gc-space-3);
+  }
+
+  .docsTable tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .docsTable tbody th,
+  .docsTable tbody td {
+    border-bottom: 0;
+    padding: var(--gc-space-1) 0;
+    overflow-wrap: anywhere;
+  }
+
+  .docsTable tbody th {
+    width: auto;
+  }
+
+  .docsTable td::before {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--color-text-muted);
+    content: attr(data-label);
+    font-size: var(--gc-text-xs);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
   }
 }
