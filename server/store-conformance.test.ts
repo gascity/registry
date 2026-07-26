@@ -20,7 +20,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import postgres from "postgres";
 import { CLI_DEVICE_CODE_TTL_MS, CLI_DEVICE_CODE_INTERVAL_SECONDS, generateCliDeviceCodePair } from "./cli-auth";
 import { AUTO_APPROVED_STATUS_REASON } from "./publish";
@@ -1028,30 +1028,30 @@ for (const lane of lanes) {
         requestedVersion: "0.2.0",
         packPath: "packs/moved",
       });
-      // Force the exact submission tie the flake needed, so the outcome cannot depend on machine
-      // speed: identical createdAt, and ids chosen so a byte-wise id tiebreak would pick the OLDER
-      // row ("b" > "a"), i.e. the wrong one.
-      const tie = "2026-02-01T00:00:00.000Z";
-      const olderId = `prq_b${uid("tie")}`;
-      const newerId = `prq_a${uid("tie")}`;
+      // Approve the original path, then seed its stored approval timestamp ahead of both wall
+      // clocks. This makes the regression deterministic in BOTH lanes: merely stamping `now()`
+      // on the later approval would leave the older row as the apparent precedent.
+      await store.approvePublishRequest(admin.id, older.id);
+      const priorApproval = "2099-02-01T00:00:00.000Z";
       await rewritePublishRequestForConformance(store, dbUrl, older.id, {
-        id: olderId,
-        createdAt: tie,
-        reviewedAt: tie,
-      });
-      await rewritePublishRequestForConformance(store, dbUrl, newer.id, {
-        id: newerId,
-        createdAt: tie,
-        reviewedAt: tie,
+        id: older.id,
+        createdAt: older.createdAt,
+        reviewedAt: priorApproval,
       });
 
-      // Approve the MOVE second, which is what a legitimate monorepo move looks like.
-      await store.approvePublishRequest(admin.id, olderId);
-      await Bun.sleep(2);
-      await store.approvePublishRequest(admin.id, newerId);
+      // Approve the MOVE second, which is what a legitimate monorepo move looks like. Freezing the
+      // file clock also directly covers the millisecond tie that exposed the CI flake.
+      if (store.kind === "file") setSystemTime(new Date("2026-02-02T00:00:00.000Z"));
+      try {
+        await store.approvePublishRequest(admin.id, newer.id);
+      } finally {
+        if (store.kind === "file") setSystemTime();
+      }
 
+      const reread = await store.getPublishRequest(newer.id);
+      expect(Date.parse(reread!.reviewedAt!)).toBeGreaterThan(Date.parse(priorApproval));
       const precedent = await store.getServedPublishPrecedent(name);
-      expect(precedent?.id).toBe(newerId);
+      expect(precedent?.id).toBe(newer.id);
       expect(precedent?.packPath).toBe("packs/moved");
     });
 

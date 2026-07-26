@@ -2077,15 +2077,27 @@ export class PostgresRegistryStore implements RegistryStore {
       // pre-read name below is a stable lock key.
       await sql`SELECT pg_advisory_xact_lock(hashtextextended(${nameClaimLockKey(current.requestedName)}, 0))`;
       const [approvedRow] = await sql`
+        WITH approval_clock AS (
+          SELECT GREATEST(
+            clock_timestamp(),
+            COALESCE(
+              MAX(reviewed_at) + INTERVAL '1 millisecond',
+              '-infinity'::timestamptz
+            )
+          ) AS approved_at
+          FROM pack_publish_requests
+          WHERE requested_name = ${current.requestedName}
+        )
         UPDATE pack_publish_requests
         SET status = 'approved',
             status_reason = ${statusReason},
             reviewed_by_user_id = ${actorUserId},
-            reviewed_at = now(),
-            updated_at = now()
+            reviewed_at = approval_clock.approved_at,
+            updated_at = approval_clock.approved_at
+        FROM approval_clock
         WHERE id = ${id}
           AND status = 'pending_review'
-        RETURNING id
+        RETURNING pack_publish_requests.id
       `;
       if (!approvedRow) return false;
       // Read-then-write, under the lock above. FOR UPDATE is redundant while every writer takes
@@ -3384,6 +3396,16 @@ class FileRegistryStore implements RegistryStore {
     return this.approveInternal({ kind: "auto", context: options.autoApprove }, id, options);
   }
 
+  private nextPublishReviewTimestamp(name: string) {
+    let latest = Number.NEGATIVE_INFINITY;
+    for (const candidate of this.publishRequests.values()) {
+      if (candidate.requestedName !== name || !candidate.reviewedAt) continue;
+      const reviewedAt = Date.parse(candidate.reviewedAt);
+      if (Number.isFinite(reviewedAt)) latest = Math.max(latest, reviewedAt);
+    }
+    return new Date(Math.max(Date.now(), latest + 1)).toISOString();
+  }
+
   private async approveInternal(
     actor: ApprovalActor,
     id: string,
@@ -3418,7 +3440,10 @@ class FileRegistryStore implements RegistryStore {
       // The file store keeps no audit_logs, so only the claim EFFECT is mirrored here.
       enriched = nameClaimEnrichment(existing, nameClaimBindingFromPublishRequest(request));
     }
-    const now = new Date().toISOString();
+    // ISO timestamps have only millisecond precision. Preserve the serialized approval order even
+    // when the wall clock does not advance, otherwise precedent selection falls through to random
+    // request ids and can resurrect an older pack path.
+    const now = this.nextPublishReviewTimestamp(request.requestedName);
     const next: PublishRequestRow = {
       ...request,
       status: "approved",
