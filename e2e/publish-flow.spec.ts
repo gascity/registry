@@ -100,6 +100,9 @@ test("web publish: claim-only submit -> ownership gate -> override approve -> se
   await page.goto(`/api/dev/sign-in?handle=admin-${stamp}&role=admin&redirect=/admin/publish-requests`);
   const row = page.locator("article").filter({ hasText: `${name} 0.1.0` });
   await expect(row).toBeVisible();
+  await expect(row.getByText("Manual web form")).toBeVisible();
+  await expect(row.getByText("Claim only", { exact: true })).toBeVisible();
+  await expect(row.getByText(/audited override/)).toBeVisible();
 
   // A claim-only (web_session) request without verified ownership is blocked, and the
   // actionable message stays visible...

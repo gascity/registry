@@ -50,12 +50,14 @@ Approving anything else is refused:
 So while testing, publish `alice/my-pack` from `github.com/alice/anything`, not `my-pack`.
 
 1. Open `/publish`.
-   - **Find packs from GitHub** (recommended) is repo-proven — it approves straight through.
+   - **Find packs from GitHub** (recommended) is repo-proven — the ownership gate is already
+     satisfied when staff review it.
    - **Manual publish request** is *claim-only* — it needs verified ownership or a staff
      override to be approved (see below).
 2. Submitting runs validation: on success the request moves to `pending_review`; on failure
-   it becomes `validation_failed` with a reason. Note: a failed validation still returns HTTP
-   `201`, so **read the status label, not the HTTP code**.
+   it becomes `validation_failed` with a reason. A synchronous failure returns a non-2xx status
+   with both `{ error: { code, message }, publishRequest }`: scripts can trust the HTTP failure,
+   while the UI can retain and display the durable failed request.
 3. Sign in as `admin`, open **Review** (`/admin/publish-requests`), and use Validate / Approve
    / Reject.
    - Repo-proven requests (GitHub import / Actions OIDC) approve with one click.
@@ -177,7 +179,8 @@ finds the real problem fastest):
       **Contents: Read**, or the App not installed on the repo (use the **Install the GitHub App**
       link) — ownership verification would still work, since that path only needs Metadata.
 - [ ] **Publish (web) — manual/claim** — *Manual publish request* (claim-only). Confirm it shows
-      `pending_review`, or `validation_failed` with a reason (HTTP is still `201` — read the label).
+      `pending_review`, or returns non-2xx with a durable `validation_failed` request and
+      machine-readable error code.
 - [ ] **Namespace** — a scoped name matching the source repo's owner (`alice/my-pack` from
       `github.com/alice/...`) approves; an unscoped name is refused `PUBLISH_NAME_RESERVED`, and a
       foreign scope is refused `PUBLISH_SCOPE_MISMATCH`. Neither is overridable.

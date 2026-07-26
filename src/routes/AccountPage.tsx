@@ -23,6 +23,7 @@ import {
   Text,
 } from "@gascity/ui";
 import {
+  ApiError,
   apiRequest,
   type ApiTokenCreateResult,
   type ApiTokenRow,
@@ -30,6 +31,7 @@ import {
   type PublishRequestRow,
   type ReviewRow,
 } from "../lib/api";
+import { PublishRequestGuidance } from "../components/PublishRequestGuidance";
 
 export function AccountPage({
   auth,
@@ -53,6 +55,8 @@ export function AccountPage({
   const [workingTokenId, setWorkingTokenId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [publishNotice, setPublishNotice] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
   const [tokenNotice, setTokenNotice] = useState<string | null>(null);
   const [tokenError, setTokenError] = useState<string | null>(null);
 
@@ -186,8 +190,8 @@ export function AccountPage({
   };
 
   const validatePublishRequest = async (id: string) => {
-    setNotice(null);
-    setError(null);
+    setPublishNotice(null);
+    setPublishError(null);
     setWorkingRequestId(id);
     try {
       const result = await apiRequest<{ publishRequest: PublishRequestRow }>(
@@ -198,14 +202,24 @@ export function AccountPage({
       setPublishRequests((requests) =>
         requests.map((request) => (request.id === id ? result.publishRequest : request)),
       );
-      setNotice(
+      setPublishNotice(
         result.publishRequest.status === "pending_review"
           ? "Publish request validated and queued for review."
           : "Publish request validation finished.",
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to validate publish request.");
-      await refreshPublishRequests().catch(() => {});
+      if (err instanceof ApiError && err.publishRequest) {
+        const failedRequest = err.publishRequest;
+        setPublishRequests((requests) =>
+          requests.map((request) =>
+            request.id === failedRequest.id ? failedRequest : request,
+          ),
+        );
+        setPublishError(`Validation failed: ${err.message}`);
+      } else {
+        setPublishError(err instanceof Error ? err.message : "Unable to validate publish request.");
+        await refreshPublishRequests().catch(() => {});
+      }
     } finally {
       setWorkingRequestId(null);
     }
@@ -351,6 +365,12 @@ export function AccountPage({
 
         <Card className="accountPanel">
           <CardHeader title={<h2 className="cardTitleHeading">Publish requests</h2>} icon={<GitPullRequest size={16} />} />
+          {publishNotice ? <p className="formNotice">{publishNotice}</p> : null}
+          {publishError ? (
+            <p className="formError" role="alert">
+              {publishError}
+            </p>
+          ) : null}
           {publishRequests.length === 0 ? (
             <Text className="mutedText" tone="muted">
               No publish requests yet.
@@ -374,6 +394,7 @@ export function AccountPage({
                   <span>
                     <GitCommitHorizontal size={13} /> {request.commit.slice(0, 12)}
                   </span>
+                  <PublishRequestGuidance request={request} />
                   {request.registryEntry ? (
                     <div className="requestPreview">
                       <span>
@@ -381,6 +402,9 @@ export function AccountPage({
                       </span>
                       <p>{request.registryEntry.description}</p>
                     </div>
+                  ) : null}
+                  {request.validationError ? (
+                    <p className="formError">Validation: {request.validationError}</p>
                   ) : null}
                   {request.status === "pending_validation" || request.status === "validation_failed" ? (
                     <Button

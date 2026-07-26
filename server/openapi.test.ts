@@ -43,3 +43,23 @@ test("every static documented route is grounded in app.ts", () => {
   }
   expect(missing, `documented routes not found as a pathname literal in app.ts: ${missing.join(", ")}`).toEqual([]);
 });
+
+test("publish validation responses describe every durable error outcome without an ambiguous oneOf", () => {
+  const createResponses = spec.paths["/api/publish-requests"].post.responses;
+  const retryResponses = spec.paths["/api/publish-requests/{id}/validate"].post.responses;
+  const create422 = createResponses["422"].content["application/json"].schema;
+
+  expect(create422.oneOf).toBeUndefined();
+  expect(create422.anyOf).toEqual([
+    { $ref: "#/components/schemas/ApiError" },
+    { $ref: "#/components/schemas/PublishValidationErrorResponse" },
+  ]);
+
+  for (const responses of [createResponses, retryResponses]) {
+    for (const status of ["500", "502"]) {
+      expect(responses[status].content["application/json"].schema).toEqual({
+        $ref: "#/components/schemas/PublishValidationErrorResponse",
+      });
+    }
+  }
+});

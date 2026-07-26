@@ -37,38 +37,18 @@ GitHub repository and owner IDs with the local publisher mapping.
 If the app is removed from a source repository, GitHub webhooks revoke the
 corresponding registry ownership records.
 
-## Unattended approval of repeat releases
+## Review policy for repeat releases
 
-Once a pack name has been claimed by a staff-approved release, further releases
-of that name published from the same repository through GitHub Actions OIDC can
-merge without a staff click. Nothing else does: a personal API token, a browser
-session, a GitHub import and a verified pack-ownership record all still queue
-for review.
+Repository proof and approval are separate. GitHub App import and GitHub Actions
+OIDC prove the source repository; personal API tokens and browser sessions do
+not. Production currently keeps staff review enabled for every release, so
+publishers must follow the request status and must not treat a successful
+submission as automatic approval.
 
-Understand the trust boundary before you rely on it. **A GitHub Actions OIDC
-token proves push access, not admin.** Registry checks that the workflow lives
-in the publishing repository's `.github/workflows/`, that the token's repository
-and commit match the release, and that the runner is GitHub-hosted — a workflow
-file on any branch satisfies that. So unattended publishing is available to
-everyone who can run a workflow in the claimed repository, which is already
-everyone with write access to it.
-
-Registry deliberately does not gate on which ref the release was cut from:
-"release only from a tag" or "only from `main`" is your control, not ours to
-guess. Use GitHub's own mechanisms if you need it:
-
-- Branch protection and required reviews on the release branch.
-- A [deployment environment](https://docs.github.com/actions/deployment/targeting-different-environments/using-environments-for-deployment)
-  with required reviewers, and `environment:` on the publishing job — the OIDC
-  token is only issued after the environment's approval.
-- Restrict who can run the workflow, and keep the publish job separate from
-  build jobs that run untrusted contributor code.
-
-The ref and event name of every unattended approval are recorded in the registry
-audit log, and each auto-approved release is labelled as such in the staff queue
-and on your account page. Registry staff can take any release down at any time,
-and either refusal is durable: once staff have taken a release down or rejected
-a queued one, every later release of that pack goes back to human review — a
-re-run of the same workflow will not merge it, and neither will bumping the
-version. Fix what the refusal was about and ask staff to approve the next
-release; that approval re-arms unattended publishing.
+The server contains an operator-controlled, fail-closed experiment for
+unattended repeat releases, but `REGISTRY_PUBLISH_AUTO_APPROVE` is off in
+production and is not a publisher-facing guarantee. If that policy changes, an
+OIDC token still only proves that the workflow ran in the publishing repository
+for the submitted commit. Branch/tag policy remains the repository owner's
+responsibility; use protected branches, protected environments, and a publish
+job that does not execute untrusted pull-request code.

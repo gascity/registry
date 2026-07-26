@@ -245,6 +245,49 @@
   padding: var(--gc-space-3);
 }
 
+.requestGuidance {
+  display: grid;
+  gap: var(--gc-space-2);
+  border-left: 2px solid var(--color-border-strong);
+  padding-left: var(--gc-space-3);
+}
+
+.requestGuidance p {
+  margin: 0;
+}
+
+.requestGuidanceMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gc-space-2) var(--gc-space-5);
+  margin: 0;
+}
+
+.requestGuidanceMeta > div {
+  display: grid;
+  gap: 2px;
+}
+
+.requestGuidanceMeta dt {
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.requestGuidanceMeta dd {
+  margin: 0;
+  color: var(--color-text-bright);
+  font-size: var(--gc-text-sm);
+  font-weight: 700;
+}
+
+.requestGuidanceDetail {
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
+}
+
 .tokenReveal {
   display: grid;
   gap: var(--gc-space-2);
