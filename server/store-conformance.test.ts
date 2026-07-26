@@ -1299,6 +1299,111 @@ for (const lane of lanes) {
       expect((await store.listPackNameClaims([first, second])).map((claim) => claim.name)).toEqual([first]);
     });
 
+    test("catalog attribution: stable owner ids grant live trust; login-only and id-less claims never do", async () => {
+      const submitter = await store.ensureUser(identity());
+      const admin = await store.ensureUser(identity({ assertedAdmin: true }));
+      const ownership = ownershipInput("acme/registry-fixtures");
+      await store.upsertVerifiedPackOwnership(submitter.id, ownership);
+
+      async function approveWithIdentity(
+        name: string,
+        sourceIdentity?: { githubRepositoryId: string; githubOwnerId: string },
+      ) {
+        const request = await store.createPublishRequest(
+          submitter.id,
+          publishInput(name),
+          sourceIdentity ? "github_actions_oidc" : "web_session",
+          sourceIdentity,
+        );
+        await store.markPublishRequestValidated(request.id, entry(name));
+        await store.approvePublishRequest(admin.id, request.id);
+      }
+
+      const stable = `acme/${uid("stable")}`;
+      const reusedLogin = `acme/${uid("reused")}`;
+      const idless = `acme/${uid("legacy")}`;
+      await approveWithIdentity(stable, {
+        githubRepositoryId: ownership.githubRepositoryId,
+        githubOwnerId: ownership.githubOwnerId,
+      });
+      await approveWithIdentity(reusedLogin, {
+        githubRepositoryId: "repo-reused-login",
+        githubOwnerId: "owner-not-acme",
+      });
+      await approveWithIdentity(idless);
+
+      const before = await store.listCatalogPublisherAttributions([
+        reusedLogin,
+        stable,
+        idless,
+        stable,
+        "acme/unclaimed",
+      ]);
+      expect(before.map((row) => row.name)).toEqual(
+        [stable, reusedLogin, idless].sort((left, right) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+      );
+      expect(before.find((row) => row.name === stable)).toEqual({
+        name: stable,
+        publisher: "acme",
+        trusted: false,
+      });
+      expect(before.find((row) => row.name === reusedLogin)).toEqual({
+        name: reusedLogin,
+        publisher: "acme",
+        trusted: false,
+      });
+      expect(before.find((row) => row.name === idless)).toEqual({
+        name: idless,
+        publisher: "acme",
+        trusted: false,
+      });
+
+      const promoted = await store.setPublisherTrustByGithubOwnerId(
+        ownership.githubOwnerId,
+        true,
+        {
+          operator: "registry-test",
+          reason: "conformance promotion",
+        },
+      );
+      expect(promoted).toMatchObject({
+        githubOwnerId: ownership.githubOwnerId,
+        trusted: true,
+      });
+
+      const afterPromotion = await store.listCatalogPublisherAttributions([
+        stable,
+        reusedLogin,
+        idless,
+      ]);
+      expect(afterPromotion.find((row) => row.name === stable)?.trusted).toBe(true);
+      expect(afterPromotion.find((row) => row.name === reusedLogin)?.trusted).toBe(false);
+      expect(afterPromotion.find((row) => row.name === idless)?.trusted).toBe(false);
+
+      await store.setPublisherTrustByGithubOwnerId(ownership.githubOwnerId, false, {
+        operator: "registry-test",
+        reason: "conformance rollback",
+      });
+      expect(
+        (await store.listCatalogPublisherAttributions([stable]))[0]?.trusted,
+      ).toBe(false);
+
+      await expect(
+        store.setPublisherTrustByGithubOwnerId(ownership.githubOwnerId, true, {
+          operator: "registry-test",
+          reason: " ",
+        }),
+      ).rejects.toBeInstanceOf(StoreValidationError);
+      await expect(
+        store.setPublisherTrustByGithubOwnerId("owner-missing", true, {
+          operator: "registry-test",
+          reason: "must not create trust by typo",
+        }),
+      ).rejects.toBeInstanceOf(StoreValidationError);
+    });
+
     test("name claims: the first approve pins the name, and a later approve never re-points it", async () => {
       const submitter = await store.ensureUser(identity());
       const admin = await store.ensureUser(identity({ assertedAdmin: true }));

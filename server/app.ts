@@ -1250,7 +1250,7 @@ async function assertPublishRequestCanMerge(
       // The dry run has to model the SERVE path exactly. Without the claims the serve path reads,
       // a claim holder whose name an upstream source also declares would 409 here while the merge
       // it is predicting succeeds — an upstream edit silently freezing that pack's releases.
-      nameClaims: await nameClaimsForMerge(merging),
+      ...(await catalogRenderContext(merging)),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Publish request conflicts with the aggregate.";
@@ -1322,25 +1322,33 @@ function reportCatalogIssue(surface: "registry.toml" | "catalog.json") {
   };
 }
 
-// The pack_name_claims rows the merge needs, in ONE round trip. Restricted to BARE entry names,
-// which is not an approximation: ingest only ever emits bare names (scripts/generate-registry.lib.ts)
-// and the committed artifact is re-validated as bare, so a scoped entry can never equal a base pack
-// name, and claim precedence is deliberately never applied to the pack_key collision. That bounds
-// this to the closed grandfathered set of bare publishes (H1a refuses new ones), so it stays a
-// single-row read as the catalog grows. A scoped-INGEST lane would have to widen this — and getting
-// it wrong fails closed (no claim found ⇒ the base pack keeps the name ⇒ the publish is refused),
-// never open. The filter is a COST BOUND, not a guard: widening it back to every name changes no
-// served byte, only how many rows each catalog request reads.
-async function nameClaimsForMerge(requests: PublishRequestRow[]) {
+// Current claim + publisher attribution for every direct name, in two fixed-size batch reads.
+// Claim precedence only consumes bare-name claims today, but publisher attribution applies to the
+// normal scoped lane too; retaining the old `!packNameScope(name)` optimization would silently
+// classify every modern direct pack as unknown/community. Stable owner-id matching and the
+// fail-safe fallback live in the store implementations; aggregate.ts remains DB-free and pure.
+async function catalogRenderContext(requests: PublishRequestRow[]) {
   const names = [
     ...new Set(
       requests
         .map((request) => request.registryEntry?.name)
-        .filter((name): name is string => typeof name === "string" && !packNameScope(name)),
+        .filter((name): name is string => typeof name === "string"),
     ),
   ];
-  if (names.length === 0) return undefined;
-  return new Map((await store.listPackNameClaims(names)).map((claim) => [claim.name, claim]));
+  if (names.length === 0) return {};
+  const [claims, attributions] = await Promise.all([
+    store.listPackNameClaims(names),
+    store.listCatalogPublisherAttributions(names),
+  ]);
+  return {
+    nameClaims: new Map(claims.map((claim) => [claim.name, claim])),
+    attributions: new Map(
+      attributions.map(({ name, publisher, trusted }) => [
+        name,
+        { publisher, trusted },
+      ]),
+    ),
+  };
 }
 
 async function serveRuntimeRegistryToml() {
@@ -1350,7 +1358,7 @@ async function serveRuntimeRegistryToml() {
     renderRegistryTomlWithApprovedPublishes(baseToml, approved, {
       mode: "fail-soft",
       onIssue: reportCatalogIssue("registry.toml"),
-      nameClaims: await nameClaimsForMerge(approved),
+      ...(await catalogRenderContext(approved)),
     }),
     { headers: runtimeCatalogHeaders("text/plain; charset=utf-8") },
   );
@@ -1363,7 +1371,7 @@ async function serveRuntimeCatalogJson() {
     renderCatalogJsonWithApprovedPublishes(baseJson, approved, {
       mode: "fail-soft",
       onIssue: reportCatalogIssue("catalog.json"),
-      nameClaims: await nameClaimsForMerge(approved),
+      ...(await catalogRenderContext(approved)),
     }),
     { headers: runtimeCatalogHeaders("application/json; charset=utf-8") },
   );
