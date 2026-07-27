@@ -290,6 +290,43 @@ async function rewritePublishRequestForConformance(
   }
 }
 
+// Places updatedAt ahead of the wall clock to deterministically model the ordinary same-millisecond
+// case where a notification version is one millisecond ahead. A non-notifying write must retain
+// that high-water mark so the next notification cannot reuse an observed version.
+async function seedPublishRequestFeedbackClockForConformance(
+  store: RegistryStore,
+  dbUrl: string | undefined,
+  id: string,
+  updatedAt: string,
+) {
+  if (store.kind === "file") {
+    const internals = store as unknown as {
+      publishRequests: Map<string, PublishRequestRow>;
+      save: () => Promise<void>;
+    };
+    const request = internals.publishRequests.get(id);
+    if (!request) throw new Error(`File conformance publish request ${id} not found.`);
+    internals.publishRequests.set(id, { ...request, updatedAt, submitterUnreadAt: null });
+    await internals.save();
+    return;
+  }
+
+  if (!dbUrl) throw new Error("Postgres conformance lane is missing its database URL.");
+  const sql = postgres(dbUrl, { max: 1 });
+  try {
+    const rows = await sql`
+      UPDATE pack_publish_requests
+      SET updated_at = ${updatedAt}::text::timestamptz,
+          submitter_unread_at = NULL
+      WHERE id = ${id}
+      RETURNING id
+    `;
+    if (rows.length !== 1) throw new Error(`Postgres conformance publish request ${id} not found.`);
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 async function storedUsersForEiaSubject(
   store: RegistryStore,
   dbUrl: string | undefined,
@@ -710,12 +747,15 @@ for (const lane of lanes) {
       const submitter = await store.ensureUser(identity());
       const name = uid("feedback-status");
       const request = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      const priorUpdatedAt = "2099-01-01T00:00:00.000Z";
+      await seedPublishRequestFeedbackClockForConformance(store, dbUrl, request.id, priorUpdatedAt);
       const failed = await store.markPublishRequestValidationFailed(
         request.id,
         "missing runtime requirement",
         { notifySubmitter: true },
       );
       const firstVersion = failed.submitterUnreadAt!;
+      expect(firstVersion > priorUpdatedAt).toBe(true);
       await store.markPublishRequestRead(submitter.id, request.id, firstVersion);
       const repeated = await store.markPublishRequestValidationFailed(
         request.id,
@@ -723,12 +763,13 @@ for (const lane of lanes) {
         { notifySubmitter: true },
       );
       expect(repeated.submitterUnreadAt).toBeNull();
+      expect(repeated.updatedAt > firstVersion).toBe(true);
 
       const validated = await store.markPublishRequestValidated(request.id, entry(name), {
         notifySubmitter: true,
       });
       expect(validated.submitterUnreadAt).toBeTruthy();
-      expect(validated.submitterUnreadAt! > firstVersion).toBe(true);
+      expect(validated.submitterUnreadAt! > repeated.updatedAt).toBe(true);
     });
 
     test("publish lifecycle: reject terminates with a reason and never serves", async () => {

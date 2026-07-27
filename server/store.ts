@@ -2184,10 +2184,7 @@ export class PostgresRegistryStore implements RegistryStore {
           validation_error = NULL,
           status_reason = NULL,
           validated_at = now(),
-          updated_at = CASE
-            WHEN feedback_state.should_notify THEN feedback_state.version
-            ELSE date_trunc('milliseconds', clock_timestamp())
-          END
+          updated_at = feedback_state.version
       FROM feedback_state
       WHERE id = ${id}
         AND status IN ('pending_validation', 'validation_failed', 'pending_review')
@@ -2237,10 +2234,7 @@ export class PostgresRegistryStore implements RegistryStore {
           validated_at = NULL,
           validation_error = ${reason},
           status_reason = ${reason},
-          updated_at = CASE
-            WHEN feedback_state.should_notify THEN feedback_state.version
-            ELSE date_trunc('milliseconds', clock_timestamp())
-          END
+          updated_at = feedback_state.version
       FROM feedback_state
       WHERE id = ${id}
         AND status IN ('pending_validation', 'validation_failed', 'pending_review')
@@ -3704,9 +3698,7 @@ class FileRegistryStore implements RegistryStore {
       request.statusReason !== undefined ||
       !isDeepStrictEqual(request.registryEntry, entry)
     );
-    const now = shouldNotify
-      ? nextFeedbackTimestamp(wallClock, request.submitterUnreadAt, request.updatedAt)
-      : wallClock;
+    const now = nextFeedbackTimestamp(wallClock, request.submitterUnreadAt, request.updatedAt);
     const next: PublishRequestRow = {
       ...request,
       status: "pending_review",
@@ -3741,9 +3733,7 @@ class FileRegistryStore implements RegistryStore {
       request.statusReason !== reason ||
       request.registryEntry !== undefined
     );
-    const now = shouldNotify
-      ? nextFeedbackTimestamp(wallClock, request.submitterUnreadAt, request.updatedAt)
-      : wallClock;
+    const now = nextFeedbackTimestamp(wallClock, request.submitterUnreadAt, request.updatedAt);
     const next: PublishRequestRow = {
       ...request,
       status: "validation_failed",
