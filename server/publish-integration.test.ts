@@ -65,6 +65,182 @@ function autoApproveRateLimitKey(requestedName: string) {
 }
 
 describe("local registry publish integration", () => {
+  test("serves owner feedback with isolation, token rules, and bounded plaintext comments", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const submitter = await harness.signIn("feedback-owner");
+      const other = await harness.signIn("feedback-other");
+      const created = await harness.publishWithSession(
+        submitter,
+        await harness.createPack("feedback-owner", "0.1.0"),
+      );
+
+      const list = await submitter.json<{
+        publishRequests: Array<Record<string, unknown>>;
+        unreadCount: number;
+      }>("/api/v1/me/publish-requests");
+      expect(list.unreadCount).toBe(0);
+      expect(list.publishRequests).toContainEqual(expect.objectContaining({
+        id: created.id,
+        nextStep: "await_registry_review",
+        unread: false,
+        submitterUnreadAt: null,
+      }));
+      const summary = list.publishRequests.find(({ id }) => id === created.id)!;
+      expect(summary).not.toHaveProperty("nextCursor");
+      expect(summary).not.toHaveProperty("commentCount");
+      expect(summary).not.toHaveProperty("latestCommentPreview");
+      expect(summary).not.toHaveProperty("submitterReadAt");
+
+      const path = `/api/v1/me/publish-requests/${encodeURIComponent(created.id)}`;
+      expect((await other.request(path)).status).toBe(404);
+      expect((await submitter.request(`${path}/comments`, {
+        method: "POST",
+        body: { body: "A submitter reply." },
+      })).status).toBe(403);
+
+      const reply = await submitter.json<{ comment: { body: string } }>(
+        `${path}/comments`,
+        { method: "POST", csrfToken: submitter.csrfToken, body: { body: "A submitter reply." } },
+      );
+      expect(reply).toEqual({ comment: expect.objectContaining({ body: "A submitter reply." }) });
+      const detail = await submitter.json<{
+        publishRequest: { actionRequiredBy: string; comments: Array<{ body: string }> };
+      }>(path);
+      expect(detail.publishRequest.actionRequiredBy).toBe("registry");
+      expect(detail.publishRequest.comments).toEqual([
+        expect.objectContaining({ body: "A submitter reply." }),
+      ]);
+
+      expect((await submitter.request(`${path}/comments`, {
+        method: "POST",
+        csrfToken: submitter.csrfToken,
+        body: { body: "😀".repeat(4_001) },
+      })).status).toBe(422);
+
+      const constrained = await harness.store.createApiToken(submitter.userId, {
+        label: "feedback constrained",
+        kind: "github_actions_publish",
+      });
+      expect((await harness.publicClient.request("/api/v1/me/publish-requests", {
+        bearerToken: constrained.token,
+      })).status).toBe(403);
+      const personal = await harness.store.createApiToken(submitter.userId, {
+        label: "feedback personal",
+      });
+      expect((await harness.publicClient.request(path, {
+        bearerToken: personal.token,
+      })).status).toBe(200);
+      expect((await harness.publicClient.request(`${path}/comments`, {
+        method: "POST",
+        bearerToken: personal.token,
+        body: { body: "A personal-token reply." },
+      })).status).toBe(201);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("serves staff feedback and preserves exact-version unread acknowledgements", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const submitter = await harness.signIn("feedback-staff");
+      const admin = await harness.signIn("admin", "admin");
+      const created = await harness.publishWithSession(
+        submitter,
+        await harness.createPack("feedback-staff", "0.1.0"),
+      );
+      const ownerPath = `/api/v1/me/publish-requests/${encodeURIComponent(created.id)}`;
+      const staffPath = `/api/v1/admin/publish-requests/${encodeURIComponent(created.id)}`;
+
+      expect((await harness.publicClient.request(staffPath)).status).toBe(401);
+      expect((await submitter.request(staffPath)).status).toBe(403);
+      expect((await admin.request(`${staffPath}/comments`, {
+        method: "POST",
+        body: { body: "No CSRF.", actionRequiredBy: "submitter" },
+      })).status).toBe(403);
+
+      const staffReply = await admin.json<{ comment: { id: string; body: string } }>(
+        `${staffPath}/comments`,
+        {
+          method: "POST",
+          csrfToken: admin.csrfToken,
+          body: {
+            body: "Please clarify the runtime requirement.",
+            actionRequiredBy: "submitter",
+          },
+        },
+      );
+      expect(staffReply.comment.body).toBe("Please clarify the runtime requirement.");
+      expect(staffReply).not.toHaveProperty("publishRequest");
+      expect((await admin.request(`${staffPath}/comments`, {
+        method: "POST",
+        csrfToken: admin.csrfToken,
+        body: { body: "😀".repeat(4_001), actionRequiredBy: "submitter" },
+      })).status).toBe(422);
+
+      const staffDetail = await admin.json<{
+        publishRequest: Record<string, unknown> & { comments: unknown[] };
+      }>(staffPath);
+      expect(staffDetail.publishRequest.comments).toHaveLength(1);
+      expect(staffDetail.publishRequest).not.toHaveProperty("unread");
+      expect(staffDetail.publishRequest).not.toHaveProperty("submitterUnreadAt");
+
+      const unread = await submitter.json<{
+        publishRequest: { unread: boolean; submitterUnreadAt: string; comments: unknown[] };
+      }>(ownerPath);
+      expect(unread.publishRequest.unread).toBe(true);
+      expect(unread.publishRequest.comments).toHaveLength(1);
+      expect((await submitter.json<{ unreadCount: number }>("/api/v1/me/publish-requests")).unreadCount)
+        .toBe(1);
+
+      expect((await submitter.request(`${ownerPath}/read`, {
+        method: "POST",
+        csrfToken: submitter.csrfToken,
+        body: { observedUnreadAt: new Date(Date.now() + 60_000).toISOString() },
+      })).status).toBe(204);
+      expect((await submitter.json<{ publishRequest: { unread: boolean } }>(ownerPath)).publishRequest.unread)
+        .toBe(true);
+
+      expect((await submitter.request(`${ownerPath}/read`, {
+        method: "POST",
+        csrfToken: submitter.csrfToken,
+        body: { observedUnreadAt: unread.publishRequest.submitterUnreadAt },
+      })).status).toBe(204);
+      const read = await submitter.json<{
+        publishRequest: { unread: boolean; submitterUnreadAt: null };
+      }>(ownerPath);
+      expect(read.publishRequest).toEqual(expect.objectContaining({
+        unread: false,
+        submitterUnreadAt: null,
+      }));
+
+      const rejected = await harness.reject(admin, created.id, "Needs a corrected release.");
+      expect(rejected).not.toHaveProperty("submitterUnreadAt");
+      const terminal = await submitter.json<{
+        publishRequest: { status: string; unread: boolean };
+      }>(ownerPath);
+      expect(terminal.publishRequest).toEqual(expect.objectContaining({
+        status: "rejected",
+        unread: true,
+      }));
+      expect((await submitter.request(`${ownerPath}/comments`, {
+        method: "POST",
+        csrfToken: submitter.csrfToken,
+        body: { body: "Too late." },
+      })).status).toBe(409);
+
+      const staffToken = await harness.store.createApiToken(admin.userId, {
+        label: "staff personal",
+      });
+      expect((await harness.publicClient.request(staffPath, {
+        bearerToken: staffToken.token,
+      })).status).toBe(401);
+    } finally {
+      await harness.close();
+    }
+  });
+
   test("accepts a locally created pack through every supported publish method", async () => {
     const harness = await createPublishHarness();
     try {

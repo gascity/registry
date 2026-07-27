@@ -1,5 +1,6 @@
 import type {
   PublishRequestRow,
+  PublishRequestNextStep,
   PublishRequestStatus,
   PublishSubmissionMethod,
 } from "./api";
@@ -18,6 +19,27 @@ export type PublishRequestPresentation = {
   };
   nextStep: string;
 };
+
+export function publishRequestNextStepText(
+  nextStep: PublishRequestNextStep | (string & {}),
+) {
+  switch (nextStep) {
+    case "await_validation":
+      return "Awaiting validation.";
+    case "fix_validation":
+      return "Fix validation errors and submit a corrected request.";
+    case "respond_to_feedback":
+      return "Your response is needed.";
+    case "await_registry_review":
+      return "Awaiting Registry review.";
+    case "published":
+      return "Published.";
+    case "resubmit":
+      return "Address the decision and submit a corrected request.";
+    default:
+      return `Next step: ${nextStep.replaceAll("_", " ")}.`;
+  }
+}
 
 export function publishRequestPresentation(
   request: PublishRequestRow,

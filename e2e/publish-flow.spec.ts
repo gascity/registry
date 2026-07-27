@@ -161,7 +161,7 @@ test("web publish: reject terminates the request and never serves the pack", asy
   const row = page.locator("article").filter({ hasText: `${name} 0.1.0` });
   await expect(row).toBeVisible();
   await row.getByLabel(`Reject reason for ${name}`).fill("e2e rejected");
-  await row.getByRole("button", { name: "Reject" }).click();
+  await row.getByRole("button", { name: "Reject", exact: true }).click();
   await expect(row.getByText("Rejected", { exact: true })).toBeVisible();
   await expect(row.getByText("e2e rejected")).toBeVisible();
 
@@ -211,7 +211,7 @@ test("web publish: staff withdraw takes an approved pack off the served catalog"
 
   // Staff takedown of the approved release drops it from the runtime catalog immediately.
   await row.getByLabel(`Withdraw reason for ${name}`).fill("e2e takedown");
-  await row.getByRole("button", { name: "Withdraw" }).click();
+  await row.getByRole("button", { name: "Withdraw", exact: true }).click();
   await expect(row.getByText("Withdrawn", { exact: true })).toBeVisible();
   await expect(row.getByText("e2e takedown")).toBeVisible();
 

@@ -29,6 +29,8 @@ import {
   normalizePublishRequestInput,
   packNameScope,
   packRoutePath,
+  publishRequestNextStep,
+  publishRequestUnread,
   parseGitHubRepositoryUrl,
   sameSourceRepository,
 } from "./publish";
@@ -70,6 +72,7 @@ import type {
   PublishRequestInput,
   PublishRequestRow,
   PublishRequestStatus,
+  PublishRequestActionOwner,
   PublishSourceIdentity,
   PublishSubmissionMethod,
   ReviewInput,
@@ -572,6 +575,84 @@ async function handleApi(request: Request) {
     }
     return json(publishRequest, { status: 201 });
   }
+  if (request.method === "GET" && url.pathname === "/api/v1/me/publish-requests") {
+    const actor = requirePublishFeedbackActor(request, session, apiTokenAuth);
+    enforcePublishFeedbackRateLimit(actor.user.id, "list", 120, 10 * 60 * 1000);
+    const publishRequests = await store.listAccountPublishRequests(actor.user.id);
+    return json({
+      publishRequests: publishRequests.map(presentPublishRequestFeedbackSummary),
+      unreadCount: publishRequests.filter(publishRequestUnread).length,
+    });
+  }
+  const adminPublishRequestDetailMatch = url.pathname.match(/^\/api\/v1\/admin\/publish-requests\/([^/]+)$/);
+  if (request.method === "GET" && adminPublishRequestDetailMatch?.[1]) {
+    // Deliberately session-only: personal and one-shot publish tokens do not become staff
+    // credentials simply because their owner has a staff role.
+    requireRegistryStaff(session);
+    enforcePublishFeedbackRateLimit(session!.user.id, "staff-detail", 120, 10 * 60 * 1000);
+    const id = decodeURIComponent(adminPublishRequestDetailMatch[1]);
+    const publishRequest = await store.getPublishRequest(id);
+    if (!publishRequest) throw new RequestError(404, "NOT_FOUND", "Publish request not found.");
+    const comments = await store.listPublishRequestComments(id);
+    return json({ publishRequest: presentStaffPublishRequestFeedbackDetail(publishRequest, comments) });
+  }
+  const myPublishRequestMatch = url.pathname.match(/^\/api\/v1\/me\/publish-requests\/([^/]+)$/);
+  if (request.method === "GET" && myPublishRequestMatch?.[1]) {
+    const actor = requirePublishFeedbackActor(request, session, apiTokenAuth);
+    enforcePublishFeedbackRateLimit(actor.user.id, "detail", 120, 10 * 60 * 1000);
+    const id = decodeURIComponent(myPublishRequestMatch[1]);
+    const publishRequest = await requireOwnedPublishRequest(actor.user.id, id);
+    const comments = await store.listPublishRequestComments(id);
+    return json({ publishRequest: presentPublishRequestFeedbackDetail(publishRequest, comments) });
+  }
+  const myPublishRequestCommentMatch = url.pathname.match(/^\/api\/v1\/me\/publish-requests\/([^/]+)\/comments$/);
+  if (request.method === "POST" && myPublishRequestCommentMatch?.[1]) {
+    const actor = requirePublishFeedbackActor(request, session, apiTokenAuth, { mutation: true });
+    enforcePublishFeedbackRateLimit(actor.user.id, "comment", 30, 60 * 60 * 1000);
+    const id = decodeURIComponent(myPublishRequestCommentMatch[1]);
+    await requireOwnedPublishRequest(actor.user.id, id);
+    const body = await readJsonBody<{ body?: unknown }>(request, 64 * 1024);
+    const comment = await store.addPublishRequestComment({
+      publishRequestId: id,
+      actorUserId: actor.user.id,
+      authorRole: "submitter",
+      body: parsePublishCommentBody(body.body),
+      actionRequiredBy: "registry",
+    });
+    return json({ comment: presentPublishRequestComment(comment) }, { status: 201 });
+  }
+  const myPublishRequestReadMatch = url.pathname.match(/^\/api\/v1\/me\/publish-requests\/([^/]+)\/read$/);
+  if (request.method === "POST" && myPublishRequestReadMatch?.[1]) {
+    const actor = requirePublishFeedbackActor(request, session, apiTokenAuth, { mutation: true });
+    enforcePublishFeedbackRateLimit(actor.user.id, "read", 120, 60 * 60 * 1000);
+    const id = decodeURIComponent(myPublishRequestReadMatch[1]);
+    await requireOwnedPublishRequest(actor.user.id, id);
+    const body = await readJsonBody<{ observedUnreadAt?: unknown }>(request, 1024);
+    const observedUnreadAt = parseObservedUnreadAt(body.observedUnreadAt);
+    await store.markPublishRequestRead(actor.user.id, id, observedUnreadAt);
+    return new Response(null, { status: 204 });
+  }
+  const adminPublishRequestCommentMatch = url.pathname.match(/^\/api\/v1\/admin\/publish-requests\/([^/]+)\/comments$/);
+  if (request.method === "POST" && adminPublishRequestCommentMatch?.[1]) {
+    // This is deliberately session-only: a bearer token, even one for a staff user, is not a
+    // moderation credential and must not gain CSRF-less staff mutation authority.
+    requireCsrf(request, session);
+    requireRegistryStaff(session);
+    enforcePublishFeedbackRateLimit(session!.user.id, "staff-comment", 30, 60 * 60 * 1000);
+    const id = decodeURIComponent(adminPublishRequestCommentMatch[1]);
+    const current = await store.getPublishRequest(id);
+    if (!current) throw new RequestError(404, "NOT_FOUND", "Publish request not found.");
+    const body = await readJsonBody<{ body?: unknown; actionRequiredBy?: unknown }>(request, 64 * 1024);
+    const actionRequiredBy = parsePublishRequestActionOwner(body.actionRequiredBy);
+    const comment = await store.addPublishRequestComment({
+      publishRequestId: id,
+      actorUserId: session!.user.id,
+      authorRole: "registry",
+      body: parsePublishCommentBody(body.body),
+      actionRequiredBy,
+    });
+    return json({ comment: presentPublishRequestComment(comment) }, { status: 201 });
+  }
   if (request.method === "GET" && url.pathname === "/api/account/publish-requests") {
     requireCsrf(request, session);
     return json({ publishRequests: await store.listAccountPublishRequests(session!.user.id) });
@@ -579,7 +660,7 @@ async function handleApi(request: Request) {
   if (request.method === "GET" && url.pathname === "/api/admin/publish-requests") {
     requireCsrf(request, session);
     requireRegistryStaff(session);
-    return json({ publishRequests: await store.listPublishRequests() });
+    return json({ publishRequests: (await store.listPublishRequests()).map(presentStaffPublishRequest) });
   }
   const publishRequestActionMatch = url.pathname.match(
     /^\/api\/publish-requests\/([^/]+)\/(validate|approve|reject|withdraw)$/,
@@ -600,7 +681,10 @@ async function handleApi(request: Request) {
         throw new RequestError(409, "PUBLISH_STATE_TERMINAL", "This publish request can no longer be validated.");
       }
       enforceRateLimit(request, "publish-request-validate", { windowMs: 60 * 60 * 1000, max: 12 }, session);
-      return publishValidationOutcomeResponse(await validateAndStorePublishRequest(publishRequest.id));
+      const staffAudience = session!.user.role === "admin" || session!.user.role === "moderator";
+      return publishValidationOutcomeResponse(await validateAndStorePublishRequest(publishRequest.id, undefined, {
+        notifySubmitter: staffAudience,
+      }), 200, staffAudience ? "staff" : "submitter");
     }
     requireRegistryStaff(session);
     if (action === "approve") {
@@ -624,7 +708,9 @@ async function handleApi(request: Request) {
         namePinOverrideReason,
       });
       return json({
-        publishRequest: await store.approvePublishRequest(session!.user.id, id, decision),
+        publishRequest: presentStaffPublishRequest(
+          await store.approvePublishRequest(session!.user.id, id, decision),
+        ),
       });
     }
     const body = await readJsonBody<{ reason?: string; releaseNameClaim?: boolean }>(request);
@@ -634,13 +720,17 @@ async function handleApi(request: Request) {
       // releaseNameClaim additionally unclaims the pack name, returning it to the unclaimed pool
       // (bare names stay reserved — releasing one does not make it publishable again).
       return json({
-        publishRequest: await store.withdrawPublishRequest(session!.user.id, id, body.reason ?? "", {
-          releaseNameClaim: body.releaseNameClaim === true,
-        }),
+        publishRequest: presentStaffPublishRequest(
+          await store.withdrawPublishRequest(session!.user.id, id, body.reason ?? "", {
+            releaseNameClaim: body.releaseNameClaim === true,
+          }),
+        ),
       });
     }
     return json({
-      publishRequest: await store.rejectPublishRequest(session!.user.id, id, body.reason ?? ""),
+      publishRequest: presentStaffPublishRequest(
+        await store.rejectPublishRequest(session!.user.id, id, body.reason ?? ""),
+      ),
     });
   }
 
@@ -764,6 +854,125 @@ function requireRegistryStaff(session: SessionRecord | null) {
   if (session.user.role !== "admin" && session.user.role !== "moderator") {
     throw new RequestError(403, "FORBIDDEN", "Registry staff access required.");
   }
+}
+
+function requirePublishFeedbackActor(
+  request: Request,
+  session: SessionRecord | null,
+  apiTokenAuth: ApiTokenAuthResult | null,
+  options: { mutation?: boolean } = {},
+) {
+  if (apiTokenAuth) {
+    if (apiTokenAuth.kind !== "personal") {
+      throw new RequestError(403, "TOKEN_SCOPE_DENIED", "This token cannot access account publish history.");
+    }
+    return { user: apiTokenAuth.user, kind: "token" as const };
+  }
+  if (!session) throw new RequestError(401, "UNAUTHENTICATED", "Sign in required.");
+  if (options.mutation) requireCsrf(request, session);
+  return { user: session.user, kind: "session" as const };
+}
+
+function enforcePublishFeedbackRateLimit(userId: string, scope: string, max: number, windowMs: number) {
+  if (!tryConsumeRateLimit(`publish-feedback:${scope}:${userId}`, { max, windowMs })) {
+    throw new RequestError(429, "RATE_LIMITED", "Too many requests. Try again later.");
+  }
+}
+
+function parsePublishCommentBody(value: unknown) {
+  if (typeof value !== "string") {
+    throw new RequestError(422, "VALIDATION_ERROR", "Comment body is required.");
+  }
+  return value;
+}
+
+function parsePublishRequestActionOwner(value: unknown): PublishRequestActionOwner {
+  if (value !== "submitter" && value !== "registry") {
+    throw new RequestError(422, "VALIDATION_ERROR", "actionRequiredBy must be submitter or registry.");
+  }
+  return value;
+}
+
+function parseObservedUnreadAt(value: unknown) {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new RequestError(422, "VALIDATION_ERROR", "observedUnreadAt must be an ISO timestamp.");
+  }
+  return new Date(value).toISOString();
+}
+
+async function requireOwnedPublishRequest(userId: string, id: string) {
+  const publishRequest = await store.getPublishRequest(id);
+  if (!publishRequest || publishRequest.submittedBy.id !== userId) {
+    throw new RequestError(404, "NOT_FOUND", "Publish request not found.");
+  }
+  return publishRequest;
+}
+
+function presentPublishRequestFeedbackSummary(request: PublishRequestRow) {
+  return {
+    id: request.id,
+    status: request.status,
+    nextStep: publishRequestNextStep(request),
+    actionRequiredBy: request.actionRequiredBy,
+    requestedName: request.requestedName,
+    requestedVersion: request.requestedVersion,
+    repository: request.repository,
+    packPath: request.packPath,
+    commit: request.commit,
+    statusReason: request.statusReason,
+    unread: publishRequestUnread(request),
+    submitterUnreadAt: request.submitterUnreadAt,
+    createdAt: request.createdAt,
+    updatedAt: request.updatedAt,
+  };
+}
+
+function presentPublishRequestFeedbackDetail(
+  request: PublishRequestRow,
+  comments: Array<{ id: string; authorHandle: string; authorRole: PublishRequestActionOwner; body: string; createdAt: string }>,
+) {
+  return {
+    ...presentPublishRequestFeedbackSummary(request),
+    repoUrl: request.repoUrl,
+    sourceUrl: request.sourceUrl,
+    requestedRef: request.requestedRef,
+    requestedDescription: request.requestedDescription,
+    validationError: request.validationError,
+    validatedAt: request.validatedAt,
+    reviewedAt: request.reviewedAt,
+    registryEntry: request.registryEntry,
+    comments: comments.map(presentPublishRequestComment),
+  };
+}
+
+function presentStaffPublishRequestFeedbackDetail(
+  request: PublishRequestRow,
+  comments: Array<{ id: string; authorHandle: string; authorRole: PublishRequestActionOwner; body: string; createdAt: string }>,
+) {
+  const { unread: _unread, submitterUnreadAt: _submitterUnreadAt, ...detail } =
+    presentPublishRequestFeedbackDetail(request, comments);
+  return { ...detail, submittedBy: request.submittedBy };
+}
+
+function presentStaffPublishRequest(request: PublishRequestRow) {
+  const { submitterUnreadAt: _submitterUnreadAt, ...publicRequest } = request;
+  return publicRequest;
+}
+
+function presentPublishRequestComment(comment: {
+  id: string;
+  authorHandle: string;
+  authorRole: PublishRequestActionOwner;
+  body: string;
+  createdAt: string;
+}) {
+  return {
+    id: comment.id,
+    authorHandle: comment.authorHandle,
+    authorRole: comment.authorRole,
+    body: comment.body,
+    createdAt: comment.createdAt,
+  };
 }
 
 function requirePublishRequestActor(
@@ -901,7 +1110,11 @@ type PublishValidationOutcome = {
 function publishValidationOutcomeResponse(
   outcome: PublishValidationOutcome,
   successStatus = 200,
+  audience: "submitter" | "staff" = "submitter",
 ) {
+  const publishRequest = audience === "staff"
+    ? presentStaffPublishRequest(outcome.publishRequest)
+    : outcome.publishRequest;
   if (outcome.failure) {
     return json(
       {
@@ -912,17 +1125,18 @@ function publishValidationOutcomeResponse(
         // Validation happens after create, so a failure is still a durable request. Returning the
         // row alongside the non-2xx error lets browser clients render/retry it while scripts can
         // finally trust the HTTP status.
-        publishRequest: outcome.publishRequest,
+        publishRequest,
       },
       { status: outcome.failure.status },
     );
   }
-  return json({ publishRequest: outcome.publishRequest }, { status: successStatus });
+  return json({ publishRequest }, { status: successStatus });
 }
 
 async function validateAndStorePublishRequest(
   id: string,
   release?: AutoApproveRelease,
+  options?: { notifySubmitter?: boolean },
 ): Promise<PublishValidationOutcome> {
   const publishRequest = await store.getPublishRequest(id);
   if (!publishRequest) throw new RequestError(404, "NOT_FOUND", "Publish request not found.");
@@ -932,7 +1146,7 @@ async function validateAndStorePublishRequest(
   let validated: PublishRequestRow;
   try {
     const entry = await validatePublishRequest(publishRequest, config);
-    validated = await store.markPublishRequestValidated(id, entry);
+    validated = await store.markPublishRequestValidated(id, entry, options);
   } catch (error) {
     const message =
       error instanceof RequestError
@@ -948,7 +1162,7 @@ async function validateAndStorePublishRequest(
         ? { status: error.status, code: error.code, message }
         : { status: 500, code: "PUBLISH_VALIDATION_FAILED", message };
     return {
-      publishRequest: await store.markPublishRequestValidationFailed(id, message),
+      publishRequest: await store.markPublishRequestValidationFailed(id, message, options),
       failure,
     };
   }

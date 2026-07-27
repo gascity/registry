@@ -278,11 +278,50 @@ async function rewritePublishRequestForConformance(
   try {
     const rows = await sql`
       UPDATE pack_publish_requests
-      SET id = ${patch.id}, created_at = ${patch.createdAt}, reviewed_at = ${patch.reviewedAt}
+      SET id = ${patch.id},
+          created_at = ${patch.createdAt}::text::timestamptz,
+          reviewed_at = ${patch.reviewedAt}::text::timestamptz
       WHERE id = ${currentId}
       RETURNING id
     `;
     if (rows.length !== 1) throw new Error(`Postgres conformance publish request ${currentId} not found.`);
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+// Places updatedAt ahead of the wall clock to deterministically model the ordinary same-millisecond
+// case where a notification version is one millisecond ahead. A non-notifying write must retain
+// that high-water mark so the next notification cannot reuse an observed version.
+async function seedPublishRequestFeedbackClockForConformance(
+  store: RegistryStore,
+  dbUrl: string | undefined,
+  id: string,
+  updatedAt: string,
+) {
+  if (store.kind === "file") {
+    const internals = store as unknown as {
+      publishRequests: Map<string, PublishRequestRow>;
+      save: () => Promise<void>;
+    };
+    const request = internals.publishRequests.get(id);
+    if (!request) throw new Error(`File conformance publish request ${id} not found.`);
+    internals.publishRequests.set(id, { ...request, updatedAt, submitterUnreadAt: null });
+    await internals.save();
+    return;
+  }
+
+  if (!dbUrl) throw new Error("Postgres conformance lane is missing its database URL.");
+  const sql = postgres(dbUrl, { max: 1 });
+  try {
+    const rows = await sql`
+      UPDATE pack_publish_requests
+      SET updated_at = ${updatedAt}::text::timestamptz,
+          submitter_unread_at = NULL
+      WHERE id = ${id}
+      RETURNING id
+    `;
+    if (rows.length !== 1) throw new Error(`Postgres conformance publish request ${id} not found.`);
   } finally {
     await sql.end({ timeout: 5 });
   }
@@ -650,6 +689,87 @@ for (const lane of lanes) {
       expect((await store.listApprovedPublishRequests()).some((r) => r.id === created.id)).toBe(true);
       expect((await store.listAccountPublishRequests(submitter.id)).some((r) => r.id === created.id)).toBe(true);
       expect((await store.listPublishRequests()).some((r) => r.id === created.id)).toBe(true);
+    });
+
+    test("publish comments and versioned read acknowledgements stay store-parity safe", async () => {
+      const submitter = await store.ensureUser(identity());
+      const staff = await store.ensureUser(identity({ assertedAdmin: true }));
+      const request = await validatedPublishRequest(store, submitter.id, uid("feedback"));
+
+      const staffComment = await store.addPublishRequestComment({
+        publishRequestId: request.id,
+        actorUserId: staff.id,
+        authorRole: "registry",
+        actionRequiredBy: "submitter",
+        body: "  Please clarify the runtime requirement.  ",
+      });
+      expect(staffComment.body).toBe("Please clarify the runtime requirement.");
+      const unread = await store.getPublishRequest(request.id);
+      expect(unread?.actionRequiredBy).toBe("submitter");
+      expect(unread?.submitterUnreadAt).toBeTruthy();
+      expect((await store.listPublishRequestComments(request.id)).map(({ body }) => body))
+        .toEqual(["Please clarify the runtime requirement."]);
+
+      await store.markPublishRequestRead(submitter.id, request.id, "2000-01-01T00:00:00.000Z");
+      expect((await store.getPublishRequest(request.id))?.submitterUnreadAt).toBe(unread?.submitterUnreadAt);
+      await store.markPublishRequestRead(submitter.id, request.id, unread!.submitterUnreadAt!);
+      expect((await store.getPublishRequest(request.id))?.submitterUnreadAt).toBeNull();
+
+      await store.addPublishRequestComment({
+        publishRequestId: request.id,
+        actorUserId: submitter.id,
+        authorRole: "submitter",
+        actionRequiredBy: "registry",
+        body: "The README now explains it.",
+      });
+      expect((await store.getPublishRequest(request.id))?.actionRequiredBy).toBe("registry");
+      expect((await store.listPublishRequestComments(request.id)).map(({ body }) => body))
+        .toEqual(["Please clarify the runtime requirement.", "The README now explains it."]);
+
+      await expect(store.addPublishRequestComment({
+        publishRequestId: request.id,
+        actorUserId: submitter.id,
+        authorRole: "submitter",
+        actionRequiredBy: "registry",
+        body: "😀".repeat(4_001),
+      })).rejects.toBeInstanceOf(StoreValidationError);
+      await store.rejectPublishRequest(staff.id, request.id, "not ready");
+      await expect(store.addPublishRequestComment({
+        publishRequestId: request.id,
+        actorUserId: submitter.id,
+        authorRole: "submitter",
+        actionRequiredBy: "registry",
+        body: "reply",
+      })).rejects.toMatchObject({ code: "REQUEST_TERMINAL", status: 409 });
+    });
+
+    test("staff status changes notify once and advance the unread version", async () => {
+      const submitter = await store.ensureUser(identity());
+      const name = uid("feedback-status");
+      const request = await store.createPublishRequest(submitter.id, publishInput(name), "web_session");
+      const priorUpdatedAt = "2099-01-01T00:00:00.000Z";
+      await seedPublishRequestFeedbackClockForConformance(store, dbUrl, request.id, priorUpdatedAt);
+      const failed = await store.markPublishRequestValidationFailed(
+        request.id,
+        "missing runtime requirement",
+        { notifySubmitter: true },
+      );
+      const firstVersion = failed.submitterUnreadAt!;
+      expect(firstVersion > priorUpdatedAt).toBe(true);
+      await store.markPublishRequestRead(submitter.id, request.id, firstVersion);
+      const repeated = await store.markPublishRequestValidationFailed(
+        request.id,
+        "missing runtime requirement",
+        { notifySubmitter: true },
+      );
+      expect(repeated.submitterUnreadAt).toBeNull();
+      expect(repeated.updatedAt > firstVersion).toBe(true);
+
+      const validated = await store.markPublishRequestValidated(request.id, entry(name), {
+        notifySubmitter: true,
+      });
+      expect(validated.submitterUnreadAt).toBeTruthy();
+      expect(validated.submitterUnreadAt! > repeated.updatedAt).toBe(true);
     });
 
     test("publish lifecycle: reject terminates with a reason and never serves", async () => {
@@ -2325,4 +2445,5 @@ if (pgUrl) {
       }
     });
   });
+
 }

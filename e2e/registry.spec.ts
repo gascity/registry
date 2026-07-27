@@ -1,5 +1,37 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Route } from "@playwright/test";
 import { expectHealthyPage, expectNoHorizontalOverflow, trackRuntimeErrors } from "./runtimeErrors";
+
+function fulfillJson(route: Route, body: unknown, status = 200) {
+  return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+}
+
+function feedbackSummary(id: string, requestedName: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    status: "pending_review",
+    nextStep: "respond_to_feedback",
+    actionRequiredBy: "submitter",
+    requestedName,
+    requestedVersion: "1.0.0",
+    repository: { host: "github.com", owner: "e2e", name: requestedName, fullName: `e2e/${requestedName}` },
+    packPath: ".",
+    commit: "a".repeat(40),
+    unread: false,
+    submitterUnreadAt: null,
+    createdAt: "2026-07-26T10:00:00.000Z",
+    updatedAt: "2026-07-26T11:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function feedbackDetail(id: string, requestedName: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ...feedbackSummary(id, requestedName),
+    repoUrl: `https://github.com/e2e/${requestedName}`,
+    sourceUrl: `https://github.com/e2e/${requestedName}/tree/main`,
+    comments: [], ...overrides,
+  };
+}
 
 test("home exposes copyable registry endpoint and real pack links", async ({ page, context, baseURL }) => {
   const errors = trackRuntimeErrors(page);
@@ -231,12 +263,213 @@ test("dev auth can submit and inspect a publish request", async ({ page }, testI
 
   await page.goto("/account");
   await expect(page.getByRole("heading", { name: "Publish requests" })).toBeVisible();
-  await expect(page.getByText(`${requestedName} 0.1.0`)).toBeVisible();
-  await expect(page.getByText("Pending validation")).toBeVisible();
-  await expect(page.getByText("Manual web form")).toBeVisible();
-  await expect(page.getByText("Claim only", { exact: true })).toBeVisible();
-  await expect(page.getByText(/What happens next:/)).toBeVisible();
+  const request = page.locator(".accountRequestList article").filter({
+    hasText: `${requestedName} 0.1.0`,
+  });
+  await expect(request).toBeVisible();
+  await expect(page.getByText("Pending Validation")).toBeVisible();
+  await expect(page.getByText("Awaiting validation.")).toBeVisible();
+  await expect(request.getByRole("button", { name: "Validate" })).toBeVisible();
   await expectHealthyPage(page, errors);
+});
+
+test("account publish feedback is lazy, durable, accessible, and responsive", async ({ page }, testInfo) => {
+  const stamp = Date.now() + "-" + testInfo.workerIndex;
+  const requestId = "prq-feedback-" + stamp;
+  const otherRequestId = "prq-feedback-other-" + stamp;
+  const maxLengthRequestedName = "p".repeat(64);
+  const requestLabel = maxLengthRequestedName + " 1.0.0";
+  const otherRequestLabel = "other-pack 1.0.0";
+  const unreadVersion = "2026-07-26T11:00:00.000Z";
+  const existingCommentTime = "2026-07-26T10:30:00.000Z";
+  const newCommentTime = "2026-07-26T11:10:00.000Z";
+  let unreadAt: string | null = unreadVersion;
+  let status = "pending_review";
+  let listCalls = 0;
+  let detailCalls = 0;
+  let commentCalls = 0;
+  const readPayloads: unknown[] = [];
+  const comments = [{
+    id: "prc-existing",
+    authorHandle: "registry-reviewer",
+    authorRole: "registry",
+    body: "Please clarify the runtime requirement.",
+    createdAt: existingCommentTime,
+  }];
+  let releaseList!: () => void;
+  let releaseStaleDetail!: () => void;
+  const listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+  const staleDetailGate = new Promise<void>((resolve) => { releaseStaleDetail = resolve; });
+
+  await page.route("**/api/v1/me/publish-requests**", async (route) => {
+    const url = new URL(route.request().url());
+    const method = route.request().method();
+    const summary = feedbackSummary(requestId, maxLengthRequestedName, {
+      status,
+      nextStep: status === "approved" ? "published" : "respond_to_feedback",
+      actionRequiredBy: status === "approved" ? "registry" : "submitter",
+      unread: unreadAt !== null,
+      submitterUnreadAt: unreadAt,
+      updatedAt: status === "approved" ? newCommentTime : unreadVersion,
+    });
+
+    if (method === "GET" && url.pathname.endsWith("/publish-requests")) {
+      listCalls += 1;
+      if (listCalls === 1) {
+        await listGate;
+        await fulfillJson(route, {
+          error: { code: "UNAVAILABLE", message: "Publish requests unavailable." },
+        }, 503);
+        return;
+      }
+      await fulfillJson(route, {
+        publishRequests: [
+          summary,
+          feedbackSummary(otherRequestId, "other-pack", {
+            nextStep: "await_registry_review",
+            actionRequiredBy: "registry",
+          }),
+        ],
+        unreadCount: unreadAt === null ? 0 : 1,
+      });
+      return;
+    }
+
+    if (method === "GET" && url.pathname.endsWith("/" + otherRequestId)) {
+      await fulfillJson(route, {
+        publishRequest: feedbackDetail(otherRequestId, "other-pack", {
+          nextStep: "await_registry_review",
+          actionRequiredBy: "registry",
+          comments: [{
+            id: "prc-other",
+            authorHandle: "other-reviewer",
+            authorRole: "registry",
+            body: "Request B detail stays selected.",
+            createdAt: existingCommentTime,
+          }],
+        }),
+      });
+      return;
+    }
+
+    if (method === "GET") {
+      detailCalls += 1;
+      if (detailCalls === 3) await staleDetailGate;
+      await fulfillJson(route, {
+        publishRequest: feedbackDetail(requestId, maxLengthRequestedName, {
+          ...summary,
+          comments,
+        }),
+      });
+      return;
+    }
+
+    if (method === "POST" && url.pathname.endsWith("/read")) {
+      const payload = route.request().postDataJSON();
+      readPayloads.push(payload);
+      if (payload.observedUnreadAt === unreadAt) unreadAt = null;
+      await route.fulfill({ status: 204 });
+      return;
+    }
+
+    if (method === "POST" && url.pathname.endsWith("/comments")) {
+      commentCalls += 1;
+      const body = route.request().postDataJSON().body;
+      const comment = {
+        id: "prc-reply-" + commentCalls,
+        authorHandle: "feedback-author",
+        authorRole: "submitter",
+        body,
+        createdAt: newCommentTime,
+      };
+      comments.push(comment);
+      if (commentCalls === 2) status = "approved";
+      await fulfillJson(route, { comment }, 201);
+      return;
+    }
+
+    await route.fulfill({ status: 500, body: "Unexpected feedback request." });
+  });
+
+  await page.setViewportSize({ width: 320, height: 1100 });
+  await page.goto("/api/dev/sign-in?handle=feedback-" + stamp + "&redirect=/account");
+
+  const listLoading = page.getByRole("status").filter({ hasText: "Loading publish requests…" });
+  await expect(listLoading).toHaveAttribute("aria-busy", "true");
+  releaseList();
+  await expect(page.getByRole("alert")).toContainText("Publish requests unavailable.");
+  await page.getByRole("button", { name: "Retry publish requests" }).click();
+
+  await expect(page.getByRole("heading", { name: "Publish requests (1 unread)" })).toBeVisible();
+  await expect(page.locator(".publishFeedbackBanner")).toHaveCount(0);
+  await expect(page.getByRole("tab")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
+
+  const request = page.locator(".accountRequestList > article").filter({ hasText: requestLabel });
+  await expect(request).toHaveCount(1);
+  await expect(request.getByText("Unread", { exact: true })).toBeVisible();
+  expect(detailCalls).toBe(0);
+
+  const openConversation = request.getByRole("button", {
+    name: "Open conversation for " + requestLabel,
+  });
+  const conversationId = await openConversation.getAttribute("aria-controls");
+  expect(conversationId).toBeTruthy();
+  await openConversation.click();
+  const conversation = page.getByLabel("Conversation for " + requestLabel);
+  await expect(conversation).toHaveAttribute("id", conversationId ?? "");
+  await expect(conversation.getByText("Please clarify the runtime requirement.")).toBeVisible();
+  await expect(conversation.locator("time")).toHaveAttribute("datetime", existingCommentTime);
+  await expect.poll(() => readPayloads).toEqual([{ observedUnreadAt: unreadVersion }]);
+  await expect.poll(() => listCalls).toBe(3);
+  await expect(page.getByRole("heading", { name: "Publish requests", exact: true })).toBeVisible();
+
+  const reply = page.getByLabel("Reply to " + requestLabel);
+  await expectNoHorizontalOverflow(page);
+  await reply.fill("😀");
+  await expect(page.getByText("3999 characters remaining")).toBeVisible();
+  await reply.fill("The runtime requirement is now documented.");
+  const detailCallsBeforeReply = detailCalls;
+  const listCallsBeforeReply = listCalls;
+  await page.getByRole("button", { name: "Send reply" }).click();
+
+  const newComment = page.locator(".publishComment").filter({ hasText: "The runtime requirement is now documented." });
+  await expect(newComment).toBeFocused();
+  await expect(newComment.locator("time")).toHaveAttribute("datetime", newCommentTime);
+  expect(commentCalls).toBe(1);
+  await expect.poll(() => detailCalls).toBe(detailCallsBeforeReply + 1);
+  await expect.poll(() => listCalls).toBe(listCallsBeforeReply + 1);
+
+  await reply.fill("A second reply with a delayed detail refresh.");
+  const detailCallsBeforeRace = detailCalls;
+  const listCallsBeforeRace = listCalls;
+  await page.getByRole("button", { name: "Send reply" }).click();
+  await expect.poll(() => detailCalls).toBe(detailCallsBeforeRace + 1);
+
+  const otherRequest = page.locator(".accountRequestList > article").filter({
+    hasText: otherRequestLabel,
+  });
+  await otherRequest.getByRole("button", {
+    name: "Open conversation for " + otherRequestLabel,
+  }).click();
+  const otherConversation = page.getByLabel("Conversation for " + otherRequestLabel);
+  await expect(otherConversation.getByText("Request B detail stays selected.")).toBeVisible();
+  releaseStaleDetail();
+  await expect.poll(() => listCalls).toBe(listCallsBeforeRace + 1);
+  await expect(otherConversation.getByText("Request B detail stays selected.")).toBeVisible();
+
+  await otherRequest.getByRole("button", {
+    name: "Close conversation for " + otherRequestLabel,
+  }).click();
+  await request.getByRole("button", {
+    name: "Open conversation for " + requestLabel,
+  }).click();
+  await expect(page.getByLabel("Conversation for " + requestLabel)).toContainText(
+    "This request is terminal and cannot receive replies.",
+  );
+  await expect(page.getByLabel("Reply to " + requestLabel)).toHaveCount(0);
+
+  await expectNoHorizontalOverflow(page);
 });
 
 test("dev auth publish page exposes GitHub import and manual fallback", async ({ page }, testInfo) => {
@@ -388,6 +621,84 @@ test("dev admin can open the publish review queue", async ({ page }, testInfo) =
   await expect(page.getByRole("heading", { name: "Publish requests" })).toBeVisible();
   // The shell rail exposes the admin-gated "Review" section as a nav button.
   await expect(page.getByRole("button", { name: "Review" })).toBeVisible();
+  await expectHealthyPage(page, errors);
+});
+
+test("admin opens durable publish conversation and assigns the next actor with a comment", async ({ page }, testInfo) => {
+  const errors = trackRuntimeErrors(page);
+  const stamp = `${Date.now()}-${testInfo.workerIndex}`;
+  const requestId = `prq-admin-feedback-${stamp}`;
+  let submittedComment: { body: string; actionRequiredBy: string } | null = null;
+  let queueCalls = 0;
+  let detailCalls = 0;
+  const comments = [{
+    id: "prc-existing",
+    authorHandle: "pack-author",
+    authorRole: "submitter",
+    body: "The runtime requirement is documented in README.md.",
+    createdAt: "2026-07-26T10:00:00.000Z",
+  }];
+  const request = {
+    id: requestId,
+    status: "pending_review",
+    nextStep: "await_registry_review",
+    actionRequiredBy: "registry",
+    requestedName: "staff-feedback-pack",
+    requestedVersion: "2.0.0",
+    repository: { host: "github.com", owner: "e2e", name: "staff-feedback", fullName: "e2e/staff-feedback" },
+    repoUrl: "https://github.com/e2e/staff-feedback",
+    sourceUrl: "https://github.com/e2e/staff-feedback/tree/main",
+    packPath: ".",
+    commit: "b".repeat(40),
+    createdAt: "2026-07-26T09:00:00.000Z",
+    updatedAt: "2026-07-26T10:00:00.000Z",
+    submittedBy: { id: "usr-submitter", handle: "pack-author", displayName: "Pack Author", role: "user" },
+    submissionMethod: "github_import",
+  };
+
+  await page.route("**/api/admin/publish-requests", (route) => {
+    queueCalls += 1;
+    return fulfillJson(route, { publishRequests: [request] });
+  });
+  await page.route(`**/api/v1/admin/publish-requests/${requestId}**`, async (route) => {
+    if (route.request().method() === "GET") {
+      detailCalls += 1;
+      await fulfillJson(route, { publishRequest: { ...request, comments } });
+      return;
+    }
+    submittedComment = route.request().postDataJSON();
+    const comment = {
+      id: "prc-new",
+      authorHandle: "admin",
+      authorRole: "registry",
+      body: submittedComment?.body ?? "",
+      createdAt: "2026-07-26T11:00:00.000Z",
+    };
+    comments.push(comment);
+    await fulfillJson(route, { comment }, 201);
+  });
+
+  await page.setViewportSize({ width: 390, height: 1100 });
+  await page.goto(`/api/dev/sign-in?handle=admin-feedback-${stamp}&role=admin&redirect=/admin/publish-requests`);
+  await page.getByRole("button", { name: "Open conversation for staff-feedback-pack 2.0.0" }).click();
+  await expect(page.getByText("The runtime requirement is documented in README.md.")).toBeVisible();
+  await expect(page.locator(".publishComment time")).toHaveAttribute(
+    "datetime",
+    "2026-07-26T10:00:00.000Z",
+  );
+  await page.getByLabel("Staff comment for staff-feedback-pack 2.0.0").fill("Thanks. Please make one final clarification.");
+  await page.getByLabel("Next action for staff-feedback-pack 2.0.0").selectOption("submitter");
+  await page.getByRole("button", { name: "Send comment for staff-feedback-pack 2.0.0" }).click();
+  await expect(
+    page.locator(".publishComment").filter({ hasText: "Thanks. Please make one final clarification." }),
+  ).toBeFocused();
+  expect(submittedComment).toEqual({
+    body: "Thanks. Please make one final clarification.",
+    actionRequiredBy: "submitter",
+  });
+  expect(detailCalls).toBe(2);
+  expect(queueCalls).toBe(1);
+  await expectNoHorizontalOverflow(page);
   await expectHealthyPage(page, errors);
 });
 

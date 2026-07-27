@@ -20,6 +20,7 @@ import {
 import { ApiError, apiRequest, type AuthState, type PublishRequestRow } from "../lib/api";
 import { nameClaimReleaseBlocker } from "../lib/packName";
 import { PublishRequestGuidance } from "../components/PublishRequestGuidance";
+import { AdminPublishConversation } from "../components/AdminPublishConversation";
 
 export function AdminPublishPage({
   auth,
@@ -44,6 +45,7 @@ export function AdminPublishPage({
   const [namePinBlocked, setNamePinBlocked] = useState<Record<string, boolean>>({});
   const [releaseNameClaims, setReleaseNameClaims] = useState<Record<string, boolean>>({});
   const [workingRequestId, setWorkingRequestId] = useState<string | null>(null);
+  const [queueLoading, setQueueLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const canReview = auth.user?.role === "admin" || auth.user?.role === "moderator";
@@ -92,6 +94,7 @@ export function AdminPublishPage({
 
   async function refreshQueue() {
     if (!auth.csrfToken) return;
+    setQueueLoading(true);
     try {
       const result = await apiRequest<{ publishRequests: PublishRequestRow[] }>(
         "/api/admin/publish-requests",
@@ -102,6 +105,8 @@ export function AdminPublishPage({
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load publish requests.");
+    } finally {
+      setQueueLoading(false);
     }
   }
 
@@ -194,17 +199,24 @@ export function AdminPublishPage({
     >
       {error ? (
         <Text className="formError" role="alert">
-          {error}
+          {error}{" "}
+          <Button variant="ghost" size="sm" onClick={() => void refreshQueue()}>
+            Retry publish requests
+          </Button>
         </Text>
       ) : null}
 
       <Card className="accountPanel">
-        {publishRequests.length === 0 ? (
+        {queueLoading && publishRequests.length === 0 ? (
+          <Text role="status" aria-busy="true" tone="muted">
+            Loading publish requests…
+          </Text>
+        ) : !error && publishRequests.length === 0 ? (
           <Text className="mutedText" tone="muted">
             No publish requests yet.
           </Text>
-        ) : (
-          <div className="accountRequestList">
+        ) : publishRequests.length > 0 ? (
+          <div className="accountRequestList" aria-busy={queueLoading}>
             {publishRequests.map((request) => (
               <article key={request.id}>
                 <div className="requestTitle">
@@ -236,6 +248,10 @@ export function AdminPublishPage({
                   <p className="formError">Validation: {request.validationError}</p>
                 ) : null}
                 {request.statusReason ? <p>{request.statusReason}</p> : null}
+                <AdminPublishConversation
+                  request={request}
+                  csrfToken={auth.csrfToken}
+                />
                 <div className="requestActions">
                   {(request.status === "pending_validation" ||
                     request.status === "validation_failed") ? (
@@ -446,7 +462,7 @@ export function AdminPublishPage({
               </article>
             ))}
           </div>
-        )}
+        ) : null}
       </Card>
     </AppPage>
   );
