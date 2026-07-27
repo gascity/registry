@@ -179,6 +179,15 @@
   gap: var(--gc-space-3);
 }
 
+.accountRequestList {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.accountRequestList article {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .accountReviewList article,
 .accountTokenList article,
 .accountRequestList article {
@@ -699,6 +708,134 @@
   display: grid;
   align-content: start;
   gap: var(--gc-space-4);
+}
+
+.publishFeedbackPanel {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.publishFeedbackUnread {
+  color: var(--color-text-bright);
+  font-weight: 700;
+}
+
+.publishFeedbackPanel .requestTitle strong,
+.publishFeedbackPanel .accountRequestList > article > span,
+.publishFeedbackPanel .publishReplyForm label,
+.publishConversationToggle,
+.publishConversationToggle .gc-btn__label {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.publishComments,
+.publishReplyForm,
+.publishConversation {
+  display: grid;
+  gap: var(--gc-space-3);
+}
+
+.publishConversation {
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--gc-space-4);
+}
+
+.publishConversation h3,
+.publishConversation p {
+  margin: 0;
+}
+
+.publishComment {
+  display: grid;
+  gap: var(--gc-space-2);
+  border-left: 2px solid var(--color-border-strong);
+  background: var(--color-bg-inset);
+  padding: var(--gc-space-3);
+}
+
+.publishComment > div {
+  display: flex;
+  align-items: center;
+  gap: var(--gc-space-2);
+  flex-wrap: wrap;
+  color: var(--color-text-muted);
+  font-size: var(--gc-text-sm);
+}
+
+.publishComment > div > span::before {
+  content: "·";
+  margin-right: var(--gc-space-2);
+}
+
+.publishComment p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.publishReplyForm label {
+  color: var(--color-text-primary);
+  font-weight: 700;
+}
+
+.publishReplyForm textarea {
+  width: 100%;
+  min-height: 110px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+  padding: var(--gc-space-3);
+  resize: vertical;
+}
+
+.publishReplyForm textarea:focus {
+  border-color: var(--color-focus-ring);
+}
+
+.adminPublishConversation {
+  display: grid;
+  gap: var(--gc-space-3);
+  min-width: 0;
+}
+
+.accountRequestList article,
+.publishConversation,
+.publishConversation > *,
+.publishReplyForm,
+.publishReplyForm > *,
+.publishComment,
+.publishComment > *,
+.adminCommentForm > *,
+.adminPublishConversation > * {
+  min-width: 0;
+}
+
+.publishComment strong,
+.publishComment time,
+.publishComment p {
+  overflow-wrap: anywhere;
+}
+
+.adminPublishConversation > .gc-btn,
+.adminCommentForm .gc-btn {
+  width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.adminPublishConversation > .gc-btn .gc-btn__label,
+.adminCommentForm .gc-btn .gc-btn__label {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.adminCommentForm select {
+  width: 100%;
 }
 
 /* The section <h2> we hand to <CardHeader title> so the heading role/name the e2e

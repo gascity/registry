@@ -1,15 +1,4 @@
-import {
-  CheckCircle2,
-  Copy,
-  GitCommitHorizontal,
-  GitPullRequest,
-  KeyRound,
-  RefreshCw,
-  Save,
-  Star,
-  Trash2,
-  UserRound,
-} from "lucide-react";
+import { Copy, KeyRound, Save, Star, Trash2, UserRound } from "lucide-react";
 import type React from "react";
 import { useEffect, useState } from "react";
 import {
@@ -31,7 +20,7 @@ import {
   type PublishRequestRow,
   type ReviewRow,
 } from "../lib/api";
-import { PublishRequestGuidance } from "../components/PublishRequestGuidance";
+import { PublishFeedbackPanel } from "../components/PublishFeedbackPanel";
 
 export function AccountPage({
   auth,
@@ -47,7 +36,6 @@ export function AccountPage({
   const [displayName, setDisplayName] = useState("");
   const [handle, setHandle] = useState("");
   const [reviews, setReviews] = useState<ReviewRow[]>([]);
-  const [publishRequests, setPublishRequests] = useState<PublishRequestRow[]>([]);
   const [apiTokens, setApiTokens] = useState<ApiTokenRow[]>([]);
   const [tokenLabel, setTokenLabel] = useState("GC CLI token");
   const [createdToken, setCreatedToken] = useState<ApiTokenCreateResult | null>(null);
@@ -70,13 +58,6 @@ export function AccountPage({
     void apiRequest<{ reviews: ReviewRow[] }>("/api/account/reviews", {}, auth.csrfToken)
       .then((result) => setReviews(result.reviews))
       .catch(() => setReviews([]));
-    void apiRequest<{ publishRequests: PublishRequestRow[] }>(
-      "/api/account/publish-requests",
-      {},
-      auth.csrfToken,
-    )
-      .then((result) => setPublishRequests(result.publishRequests))
-      .catch(() => setPublishRequests([]));
     void apiRequest<{ tokens: ApiTokenRow[] }>("/api/account/api-tokens", {}, auth.csrfToken)
       .then((result) => setApiTokens(result.tokens))
       .catch(() => setApiTokens([]));
@@ -123,16 +104,6 @@ export function AccountPage({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save profile.");
     }
-  };
-
-  const refreshPublishRequests = async () => {
-    if (!auth.csrfToken) return;
-    const result = await apiRequest<{ publishRequests: PublishRequestRow[] }>(
-      "/api/account/publish-requests",
-      {},
-      auth.csrfToken,
-    );
-    setPublishRequests(result.publishRequests);
   };
 
   const refreshApiTokens = async () => {
@@ -199,9 +170,6 @@ export function AccountPage({
         { method: "POST" },
         auth.csrfToken,
       );
-      setPublishRequests((requests) =>
-        requests.map((request) => (request.id === id ? result.publishRequest : request)),
-      );
       setPublishNotice(
         result.publishRequest.status === "pending_review"
           ? "Publish request validated and queued for review."
@@ -209,16 +177,9 @@ export function AccountPage({
       );
     } catch (err) {
       if (err instanceof ApiError && err.publishRequest) {
-        const failedRequest = err.publishRequest;
-        setPublishRequests((requests) =>
-          requests.map((request) =>
-            request.id === failedRequest.id ? failedRequest : request,
-          ),
-        );
         setPublishError(`Validation failed: ${err.message}`);
       } else {
         setPublishError(err instanceof Error ? err.message : "Unable to validate publish request.");
-        await refreshPublishRequests().catch(() => {});
       }
     } finally {
       setWorkingRequestId(null);
@@ -233,6 +194,13 @@ export function AccountPage({
       subtitle="Persistent registry state is keyed to your Gas City account identity."
     >
       <div className="accountGrid">
+        <PublishFeedbackPanel
+          csrfToken={auth.csrfToken}
+          validatingRequestId={workingRequestId}
+          validationNotice={publishNotice}
+          validationError={publishError}
+          onValidate={validatePublishRequest}
+        />
         <Card className="accountPanel">
           <CardHeader title={<h2 className="cardTitleHeading">Profile</h2>} icon={<UserRound size={16} />} />
           <form onSubmit={(event) => void saveProfile(event)}>
@@ -363,66 +331,6 @@ export function AccountPage({
           )}
         </Card>
 
-        <Card className="accountPanel">
-          <CardHeader title={<h2 className="cardTitleHeading">Publish requests</h2>} icon={<GitPullRequest size={16} />} />
-          {publishNotice ? <p className="formNotice">{publishNotice}</p> : null}
-          {publishError ? (
-            <p className="formError" role="alert">
-              {publishError}
-            </p>
-          ) : null}
-          {publishRequests.length === 0 ? (
-            <Text className="mutedText" tone="muted">
-              No publish requests yet.
-            </Text>
-          ) : (
-            <div className="accountRequestList">
-              {publishRequests.map((request) => (
-                <article key={request.id}>
-                  <div className="requestTitle">
-                    <strong>
-                      {request.requestedName} {request.requestedVersion}
-                    </strong>
-                    <Badge status={statusStatus(request.status)}>
-                      {statusLabel(request.status)}
-                    </Badge>
-                  </div>
-                  <span>
-                    <GitPullRequest size={13} /> {request.repository.fullName}
-                    {request.packPath === "." ? "" : `/${request.packPath}`}
-                  </span>
-                  <span>
-                    <GitCommitHorizontal size={13} /> {request.commit.slice(0, 12)}
-                  </span>
-                  <PublishRequestGuidance request={request} />
-                  {request.registryEntry ? (
-                    <div className="requestPreview">
-                      <span>
-                        <CheckCircle2 size={13} /> {request.registryEntry.release.hash}
-                      </span>
-                      <p>{request.registryEntry.description}</p>
-                    </div>
-                  ) : null}
-                  {request.validationError ? (
-                    <p className="formError">Validation: {request.validationError}</p>
-                  ) : null}
-                  {request.status === "pending_validation" || request.status === "validation_failed" ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      iconStart={<RefreshCw size={14} />}
-                      loading={workingRequestId === request.id}
-                      onClick={() => void validatePublishRequest(request.id)}
-                    >
-                      {workingRequestId === request.id ? "Validating" : "Validate"}
-                    </Button>
-                  ) : null}
-                  {request.statusReason ? <p>{request.statusReason}</p> : null}
-                </article>
-              ))}
-            </div>
-          )}
-        </Card>
       </div>
     </AppPage>
   );
@@ -434,35 +342,4 @@ function formatDate(value: string) {
     day: "numeric",
     year: "numeric",
   });
-}
-
-function statusLabel(status: PublishRequestRow["status"]) {
-  switch (status) {
-    case "pending_validation":
-      return "Pending validation";
-    case "validation_failed":
-      return "Validation failed";
-    case "pending_review":
-      return "Pending review";
-    case "approved":
-      return "Approved";
-    case "rejected":
-      return "Rejected";
-    case "withdrawn":
-      return "Withdrawn";
-  }
-}
-
-function statusStatus(status: PublishRequestRow["status"]) {
-  switch (status) {
-    case "approved":
-      return "success" as const;
-    case "rejected":
-    case "validation_failed":
-      return "danger" as const;
-    case "withdrawn":
-      return "warn" as const;
-    default:
-      return "info" as const;
-  }
 }

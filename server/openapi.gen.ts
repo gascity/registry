@@ -308,6 +308,123 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/publish-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List my publish-request feedback
+         * @description Browser session or personal Registry bearer token. GitHub Actions publish tokens are denied.
+         */
+        get: operations["listMyPublishRequestFeedback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/publish-requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get my publish-request feedback */
+        get: operations["getMyPublishRequestFeedback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/publish-requests/{id}/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add a submitter comment
+         * @description Browser session plus CSRF, or personal Registry bearer token. Only non-terminal requests may be commented on.
+         */
+        post: operations["commentOnMyPublishRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/publish-requests/{id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark a publish request read
+         * @description Browser session plus CSRF, or personal Registry bearer token. The unread version is cleared only when observedUnreadAt exactly matches.
+         */
+        post: operations["markMyPublishRequestRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/publish-requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a staff publish-request conversation
+         * @description Administrator or moderator browser session only; no CSRF is required for this safe read.
+         */
+        get: operations["getAdminPublishRequestFeedback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/publish-requests/{id}/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add a staff publish-request comment
+         * @description Administrator or moderator browser session plus CSRF only.
+         */
+        post: operations["commentOnAdminPublishRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/account/publish-requests": {
         parameters: {
             query?: never;
@@ -512,6 +629,91 @@ export interface components {
             /** @enum {string} */
             sourceKind: "git";
             release: components["schemas"]["PublishRegistryRelease"];
+        };
+        /** @enum {string} */
+        PublishRequestStatus: "pending_validation" | "validation_failed" | "pending_review" | "approved" | "rejected" | "withdrawn";
+        /** @enum {string} */
+        PublishRequestActionOwner: "submitter" | "registry";
+        /** @enum {string} */
+        PublishRequestNextStep: "await_validation" | "fix_validation" | "respond_to_feedback" | "await_registry_review" | "published" | "resubmit";
+        PublishRequestComment: {
+            id: string;
+            authorHandle: string;
+            authorRole: components["schemas"]["PublishRequestActionOwner"];
+            /** @description Plain text only; clients must not render it as HTML. */
+            body: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Fields shared by owner summaries and staff detail. */
+        PublishRequestFeedbackCoreSummary: {
+            id: string;
+            status: components["schemas"]["PublishRequestStatus"];
+            nextStep: components["schemas"]["PublishRequestNextStep"];
+            actionRequiredBy?: components["schemas"]["PublishRequestActionOwner"];
+            requestedName: string;
+            requestedVersion: string;
+            repository: {
+                /** @enum {string} */
+                host: "github.com";
+                owner: string;
+                name: string;
+                fullName: string;
+            };
+            packPath: string;
+            commit: string;
+            statusReason?: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        /** @description Owner-facing summary. The unread version timestamps let the owner acknowledge exactly the update they observed. */
+        PublishRequestFeedbackSummary: components["schemas"]["PublishRequestFeedbackCoreSummary"] & {
+            unread: boolean;
+            /** Format: date-time */
+            submitterUnreadAt: string | null;
+        };
+        PublishRequestFeedbackDetailFields: {
+            repoUrl: string;
+            sourceUrl: string;
+            requestedRef?: string;
+            requestedDescription?: string;
+            validationError?: string;
+            /** Format: date-time */
+            validatedAt?: string;
+            /** Format: date-time */
+            reviewedAt?: string;
+            registryEntry?: components["schemas"]["PublishRegistryEntry"];
+            comments: components["schemas"]["PublishRequestComment"][];
+        };
+        PublishRequestFeedbackDetail: components["schemas"]["PublishRequestFeedbackSummary"] & components["schemas"]["PublishRequestFeedbackDetailFields"];
+        /** @description Staff detail snapshot. Submitter unread/read state is private and is not part of this schema. */
+        StaffPublishRequestFeedbackDetail: components["schemas"]["PublishRequestFeedbackCoreSummary"] & components["schemas"]["PublishRequestFeedbackDetailFields"] & {
+            submittedBy: components["schemas"]["PublicUser"];
+        };
+        PublishRequestFeedbackListResponse: {
+            publishRequests: components["schemas"]["PublishRequestFeedbackSummary"][];
+            unreadCount: number;
+        };
+        PublishRequestFeedbackDetailResponse: {
+            publishRequest: components["schemas"]["PublishRequestFeedbackDetail"];
+        };
+        AdminPublishRequestFeedbackDetailResponse: {
+            publishRequest: components["schemas"]["StaffPublishRequestFeedbackDetail"];
+        };
+        PublishRequestCommentInput: {
+            body: string;
+        };
+        StaffPublishRequestCommentInput: components["schemas"]["PublishRequestCommentInput"] & {
+            actionRequiredBy: components["schemas"]["PublishRequestActionOwner"];
+        };
+        PublishRequestCommentMutationResponse: {
+            comment: components["schemas"]["PublishRequestComment"];
+        };
+        PublishRequestReadInput: {
+            /** Format: date-time */
+            observedUnreadAt: string;
         };
         PublishRequest: {
             id: string;
@@ -1164,6 +1366,506 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PublishValidationErrorResponse"];
+                };
+            };
+        };
+    };
+    listMyPublishRequestFeedback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishRequestFeedbackListResponse"];
+                };
+            };
+            /** @description Unauthenticated. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Token scope denied. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Per-user feedback read limit exceeded. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal server error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    getMyPublishRequestFeedback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishRequestFeedbackDetailResponse"];
+                };
+            };
+            /** @description Unauthenticated. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Token scope denied. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Missing or non-owned request. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Per-user feedback read limit exceeded. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal server error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    commentOnMyPublishRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequestCommentInput"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishRequestCommentMutationResponse"];
+                };
+            };
+            /** @description Malformed JSON body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthenticated. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description CSRF validation or token scope denied. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Missing or non-owned request. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description `REQUEST_TERMINAL` when the request is no longer mutable, or `STATE_CONFLICT` when its state changes during the atomic mutation. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description JSON body exceeds the transport byte limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Comment is empty, contains an unsupported character, or exceeds 4,000 Unicode characters. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Per-user feedback mutation limit exceeded. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal server error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    markMyPublishRequestRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequestReadInput"];
+            };
+        };
+        responses: {
+            /** @description Acknowledged. A stale or fabricated version is an idempotent no-op. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed JSON body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthenticated. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description CSRF validation or token scope denied. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Missing or non-owned request. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description JSON body exceeds the transport byte limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid timestamp. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Per-user feedback mutation limit exceeded. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal server error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    getAdminPublishRequestFeedback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK. Submitter unread/read timestamps are intentionally omitted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminPublishRequestFeedbackDetailResponse"];
+                };
+            };
+            /** @description Unauthenticated. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Staff role required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Per-user feedback read limit exceeded. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal server error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    commentOnAdminPublishRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StaffPublishRequestCommentInput"];
+            };
+        };
+        responses: {
+            /** @description Created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishRequestCommentMutationResponse"];
+                };
+            };
+            /** @description Malformed JSON body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthenticated. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Staff role or CSRF validation failed. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description `REQUEST_TERMINAL` when the request is no longer mutable, or `STATE_CONFLICT` when its state changes during the atomic mutation. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description JSON body exceeds the transport byte limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Comment/action owner is invalid or the comment exceeds 4,000 Unicode characters. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Per-user feedback mutation limit exceeded. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal server error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
         };

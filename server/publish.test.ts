@@ -247,6 +247,7 @@ describe("postgres publish request queries", () => {
     // The audited justification for a claim-only override is folded into the approve audit.
     expect(approveBody).toContain("ownershipOverrideReason: options?.ownershipOverrideReason");
   });
+
 });
 
 describe("publish request validation", () => {
@@ -309,6 +310,7 @@ describe("publish request validation", () => {
       requestedRef: "refs/tags/v1.2.3",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      submitterUnreadAt: null,
       submittedBy: {
         id: "usr_test",
         handle: "publisher",
@@ -360,6 +362,7 @@ describe("publish request validation", () => {
       requestedVersion: "1.0.0",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      submitterUnreadAt: null,
       submittedBy: { id: "usr_attacker", handle: "attacker", displayName: "Attacker", role: "user" as const },
     };
     const promise = validatePublishRequestForRegistry(request, testConfig(), {

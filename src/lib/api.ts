@@ -151,6 +151,81 @@ export type PublishRequestRow = {
   submissionMethod?: PublishSubmissionMethod;
   sourceGithubRepositoryId?: string;
   sourceGithubOwnerId?: string;
+  actionRequiredBy?: PublishRequestActionOwner;
+  submitterUnreadAt?: string | null;
+};
+
+export type PublishRequestActionOwner = "submitter" | "registry";
+
+export type PublishRequestNextStep =
+  | "await_validation"
+  | "fix_validation"
+  | "respond_to_feedback"
+  | "await_registry_review"
+  | "published"
+  | "resubmit";
+
+export type PublishRequestComment = {
+  id: string;
+  authorHandle: string;
+  authorRole: "submitter" | "registry";
+  body: string;
+  createdAt: string;
+};
+
+export type PublishRequestFeedbackCoreSummary = {
+  id: string;
+  status: PublishRequestStatus;
+  nextStep: PublishRequestNextStep | (string & {});
+  actionRequiredBy?: PublishRequestActionOwner;
+  requestedName: string;
+  requestedVersion: string;
+  repository: {
+    host: "github.com";
+    owner: string;
+    name: string;
+    fullName: string;
+  };
+  packPath: string;
+  commit: string;
+  statusReason?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PublishRequestFeedbackSummary = PublishRequestFeedbackCoreSummary & {
+  unread: boolean;
+  submitterUnreadAt: string | null;
+};
+
+export type PublishRequestFeedbackDetailFields = {
+  repoUrl: string;
+  sourceUrl: string;
+  requestedRef?: string;
+  requestedDescription?: string;
+  validationError?: string;
+  validatedAt?: string;
+  reviewedAt?: string;
+  registryEntry?: PublishRegistryEntry;
+  comments: PublishRequestComment[];
+};
+
+export type PublishRequestFeedbackDetail =
+  PublishRequestFeedbackSummary & PublishRequestFeedbackDetailFields;
+
+export type StaffPublishRequestFeedbackDetail =
+  PublishRequestFeedbackCoreSummary &
+  PublishRequestFeedbackDetailFields & {
+    submittedBy: PublicUser;
+  };
+
+export type PublishRequestCommentMutationResponse = {
+  comment: PublishRequestComment;
+};
+
+export type PublishRequestFeedbackList = {
+  publishRequests: PublishRequestFeedbackSummary[];
+  unreadCount: number;
 };
 
 export type GitHubPublishCandidate = {
@@ -283,6 +358,73 @@ export async function apiRequest<T>(
     throw new ApiError(response.status, code, message, publishRequest);
   }
   return data as T;
+}
+
+export function listPublishRequestFeedback(
+  csrfToken?: string | null,
+  signal?: AbortSignal,
+) {
+  return apiRequest<PublishRequestFeedbackList>(
+    "/api/v1/me/publish-requests",
+    { signal },
+    csrfToken,
+  );
+}
+
+export function getPublishRequestFeedback(
+  id: string,
+  csrfToken?: string | null,
+  signal?: AbortSignal,
+) {
+  return apiRequest<{ publishRequest: PublishRequestFeedbackDetail }>(
+    `/api/v1/me/publish-requests/${encodeURIComponent(id)}`,
+    { signal },
+    csrfToken,
+  );
+}
+
+export function replyToPublishRequestFeedback(
+  id: string,
+  body: string,
+  csrfToken?: string | null,
+) {
+  return apiRequest<PublishRequestCommentMutationResponse>(
+    `/api/v1/me/publish-requests/${encodeURIComponent(id)}/comments`,
+    { method: "POST", body: JSON.stringify({ body }) },
+    csrfToken,
+  );
+}
+
+export function markPublishRequestFeedbackRead(
+  id: string,
+  observedUnreadAt: string,
+  csrfToken?: string | null,
+) {
+  return apiRequest<void>(
+    `/api/v1/me/publish-requests/${encodeURIComponent(id)}/read`,
+    { method: "POST", body: JSON.stringify({ observedUnreadAt }) },
+    csrfToken,
+  );
+}
+
+export function addAdminPublishRequestComment(
+  id: string,
+  body: string,
+  actionRequiredBy: PublishRequestActionOwner,
+  csrfToken?: string | null,
+) {
+  return apiRequest<PublishRequestCommentMutationResponse>(
+    `/api/v1/admin/publish-requests/${encodeURIComponent(id)}/comments`,
+    { method: "POST", body: JSON.stringify({ body, actionRequiredBy }) },
+    csrfToken,
+  );
+}
+
+export function getAdminPublishRequestFeedback(id: string, signal?: AbortSignal) {
+  return apiRequest<{ publishRequest: StaffPublishRequestFeedbackDetail }>(
+    `/api/v1/admin/publish-requests/${encodeURIComponent(id)}`,
+    { signal },
+  );
 }
 
 export function currentPath() {

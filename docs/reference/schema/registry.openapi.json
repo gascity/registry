@@ -719,6 +719,141 @@
         }
       }
     },
+    "/api/v1/me/publish-requests": {
+      "get": {
+        "operationId": "listMyPublishRequestFeedback",
+        "summary": "List my publish-request feedback",
+        "description": "Browser session or personal Registry bearer token. GitHub Actions publish tokens are denied.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [{ "cookieSession": [] }, { "gcrToken": [] }],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishRequestFeedbackListResponse" } } } },
+          "401": { "description": "Unauthenticated.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "403": { "description": "Token scope denied.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "429": { "description": "Per-user feedback read limit exceeded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/api/v1/me/publish-requests/{id}": {
+      "get": {
+        "operationId": "getMyPublishRequestFeedback",
+        "summary": "Get my publish-request feedback",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [{ "cookieSession": [] }, { "gcrToken": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishRequestFeedbackDetailResponse" } } } },
+          "401": { "description": "Unauthenticated.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "403": { "description": "Token scope denied.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Missing or non-owned request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "429": { "description": "Per-user feedback read limit exceeded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/api/v1/me/publish-requests/{id}/comments": {
+      "post": {
+        "operationId": "commentOnMyPublishRequest",
+        "summary": "Add a submitter comment",
+        "description": "Browser session plus CSRF, or personal Registry bearer token. Only non-terminal requests may be commented on.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [{ "cookieSession": [], "csrfToken": [] }, { "gcrToken": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishRequestCommentInput" } } } },
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishRequestCommentMutationResponse" } } } },
+          "400": { "description": "Malformed JSON body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "401": { "description": "Unauthenticated.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "403": { "description": "CSRF validation or token scope denied.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Missing or non-owned request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "`REQUEST_TERMINAL` when the request is no longer mutable, or `STATE_CONFLICT` when its state changes during the atomic mutation.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "413": { "description": "JSON body exceeds the transport byte limit.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "422": { "description": "Comment is empty, contains an unsupported character, or exceeds 4,000 Unicode characters.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "429": { "description": "Per-user feedback mutation limit exceeded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/api/v1/me/publish-requests/{id}/read": {
+      "post": {
+        "operationId": "markMyPublishRequestRead",
+        "summary": "Mark a publish request read",
+        "description": "Browser session plus CSRF, or personal Registry bearer token. The unread version is cleared only when observedUnreadAt exactly matches.",
+        "x-gc-enforcement": "authenticate-only",
+        "x-gc-plane": "both",
+        "security": [{ "cookieSession": [], "csrfToken": [] }, { "gcrToken": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishRequestReadInput" } } } },
+        "responses": {
+          "204": { "description": "Acknowledged. A stale or fabricated version is an idempotent no-op." },
+          "400": { "description": "Malformed JSON body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "401": { "description": "Unauthenticated.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "403": { "description": "CSRF validation or token scope denied.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Missing or non-owned request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "413": { "description": "JSON body exceeds the transport byte limit.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "422": { "description": "Invalid timestamp.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "429": { "description": "Per-user feedback mutation limit exceeded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/api/v1/admin/publish-requests/{id}": {
+      "get": {
+        "operationId": "getAdminPublishRequestFeedback",
+        "summary": "Get a staff publish-request conversation",
+        "description": "Administrator or moderator browser session only; no CSRF is required for this safe read.",
+        "x-gc-enforcement": "staff-only",
+        "x-gc-plane": "both",
+        "security": [{ "cookieSession": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "OK. Submitter unread/read timestamps are intentionally omitted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminPublishRequestFeedbackDetailResponse" } } } },
+          "401": { "description": "Unauthenticated.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "403": { "description": "Staff role required.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Request not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "429": { "description": "Per-user feedback read limit exceeded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
+    "/api/v1/admin/publish-requests/{id}/comments": {
+      "post": {
+        "operationId": "commentOnAdminPublishRequest",
+        "summary": "Add a staff publish-request comment",
+        "description": "Administrator or moderator browser session plus CSRF only.",
+        "x-gc-enforcement": "staff-only",
+        "x-gc-plane": "both",
+        "security": [{ "cookieSession": [], "csrfToken": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StaffPublishRequestCommentInput" } } } },
+        "responses": {
+          "201": { "description": "Created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublishRequestCommentMutationResponse" } } } },
+          "400": { "description": "Malformed JSON body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "401": { "description": "Unauthenticated.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "403": { "description": "Staff role or CSRF validation failed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "404": { "description": "Request not found.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "`REQUEST_TERMINAL` when the request is no longer mutable, or `STATE_CONFLICT` when its state changes during the atomic mutation.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "413": { "description": "JSON body exceeds the transport byte limit.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "422": { "description": "Comment/action owner is invalid or the comment exceeds 4,000 Unicode characters.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "429": { "description": "Per-user feedback mutation limit exceeded.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+        }
+      }
+    },
     "/api/account/publish-requests": {
       "get": {
         "operationId": "listMyPublishRequests",
@@ -1504,6 +1639,130 @@
             "$ref": "#/components/schemas/PublishRegistryRelease"
           }
         }
+      },
+      "PublishRequestStatus": {
+        "type": "string",
+        "enum": ["pending_validation", "validation_failed", "pending_review", "approved", "rejected", "withdrawn"]
+      },
+      "PublishRequestActionOwner": {
+        "type": "string",
+        "enum": ["submitter", "registry"]
+      },
+      "PublishRequestNextStep": {
+        "type": "string",
+        "enum": ["await_validation", "fix_validation", "respond_to_feedback", "await_registry_review", "published", "resubmit"]
+      },
+      "PublishRequestComment": {
+        "type": "object",
+        "required": ["id", "authorHandle", "authorRole", "body", "createdAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "authorHandle": { "type": "string" },
+          "authorRole": { "$ref": "#/components/schemas/PublishRequestActionOwner" },
+          "body": { "type": "string", "description": "Plain text only; clients must not render it as HTML." },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "PublishRequestFeedbackCoreSummary": {
+        "type": "object",
+        "description": "Fields shared by owner summaries and staff detail.",
+        "required": ["id", "status", "nextStep", "requestedName", "requestedVersion", "repository", "packPath", "commit", "createdAt", "updatedAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/PublishRequestStatus" },
+          "nextStep": { "$ref": "#/components/schemas/PublishRequestNextStep" },
+          "actionRequiredBy": { "$ref": "#/components/schemas/PublishRequestActionOwner" },
+          "requestedName": { "type": "string" },
+          "requestedVersion": { "type": "string" },
+          "repository": {
+            "type": "object",
+            "required": ["host", "owner", "name", "fullName"],
+            "properties": {
+              "host": { "type": "string", "enum": ["github.com"] },
+              "owner": { "type": "string" },
+              "name": { "type": "string" },
+              "fullName": { "type": "string" }
+            }
+          },
+          "packPath": { "type": "string" },
+          "commit": { "type": "string" },
+          "statusReason": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "PublishRequestFeedbackSummary": {
+        "description": "Owner-facing summary. The unread version timestamps let the owner acknowledge exactly the update they observed.",
+        "allOf": [
+          { "$ref": "#/components/schemas/PublishRequestFeedbackCoreSummary" },
+          {
+            "type": "object",
+            "required": ["unread", "submitterUnreadAt"],
+            "properties": {
+              "unread": { "type": "boolean" },
+              "submitterUnreadAt": { "type": "string", "format": "date-time", "nullable": true }
+            }
+          }
+        ]
+      },
+      "PublishRequestFeedbackDetailFields": {
+        "type": "object",
+        "required": ["repoUrl", "sourceUrl", "comments"],
+        "properties": {
+          "repoUrl": { "type": "string" },
+          "sourceUrl": { "type": "string" },
+          "requestedRef": { "type": "string" },
+          "requestedDescription": { "type": "string" },
+          "validationError": { "type": "string" },
+          "validatedAt": { "type": "string", "format": "date-time" },
+          "reviewedAt": { "type": "string", "format": "date-time" },
+          "registryEntry": { "$ref": "#/components/schemas/PublishRegistryEntry" },
+          "comments": { "type": "array", "items": { "$ref": "#/components/schemas/PublishRequestComment" } }
+        }
+      },
+      "PublishRequestFeedbackDetail": {
+        "allOf": [
+          { "$ref": "#/components/schemas/PublishRequestFeedbackSummary" },
+          { "$ref": "#/components/schemas/PublishRequestFeedbackDetailFields" }
+        ]
+      },
+      "StaffPublishRequestFeedbackDetail": {
+        "description": "Staff detail snapshot. Submitter unread/read state is private and is not part of this schema.",
+        "allOf": [
+          { "$ref": "#/components/schemas/PublishRequestFeedbackCoreSummary" },
+          { "$ref": "#/components/schemas/PublishRequestFeedbackDetailFields" },
+          {
+            "type": "object",
+            "required": ["submittedBy"],
+            "properties": {
+              "submittedBy": { "$ref": "#/components/schemas/PublicUser" }
+            }
+          }
+        ]
+      },
+      "PublishRequestFeedbackListResponse": {
+        "type": "object", "required": ["publishRequests", "unreadCount"], "properties": {
+          "publishRequests": { "type": "array", "items": { "$ref": "#/components/schemas/PublishRequestFeedbackSummary" } },
+          "unreadCount": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "PublishRequestFeedbackDetailResponse": {
+        "type": "object", "required": ["publishRequest"], "properties": { "publishRequest": { "$ref": "#/components/schemas/PublishRequestFeedbackDetail" } }
+      },
+      "AdminPublishRequestFeedbackDetailResponse": {
+        "type": "object", "required": ["publishRequest"], "properties": { "publishRequest": { "$ref": "#/components/schemas/StaffPublishRequestFeedbackDetail" } }
+      },
+      "PublishRequestCommentInput": {
+        "type": "object", "required": ["body"], "properties": { "body": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+      },
+      "StaffPublishRequestCommentInput": {
+        "allOf": [{ "$ref": "#/components/schemas/PublishRequestCommentInput" }, { "type": "object", "required": ["actionRequiredBy"], "properties": { "actionRequiredBy": { "$ref": "#/components/schemas/PublishRequestActionOwner" } } }]
+      },
+      "PublishRequestCommentMutationResponse": {
+        "type": "object", "required": ["comment"], "properties": { "comment": { "$ref": "#/components/schemas/PublishRequestComment" } }
+      },
+      "PublishRequestReadInput": {
+        "type": "object", "required": ["observedUnreadAt"], "properties": { "observedUnreadAt": { "type": "string", "format": "date-time" } }
       },
       "PublishRequest": {
         "type": "object",

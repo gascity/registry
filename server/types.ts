@@ -380,6 +380,27 @@ export type PublishRequestRow = {
   // and on every row that predates the columns.
   sourceGithubRepositoryId?: string;
   sourceGithubOwnerId?: string;
+  actionRequiredBy?: PublishRequestActionOwner;
+  submitterUnreadAt: string | null;
+};
+
+export type PublishRequestActionOwner = "submitter" | "registry";
+
+export type PublishRequestNextStep =
+  | "await_validation"
+  | "fix_validation"
+  | "respond_to_feedback"
+  | "await_registry_review"
+  | "published"
+  | "resubmit";
+
+export type PublishRequestComment = {
+  id: string;
+  publishRequestId: string;
+  authorHandle: string;
+  authorRole: PublishRequestActionOwner;
+  body: string;
+  createdAt: string;
 };
 
 // GitHub's numeric ids for a publish request's source, derived server-side from the trusted
@@ -476,6 +497,15 @@ export interface RegistryStore {
     sourceIdentity?: PublishSourceIdentity,
   ): Promise<PublishRequestRow>;
   getPublishRequest(id: string): Promise<PublishRequestRow | null>;
+  listPublishRequestComments(id: string): Promise<PublishRequestComment[]>;
+  addPublishRequestComment(input: {
+    publishRequestId: string;
+    actorUserId: string;
+    authorRole: PublishRequestActionOwner;
+    body: string;
+    actionRequiredBy: PublishRequestActionOwner;
+  }): Promise<PublishRequestComment>;
+  markPublishRequestRead(userId: string, id: string, observedUnreadAt: string): Promise<void>;
   listAccountPublishRequests(userId: string): Promise<PublishRequestRow[]>;
   listPublishRequests(): Promise<PublishRequestRow[]>;
   listApprovedPublishRequests(): Promise<PublishRequestRow[]>;
@@ -521,8 +551,13 @@ export interface RegistryStore {
   markPublishRequestValidated(
     id: string,
     entry: PublishRegistryEntry,
+    options?: { notifySubmitter?: boolean },
   ): Promise<PublishRequestRow>;
-  markPublishRequestValidationFailed(id: string, error: string): Promise<PublishRequestRow>;
+  markPublishRequestValidationFailed(
+    id: string,
+    error: string,
+    options?: { notifySubmitter?: boolean },
+  ): Promise<PublishRequestRow>;
   approvePublishRequest(
     actorUserId: string,
     id: string,

@@ -5,7 +5,28 @@ import type {
   PackNameClaim,
   PublishRequestInput,
   PublishRequestRow,
+  PublishRequestNextStep,
 } from "./types";
+
+// Keep API/UI/CLI feedback wording anchored to the lifecycle record rather than persisting a
+// duplicate state machine. Withdrawn is an existing terminal state; it shares the resubmission
+// instruction with a rejection while retaining its distinct status on the wire.
+export function publishRequestNextStep(request: Pick<PublishRequestRow, "status" | "actionRequiredBy">): PublishRequestNextStep {
+  switch (request.status) {
+    case "pending_validation": return "await_validation";
+    case "validation_failed": return "fix_validation";
+    case "pending_review": return request.actionRequiredBy === "submitter"
+      ? "respond_to_feedback"
+      : "await_registry_review";
+    case "approved": return "published";
+    case "rejected":
+    case "withdrawn": return "resubmit";
+  }
+}
+
+export function publishRequestUnread(request: Pick<PublishRequestRow, "submitterUnreadAt">) {
+  return request.submitterUnreadAt !== null;
+}
 
 // Bare or single-scoped, each segment starting alphanumeric. Ingest uses the bare-only half of
 // this grammar (scripts/generate-registry.lib.ts) — the two are deliberately different and

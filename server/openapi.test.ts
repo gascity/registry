@@ -63,3 +63,77 @@ test("publish validation responses describe every durable error outcome without 
     }
   }
 });
+
+test("every parameterized v1 feedback operation declares its required path parameters", () => {
+  const verbs = new Set(["get", "put", "post", "delete", "patch"]);
+  for (const [path, item] of Object.entries<any>(spec.paths)) {
+    if (!path.startsWith("/api/v1/") || !path.includes("{")) continue;
+    const placeholders = [...path.matchAll(/\{([^}]+)\}/g)].map((match) => match[1]);
+    for (const [method, operation] of Object.entries<any>(item)) {
+      if (!verbs.has(method)) continue;
+      const parameters = [...(item.parameters ?? []), ...(operation.parameters ?? [])];
+      for (const name of placeholders) {
+        expect(
+          parameters.some((parameter) =>
+            parameter.in === "path" && parameter.name === name && parameter.required === true
+          ),
+          `${method} ${path} must declare required path parameter ${name}`,
+        ).toBe(true);
+      }
+    }
+  }
+});
+
+test("feedback operations document their authentication, conflict, rate-limit, and server errors", () => {
+  const expected: Record<string, string[]> = {
+    "get /api/v1/me/publish-requests": ["200", "401", "403", "429", "500"],
+    "get /api/v1/me/publish-requests/{id}": ["200", "401", "403", "404", "429", "500"],
+    "post /api/v1/me/publish-requests/{id}/comments":
+      ["201", "400", "401", "403", "404", "409", "413", "422", "429", "500"],
+    "post /api/v1/me/publish-requests/{id}/read":
+      ["204", "400", "401", "403", "404", "413", "422", "429", "500"],
+    "get /api/v1/admin/publish-requests/{id}": ["200", "401", "403", "404", "429", "500"],
+    "post /api/v1/admin/publish-requests/{id}/comments":
+      ["201", "400", "401", "403", "404", "409", "413", "422", "429", "500"],
+  };
+  for (const [operation, statuses] of Object.entries(expected)) {
+    const [method, path] = operation.split(" ", 2);
+    expect(
+      Object.keys(spec.paths[path][method].responses).sort(),
+      `${operation} response statuses`,
+    ).toEqual(statuses.sort());
+  }
+});
+
+test("staff feedback schemas cannot expose submitter notification timestamps", () => {
+  const schemas = spec.components.schemas;
+  const dereference = (schema: any) =>
+    schema?.$ref ? schemas[String(schema.$ref).split("/").pop()!] : schema;
+  const propertyNames = (schema: any, seen = new Set<any>()): Set<string> => {
+    const resolved = dereference(schema);
+    if (!resolved || seen.has(resolved)) return new Set();
+    seen.add(resolved);
+    const names = new Set(Object.keys(resolved.properties ?? {}));
+    for (const member of resolved.allOf ?? []) {
+      for (const name of propertyNames(member, seen)) names.add(name);
+    }
+    return names;
+  };
+
+  const ownerNames = propertyNames(schemas.PublishRequestFeedbackDetail);
+  expect(ownerNames.has("submitterUnreadAt")).toBe(true);
+  expect(ownerNames.has("submitterReadAt")).toBe(false);
+
+  const staffDetailNames = propertyNames(schemas.StaffPublishRequestFeedbackDetail);
+  expect(staffDetailNames.has("submitterUnreadAt")).toBe(false);
+  expect(staffDetailNames.has("submitterReadAt")).toBe(false);
+  expect(staffDetailNames.has("unread")).toBe(false);
+
+  expect(
+    schemas.AdminPublishRequestFeedbackDetailResponse.properties.publishRequest,
+  ).toEqual({ $ref: "#/components/schemas/StaffPublishRequestFeedbackDetail" });
+  expect(
+    spec.paths["/api/v1/admin/publish-requests/{id}/comments"].post.responses["201"]
+      .content["application/json"].schema,
+  ).toEqual({ $ref: "#/components/schemas/PublishRequestCommentMutationResponse" });
+});

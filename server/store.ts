@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import postgres, { type ISql, type Sql } from "postgres";
 import { hashCliDeviceCode, hashCliUserCode, normalizeCliUserCode } from "./cli-auth";
 import { randomToken, sha256 } from "./crypto";
@@ -28,6 +29,8 @@ import type {
   PackOwnership,
   PublisherSummary,
   PublishRegistryEntry,
+  PublishRequestActionOwner,
+  PublishRequestComment,
   PublishRequestInput,
   PublishRequestRow,
   PublishSourceIdentity,
@@ -58,6 +61,7 @@ const idPrefix = {
   publisher: "pub",
   publishRequest: "prq",
   githubPublishImport: "gpi",
+  publishRequestComment: "prc",
 } as const;
 
 export function createStore(databaseUrl: string | undefined, localDataPath?: string): RegistryStore {
@@ -73,10 +77,45 @@ function toIso(value: Date | string | number) {
   return new Date(value).toISOString();
 }
 
+function nextFeedbackTimestamp(
+  now: Date | string | number,
+  ...prior: Array<string | null>
+) {
+  const next = prior.reduce(
+    (value, timestamp) => Math.max(value, timestamp ? Date.parse(timestamp) + 1 : Number.NEGATIVE_INFINITY),
+    new Date(now).getTime(),
+  );
+  return new Date(next).toISOString();
+}
+
 function normalizeHandle(value: string | undefined) {
   const handle = value?.trim().replace(/^@/, "").toLowerCase();
   if (!handle) return undefined;
   return handle.replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+}
+
+function normalizePublishRequestCommentBody(value: string) {
+  const body = value.trim();
+  if (!body) throw new StoreValidationError("Comment body is required.");
+  if ([...body].length > 4_000) throw new StoreValidationError("Comment body is too long.");
+  if (/\u0000/.test(body)) throw new StoreValidationError("Comment body contains an unsupported character.");
+  return body;
+}
+
+function comparePublishRequestComments(left: PublishRequestComment, right: PublishRequestComment) {
+  if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1;
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
+
+function publishRequestCommentFromRow(row: any): PublishRequestComment {
+  return {
+    id: row.id,
+    publishRequestId: row.publish_request_id,
+    authorHandle: row.author_handle_snapshot,
+    authorRole: row.author_role_snapshot === "registry" ? "registry" : "submitter",
+    body: row.body,
+    createdAt: toIso(row.created_at),
+  };
 }
 
 function normalizePublisherHandle(value: string | undefined) {
@@ -363,6 +402,10 @@ function publishRequestFromRows(row: any, user: PublicUser): PublishRequestRow {
     submissionMethod: publishSubmissionMethod(row.submission_method),
     sourceGithubRepositoryId: row.source_github_repository_id ?? undefined,
     sourceGithubOwnerId: row.source_github_owner_id ?? undefined,
+    actionRequiredBy: row.action_required_by === "submitter" || row.action_required_by === "registry"
+      ? row.action_required_by
+      : undefined,
+    submitterUnreadAt: row.submitter_unread_at ? toIso(row.submitter_unread_at) : null,
   };
 }
 
@@ -975,6 +1018,36 @@ export class PostgresRegistryStore implements RegistryStore {
     // PublishSourceIdentity). Nullable: claim-only submissions prove neither id.
     await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS source_github_repository_id text`;
     await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS source_github_owner_id text`;
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS action_required_by text`;
+    await this.sql`ALTER TABLE pack_publish_requests ADD COLUMN IF NOT EXISTS submitter_unread_at timestamptz`;
+    await this.sql`ALTER TABLE pack_publish_requests DROP CONSTRAINT IF EXISTS pack_publish_requests_action_required_by_check`;
+    await this.sql`
+      ALTER TABLE pack_publish_requests
+      ADD CONSTRAINT pack_publish_requests_action_required_by_check
+      CHECK (action_required_by IN ('submitter', 'registry') OR action_required_by IS NULL)
+    `;
+    // Backfill only the new action-owner state. Existing rows remain read so deployment does not
+    // generate a notification flood for historical requests.
+    await this.sql`
+      UPDATE pack_publish_requests
+      SET action_required_by = 'registry'
+      WHERE status = 'pending_review' AND action_required_by IS NULL
+    `;
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS pack_publish_request_comments (
+        id text PRIMARY KEY,
+        publish_request_id text NOT NULL REFERENCES pack_publish_requests(id) ON DELETE CASCADE,
+        author_user_id text REFERENCES users(id) ON DELETE SET NULL,
+        author_handle_snapshot text NOT NULL,
+        author_role_snapshot text NOT NULL CHECK (author_role_snapshot IN ('submitter', 'registry')),
+        body text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      )
+    `;
+    await this.sql`
+      CREATE INDEX IF NOT EXISTS pack_publish_request_comments_request_idx
+      ON pack_publish_request_comments (publish_request_id, created_at ASC, id COLLATE "C" ASC)
+    `;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_submitter_idx ON pack_publish_requests (submitter_user_id, created_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_review_idx ON pack_publish_requests (status, created_at DESC)`;
     await this.sql`CREATE INDEX IF NOT EXISTS pack_publish_requests_pack_version_idx ON pack_publish_requests (requested_name, requested_version)`;
@@ -1802,6 +1875,7 @@ export class PostgresRegistryStore implements RegistryStore {
           UPDATE pack_publish_requests
           SET status = 'rejected',
               status_reason = ${supersededStatusReason(id)},
+              action_required_by = NULL,
               updated_at = now()
           WHERE id = ${superseded.id}
             AND status IN ('pending_validation', 'validation_failed', 'pending_review')
@@ -1911,6 +1985,95 @@ export class PostgresRegistryStore implements RegistryStore {
     return rows.map((row) => publishRequestFromRows(row, publicSubmitter));
   }
 
+  async listPublishRequestComments(id: string) {
+    const rows = await this.sql`
+      SELECT *
+      FROM pack_publish_request_comments
+      WHERE publish_request_id = ${id}
+      ORDER BY created_at ASC, id COLLATE "C" ASC
+    `;
+    return rows.map(publishRequestCommentFromRow);
+  }
+
+  async addPublishRequestComment(input: {
+    publishRequestId: string;
+    actorUserId: string;
+    authorRole: PublishRequestActionOwner;
+    body: string;
+    actionRequiredBy: PublishRequestActionOwner;
+  }) {
+    const body = normalizePublishRequestCommentBody(input.body);
+    const id = newId("publishRequestComment");
+    return this.sql.begin(async (sql) => {
+      const [actor] = await sql`SELECT handle FROM users WHERE id = ${input.actorUserId} LIMIT 1`;
+      if (!actor) throw new StoreValidationError("Comment author not found.");
+      const [updated] = await sql`
+        WITH feedback_clock AS (
+          SELECT GREATEST(
+            date_trunc('milliseconds', clock_timestamp()),
+            COALESCE(
+              date_trunc('milliseconds', submitter_unread_at) + INTERVAL '1 millisecond',
+              '-infinity'::timestamptz
+            ),
+            date_trunc('milliseconds', updated_at) + INTERVAL '1 millisecond'
+          ) AS version
+          FROM pack_publish_requests
+          WHERE id = ${input.publishRequestId}
+          FOR UPDATE
+        )
+        UPDATE pack_publish_requests
+        SET action_required_by = ${input.actionRequiredBy},
+            submitter_unread_at = CASE
+              WHEN ${input.authorRole} = 'registry' THEN feedback_clock.version
+              ELSE submitter_unread_at
+            END,
+            updated_at = CASE
+              WHEN ${input.authorRole} = 'registry' THEN feedback_clock.version
+              ELSE date_trunc('milliseconds', clock_timestamp())
+            END
+        FROM feedback_clock
+        WHERE id = ${input.publishRequestId}
+          AND status IN ('pending_validation', 'validation_failed', 'pending_review')
+        RETURNING pack_publish_requests.updated_at
+      `;
+      if (!updated) {
+        const [current] = await sql`
+          SELECT status FROM pack_publish_requests WHERE id = ${input.publishRequestId} LIMIT 1
+        `;
+        if (current && !isPreApprovalStatus(publishRequestStatus(current.status))) {
+          throw new StoreConflictError(
+            "This publish request can no longer be commented on.",
+            "REQUEST_TERMINAL",
+          );
+        }
+        throw new StoreConflictError(
+          "The publish request changed while the comment was being added.",
+          "STATE_CONFLICT",
+        );
+      }
+      const [comment] = await sql`
+        INSERT INTO pack_publish_request_comments (
+          id, publish_request_id, author_user_id, author_handle_snapshot, author_role_snapshot, body,
+          created_at
+        ) VALUES (
+          ${id}, ${input.publishRequestId}, ${input.actorUserId}, ${actor.handle}, ${input.authorRole}, ${body},
+          ${updated.updated_at}
+        ) RETURNING *
+      `;
+      return publishRequestCommentFromRow(comment);
+    });
+  }
+
+  async markPublishRequestRead(userId: string, id: string, observedUnreadAt: string) {
+    await this.sql`
+      UPDATE pack_publish_requests
+      SET submitter_unread_at = NULL
+      WHERE id = ${id}
+        AND submitter_user_id = ${userId}
+        AND date_trunc('milliseconds', submitter_unread_at) = ${observedUnreadAt}::timestamptz
+    `;
+  }
+
   async listPublishRequests(): Promise<PublishRequestRow[]> {
     const rows = await this.sql`
       SELECT
@@ -1985,17 +2148,47 @@ export class PostgresRegistryStore implements RegistryStore {
   async markPublishRequestValidated(
     id: string,
     entry: PublishRegistryEntry,
+    options?: { notifySubmitter?: boolean },
   ): Promise<PublishRequestRow> {
     // Only a pre-approval request may (re)validate — otherwise `validate` (submitter-accessible,
     // runs before the staff gate) could resurrect a withdrawn takedown or unpublish an approved release.
     const [row] = await this.sql`
+      WITH feedback_state AS (
+        SELECT GREATEST(
+          date_trunc('milliseconds', clock_timestamp()),
+          COALESCE(
+            date_trunc('milliseconds', submitter_unread_at) + INTERVAL '1 millisecond',
+            '-infinity'::timestamptz
+          ),
+          date_trunc('milliseconds', updated_at) + INTERVAL '1 millisecond'
+        ) AS version,
+        ${options?.notifySubmitter === true} AND (
+          status IS DISTINCT FROM 'pending_review'
+          OR action_required_by IS DISTINCT FROM 'registry'
+          OR validation_error IS NOT NULL
+          OR status_reason IS NOT NULL
+          OR registry_entry IS DISTINCT FROM ${this.sql.json(entry as any)}::jsonb
+        ) AS should_notify
+        FROM pack_publish_requests
+        WHERE id = ${id}
+        FOR UPDATE
+      )
       UPDATE pack_publish_requests
       SET status = 'pending_review',
+          action_required_by = 'registry',
+          submitter_unread_at = CASE
+            WHEN feedback_state.should_notify THEN feedback_state.version
+            ELSE submitter_unread_at
+          END,
           registry_entry = ${this.sql.json(entry as any)},
           validation_error = NULL,
           status_reason = NULL,
           validated_at = now(),
-          updated_at = now()
+          updated_at = CASE
+            WHEN feedback_state.should_notify THEN feedback_state.version
+            ELSE date_trunc('milliseconds', clock_timestamp())
+          END
+      FROM feedback_state
       WHERE id = ${id}
         AND status IN ('pending_validation', 'validation_failed', 'pending_review')
       RETURNING id
@@ -2006,16 +2199,49 @@ export class PostgresRegistryStore implements RegistryStore {
     return request;
   }
 
-  async markPublishRequestValidationFailed(id: string, error: string): Promise<PublishRequestRow> {
+  async markPublishRequestValidationFailed(
+    id: string,
+    error: string,
+    options?: { notifySubmitter?: boolean },
+  ): Promise<PublishRequestRow> {
     const reason = normalizeStatusReason(error, "Validation failed.");
     const [row] = await this.sql`
+      WITH feedback_state AS (
+        SELECT GREATEST(
+          date_trunc('milliseconds', clock_timestamp()),
+          COALESCE(
+            date_trunc('milliseconds', submitter_unread_at) + INTERVAL '1 millisecond',
+            '-infinity'::timestamptz
+          ),
+          date_trunc('milliseconds', updated_at) + INTERVAL '1 millisecond'
+        ) AS version,
+        ${options?.notifySubmitter === true} AND (
+          status IS DISTINCT FROM 'validation_failed'
+          OR action_required_by IS DISTINCT FROM 'submitter'
+          OR validation_error IS DISTINCT FROM ${reason}
+          OR status_reason IS DISTINCT FROM ${reason}
+          OR registry_entry IS NOT NULL
+        ) AS should_notify
+        FROM pack_publish_requests
+        WHERE id = ${id}
+        FOR UPDATE
+      )
       UPDATE pack_publish_requests
       SET status = 'validation_failed',
+          action_required_by = 'submitter',
+          submitter_unread_at = CASE
+            WHEN feedback_state.should_notify THEN feedback_state.version
+            ELSE submitter_unread_at
+          END,
           registry_entry = NULL,
           validated_at = NULL,
           validation_error = ${reason},
           status_reason = ${reason},
-          updated_at = now()
+          updated_at = CASE
+            WHEN feedback_state.should_notify THEN feedback_state.version
+            ELSE date_trunc('milliseconds', clock_timestamp())
+          END
+      FROM feedback_state
       WHERE id = ${id}
         AND status IN ('pending_validation', 'validation_failed', 'pending_review')
       RETURNING id
@@ -2087,14 +2313,38 @@ export class PostgresRegistryStore implements RegistryStore {
           ) AS approved_at
           FROM pack_publish_requests
           WHERE requested_name = ${current.requestedName}
+        ),
+        feedback_clock AS (
+          SELECT GREATEST(
+            date_trunc('milliseconds', clock_timestamp()),
+            COALESCE(
+              date_trunc('milliseconds', submitter_unread_at) + INTERVAL '1 millisecond',
+              '-infinity'::timestamptz
+            ),
+            date_trunc('milliseconds', updated_at) + INTERVAL '1 millisecond'
+          ) AS version
+          FROM pack_publish_requests
+          WHERE id = ${id}
+          FOR UPDATE
         )
         UPDATE pack_publish_requests
         SET status = 'approved',
+            action_required_by = NULL,
+            submitter_unread_at = CASE
+              WHEN ${actor.kind} = 'staff' THEN feedback_clock.version
+              ELSE submitter_unread_at
+            END,
             status_reason = ${statusReason},
             reviewed_by_user_id = ${actorUserId},
             reviewed_at = approval_clock.approved_at,
-            updated_at = approval_clock.approved_at
-        FROM approval_clock
+            updated_at = GREATEST(
+              approval_clock.approved_at,
+              CASE
+                WHEN ${actor.kind} = 'staff' THEN feedback_clock.version
+                ELSE '-infinity'::timestamptz
+              END
+            )
+        FROM approval_clock, feedback_clock
         WHERE id = ${id}
           AND status = 'pending_review'
         RETURNING pack_publish_requests.id
@@ -2228,12 +2478,28 @@ export class PostgresRegistryStore implements RegistryStore {
     // silently unpublish and destroy the withdraw audit trail). Takedown of an approved publish
     // is `withdrawPublishRequest`.
     const [row] = await this.sql`
+      WITH feedback_clock AS (
+        SELECT GREATEST(
+          date_trunc('milliseconds', clock_timestamp()),
+          COALESCE(
+            date_trunc('milliseconds', submitter_unread_at) + INTERVAL '1 millisecond',
+            '-infinity'::timestamptz
+          ),
+          date_trunc('milliseconds', updated_at) + INTERVAL '1 millisecond'
+        ) AS version
+        FROM pack_publish_requests
+        WHERE id = ${id}
+        FOR UPDATE
+      )
       UPDATE pack_publish_requests
       SET status = 'rejected',
+          action_required_by = NULL,
+          submitter_unread_at = feedback_clock.version,
           status_reason = ${cleanReason},
           reviewed_by_user_id = ${actorUserId},
           reviewed_at = now(),
-          updated_at = now()
+          updated_at = feedback_clock.version
+      FROM feedback_clock
       WHERE id = ${id}
         AND status IN ('pending_validation', 'validation_failed', 'pending_review')
       RETURNING id
@@ -2274,12 +2540,28 @@ export class PostgresRegistryStore implements RegistryStore {
       // be served. See approvePublishRequest for the full interleaving.
       await sql`SELECT pg_advisory_xact_lock(hashtextextended(${nameClaimLockKey(name)}, 0))`;
       const [row] = await sql`
+        WITH feedback_clock AS (
+          SELECT GREATEST(
+            date_trunc('milliseconds', clock_timestamp()),
+            COALESCE(
+              date_trunc('milliseconds', submitter_unread_at) + INTERVAL '1 millisecond',
+              '-infinity'::timestamptz
+            ),
+            date_trunc('milliseconds', updated_at) + INTERVAL '1 millisecond'
+          ) AS version
+          FROM pack_publish_requests
+          WHERE id = ${id}
+          FOR UPDATE
+        )
         UPDATE pack_publish_requests
         SET status = 'withdrawn',
+            action_required_by = NULL,
+            submitter_unread_at = feedback_clock.version,
             status_reason = ${cleanReason},
             reviewed_by_user_id = ${actorUserId},
             reviewed_at = now(),
-            updated_at = now()
+            updated_at = feedback_clock.version
+        FROM feedback_clock
         WHERE id = ${id}
           AND status = 'approved'
         RETURNING id
@@ -2647,6 +2929,7 @@ type FileState = {
   publisherMembers?: Array<{ publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>;
   ownerships?: PackOwnership[];
   publishRequests?: PublishRequestRow[];
+  publishRequestComments?: PublishRequestComment[];
   nameClaims?: PackNameClaim[];
   githubPublishImports?: GitHubPublishImportRow[];
 };
@@ -2697,6 +2980,7 @@ class FileRegistryStore implements RegistryStore {
   private publisherMembers = new Map<string, { publisherId: string; userId: string; role: "owner" | "admin" | "publisher" }>();
   private ownerships = new Map<string, PackOwnership>();
   private publishRequests = new Map<string, PublishRequestRow>();
+  private publishRequestComments = new Map<string, PublishRequestComment>();
   private nameClaims = new Map<string, PackNameClaim>();
   private githubPublishImports = new Map<string, GitHubPublishImportRow>();
   private readonly filePath: string;
@@ -2746,7 +3030,12 @@ class FileRegistryStore implements RegistryStore {
         this.publishRequests.set(request.id, {
           ...request,
           status: publishRequestStatus(request.status),
+          actionRequiredBy: request.actionRequiredBy ?? (request.status === "pending_review" ? "registry" : undefined),
+          submitterUnreadAt: request.submitterUnreadAt ?? null,
         });
+      }
+      for (const comment of raw.publishRequestComments ?? []) {
+        this.publishRequestComments.set(comment.id, comment);
       }
       for (const claim of raw.nameClaims ?? []) this.nameClaims.set(claim.name, claim);
       for (const imported of raw.githubPublishImports ?? []) {
@@ -3289,6 +3578,7 @@ class FileRegistryStore implements RegistryStore {
       this.publishRequests.set(superseded.id, {
         ...superseded,
         status: "rejected",
+        actionRequiredBy: undefined,
         statusReason: supersededStatusReason(id),
         updatedAt: now,
       });
@@ -3311,6 +3601,7 @@ class FileRegistryStore implements RegistryStore {
       submissionMethod,
       sourceGithubRepositoryId: sourceIdentity?.githubRepositoryId,
       sourceGithubOwnerId: sourceIdentity?.githubOwnerId,
+      submitterUnreadAt: null,
     };
     this.publishRequests.set(request.id, request);
     await this.save();
@@ -3327,6 +3618,63 @@ class FileRegistryStore implements RegistryStore {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
+  async listPublishRequestComments(id: string) {
+    return [...this.publishRequestComments.values()]
+      .filter((comment) => comment.publishRequestId === id)
+      .sort(comparePublishRequestComments);
+  }
+
+  async addPublishRequestComment(input: {
+    publishRequestId: string;
+    actorUserId: string;
+    authorRole: PublishRequestActionOwner;
+    body: string;
+    actionRequiredBy: PublishRequestActionOwner;
+  }) {
+    const request = this.requirePublishRequest(input.publishRequestId);
+    if (!isPreApprovalStatus(request.status)) {
+      throw new StoreConflictError(
+        "This publish request can no longer be commented on.",
+        "REQUEST_TERMINAL",
+      );
+    }
+    const author = this.users.get(input.actorUserId);
+    if (!author) throw new StoreValidationError("Comment author not found.");
+    const now = nextFeedbackTimestamp(new Date(), request.submitterUnreadAt, request.updatedAt);
+    const comment: PublishRequestComment = {
+      id: newId("publishRequestComment"),
+      publishRequestId: request.id,
+      authorHandle: author.handle,
+      authorRole: input.authorRole,
+      body: normalizePublishRequestCommentBody(input.body),
+      createdAt: now,
+    };
+    const storedRequest: PublishRequestRow = {
+      ...request,
+      actionRequiredBy: input.actionRequiredBy,
+      submitterUnreadAt: input.authorRole === "registry" ? now : request.submitterUnreadAt,
+      updatedAt: now,
+    };
+    this.publishRequestComments.set(comment.id, comment);
+    this.publishRequests.set(request.id, storedRequest);
+    try {
+      await this.save();
+    } catch (error) {
+      this.publishRequestComments.delete(comment.id);
+      this.publishRequests.set(request.id, request);
+      throw error;
+    }
+    return comment;
+  }
+
+  async markPublishRequestRead(userId: string, id: string, observedUnreadAt: string) {
+    const request = this.publishRequests.get(id);
+    if (!request || request.submittedBy.id !== userId || !request.submitterUnreadAt) return;
+    if (observedUnreadAt !== request.submitterUnreadAt) return;
+    this.publishRequests.set(id, { ...request, submitterUnreadAt: null });
+    await this.save();
+  }
+
   async listPublishRequests() {
     return [...this.publishRequests.values()].sort((left, right) =>
       right.createdAt.localeCompare(left.createdAt),
@@ -3339,15 +3687,31 @@ class FileRegistryStore implements RegistryStore {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
-  async markPublishRequestValidated(id: string, entry: PublishRegistryEntry) {
+  async markPublishRequestValidated(
+    id: string,
+    entry: PublishRegistryEntry,
+    options?: { notifySubmitter?: boolean },
+  ) {
     const request = this.requirePublishRequest(id);
     if (!isPreApprovalStatus(request.status)) {
       throw new StoreValidationError("This publish request can no longer be validated.");
     }
-    const now = new Date().toISOString();
+    const wallClock = new Date().toISOString();
+    const shouldNotify = options?.notifySubmitter === true && (
+      request.status !== "pending_review" ||
+      request.actionRequiredBy !== "registry" ||
+      request.validationError !== undefined ||
+      request.statusReason !== undefined ||
+      !isDeepStrictEqual(request.registryEntry, entry)
+    );
+    const now = shouldNotify
+      ? nextFeedbackTimestamp(wallClock, request.submitterUnreadAt, request.updatedAt)
+      : wallClock;
     const next: PublishRequestRow = {
       ...request,
       status: "pending_review",
+      actionRequiredBy: "registry",
+      submitterUnreadAt: shouldNotify ? now : request.submitterUnreadAt,
       registryEntry: entry,
       validationError: undefined,
       statusReason: undefined,
@@ -3359,16 +3723,32 @@ class FileRegistryStore implements RegistryStore {
     return next;
   }
 
-  async markPublishRequestValidationFailed(id: string, error: string) {
+  async markPublishRequestValidationFailed(
+    id: string,
+    error: string,
+    options?: { notifySubmitter?: boolean },
+  ) {
     const request = this.requirePublishRequest(id);
     if (!isPreApprovalStatus(request.status)) {
       throw new StoreValidationError("This publish request can no longer be validated.");
     }
-    const now = new Date().toISOString();
+    const wallClock = new Date().toISOString();
     const reason = normalizeStatusReason(error, "Validation failed.");
+    const shouldNotify = options?.notifySubmitter === true && (
+      request.status !== "validation_failed" ||
+      request.actionRequiredBy !== "submitter" ||
+      request.validationError !== reason ||
+      request.statusReason !== reason ||
+      request.registryEntry !== undefined
+    );
+    const now = shouldNotify
+      ? nextFeedbackTimestamp(wallClock, request.submitterUnreadAt, request.updatedAt)
+      : wallClock;
     const next: PublishRequestRow = {
       ...request,
       status: "validation_failed",
+      actionRequiredBy: "submitter",
+      submitterUnreadAt: shouldNotify ? now : request.submitterUnreadAt,
       registryEntry: undefined,
       validatedAt: undefined,
       validationError: reason,
@@ -3443,14 +3823,19 @@ class FileRegistryStore implements RegistryStore {
     // ISO timestamps have only millisecond precision. Preserve the serialized approval order even
     // when the wall clock does not advance, otherwise precedent selection falls through to random
     // request ids and can resurrect an older pack path.
-    const now = this.nextPublishReviewTimestamp(request.requestedName);
+    const reviewedAt = this.nextPublishReviewTimestamp(request.requestedName);
+    const now = actor.kind === "staff"
+      ? nextFeedbackTimestamp(reviewedAt, request.submitterUnreadAt, request.updatedAt)
+      : reviewedAt;
     const next: PublishRequestRow = {
       ...request,
       status: "approved",
+      actionRequiredBy: undefined,
+      submitterUnreadAt: actor.kind === "staff" ? now : request.submitterUnreadAt,
       // Same split as the Postgres lane: the staff path clears the reason, the unattended path
       // stamps the constant the three status surfaces render.
       statusReason: actor.kind === "auto" ? AUTO_APPROVED_STATUS_REASON : undefined,
-      reviewedAt: now,
+      reviewedAt,
       reviewedBy: reviewer,
       updatedAt: now,
     };
@@ -3486,10 +3871,12 @@ class FileRegistryStore implements RegistryStore {
     }
     const reviewer = this.users.get(actorUserId);
     if (!reviewer) throw new Error("Reviewer not found.");
-    const now = new Date().toISOString();
+    const now = nextFeedbackTimestamp(new Date(), request.submitterUnreadAt, request.updatedAt);
     const next: PublishRequestRow = {
       ...request,
       status: "rejected",
+      actionRequiredBy: undefined,
+      submitterUnreadAt: now,
       statusReason: normalizeStatusReason(reason, "Rejected by registry staff."),
       reviewedAt: now,
       reviewedBy: reviewer,
@@ -3531,10 +3918,12 @@ class FileRegistryStore implements RegistryStore {
         );
       }
     }
-    const now = new Date().toISOString();
+    const now = nextFeedbackTimestamp(new Date(), request.submitterUnreadAt, request.updatedAt);
     const next: PublishRequestRow = {
       ...request,
       status: "withdrawn",
+      actionRequiredBy: undefined,
+      submitterUnreadAt: now,
       statusReason: normalizeStatusReason(reason, "Withdrawn by registry staff."),
       reviewedAt: now,
       reviewedBy: reviewer,
@@ -3704,6 +4093,7 @@ class FileRegistryStore implements RegistryStore {
       publisherMembers: [...this.publisherMembers.values()],
       ownerships: [...this.ownerships.values()],
       publishRequests: [...this.publishRequests.values()],
+      publishRequestComments: [...this.publishRequestComments.values()],
       nameClaims: [...this.nameClaims.values()],
       githubPublishImports: [...this.githubPublishImports.values()].filter(
         (imported) => Date.parse(imported.expiresAt) > Date.now(),
@@ -3779,5 +4169,10 @@ export class StoreValidationError extends Error {
 
 export class StoreConflictError extends Error {
   readonly status = 409;
-  readonly code = "CONFLICT";
+  readonly code: string;
+
+  constructor(message: string, code = "CONFLICT") {
+    super(message);
+    this.code = code;
+  }
 }
