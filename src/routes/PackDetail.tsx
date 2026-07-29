@@ -39,6 +39,7 @@ import {
   type CatalogStatus,
 } from "../components/RegistryPrimitives";
 import { apiRequest, type AuthState, type PackOwnership } from "../lib/api";
+import { packAuthor } from "../lib/packAuthor";
 import {
   buildImportCommands,
   categoryForPack,
@@ -66,6 +67,7 @@ export function PackDetail({
   devSignIn,
   onBack,
   navigateTo,
+  navigateAuthor,
 }: {
   catalogStatus: CatalogStatus;
   pack: CatalogPack | undefined;
@@ -75,6 +77,7 @@ export function PackDetail({
   devSignIn: () => void;
   onBack: () => void;
   navigateTo: (path: string) => void;
+  navigateAuthor: (author: string) => void;
 }) {
   const [reviewSummary, setReviewSummary] = useState<{
     count: number;
@@ -111,6 +114,7 @@ export function PackDetail({
   const sortedReleases = [...pack.releases].sort((a, b) => -compareVersions(a.version, b.version));
   const activeReleases = pack.releases.filter((release) => !release.withdrawn).length;
   const commands = latest ? buildImportCommands(pack, latest.version) : null;
+  const author = packAuthor(pack.source);
 
   return (
     <main className="detailPage">
@@ -131,6 +135,32 @@ export function PackDetail({
             <TierBadge pack={pack} />
             <StatusBadge pack={pack} />
           </span>
+          {author ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <a
+                className="authorLink"
+                href={`${withBase("/")}?author=${encodeURIComponent(author)}`}
+                aria-label={`Browse packs by ${author}`}
+                onClick={(event) => {
+                  if (
+                    event.defaultPrevented ||
+                    event.button !== 0 ||
+                    event.metaKey ||
+                    event.ctrlKey ||
+                    event.shiftKey ||
+                    event.altKey
+                  ) {
+                    return;
+                  }
+                  event.preventDefault();
+                  navigateAuthor(author);
+                }}
+              >
+                by {author}
+              </a>
+            </>
+          ) : null}
         </div>
         <PublisherAttribution pack={pack} />
 
@@ -449,6 +479,10 @@ function MetadataTab({ pack, latest }: { pack: CatalogPack; latest: CatalogRelea
       <div>
         <dt>Source kind</dt>
         <dd>{pack.sourceKind}</dd>
+      </div>
+      <div>
+        <dt>Author</dt>
+        <dd>{packAuthor(pack.source) ?? "Unknown"}</dd>
       </div>
       <div>
         <dt>Latest</dt>

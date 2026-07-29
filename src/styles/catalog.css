@@ -56,6 +56,12 @@
   padding-top: var(--gc-space-10);
 }
 
+/* Focused search: with stats + featured collapsed, the browse section sits
+   directly under the hero search; tighten the gap so results hug the input. */
+.browseSection.searchActive {
+  padding-top: var(--gc-space-5);
+}
+
 .sectionTitle,
 .browseHeader {
   margin-bottom: var(--gc-space-5);

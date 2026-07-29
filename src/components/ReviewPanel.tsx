@@ -1,6 +1,6 @@
-import { Flag, Loader2, Save, Star, ThumbsUp, Trash2 } from "lucide-react";
+import { Flag, Loader2, Pencil, Save, Star, ThumbsUp, Trash2 } from "lucide-react";
 import type React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, CardHeader, ErrorState, Input } from "@gascity/ui";
 import {
   apiRequest,
@@ -35,6 +35,36 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [recommend, setRecommend] = useState(true);
+  const [isEditing, setIsEditing] = useState(false);
+  const [pendingFocus, setPendingFocus] = useState<"edit" | "title" | null>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+
+  const resetForm = () => {
+    setRating(5);
+    setTitle("");
+    setBody("");
+    setRecommend(true);
+  };
+
+  const startEditing = () => {
+    if (!viewerReview || isSubmitting) return;
+    setRating(viewerReview.rating);
+    setTitle(viewerReview.title ?? "");
+    setBody(viewerReview.body);
+    setRecommend(viewerReview.recommend);
+    setNotice(null);
+    setError(null);
+    setIsEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setIsEditing(false);
+    setNotice(null);
+    setError(null);
+    resetForm();
+    requestAnimationFrame(() => editButtonRef.current?.focus());
+  };
 
   const load = useMemo(
     () => async () => {
@@ -83,19 +113,32 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
     };
   }, [pack.packKey, pack.source]);
 
+  // Reset edit mode + draft when the pack or signed-in identity changes. App.tsx's
+  // if-chain keeps ReviewPanel mounted across pack routes, so a draft for pack A
+  // would otherwise bleed into pack B (and survive a sign-out/sign-in); clearing
+  // state re-arms the `state !== null` gate so the composer waits for the new pack's
+  // server truth instead of seeding from the previous pack's review.
   useEffect(() => {
-    if (!viewerReview) {
-      setRating(5);
-      setTitle("");
-      setBody("");
-      setRecommend(true);
-      return;
-    }
-    setRating(viewerReview.rating);
-    setTitle(viewerReview.title ?? "");
-    setBody(viewerReview.body);
-    setRecommend(viewerReview.recommend);
-  }, [viewerReview?.id, viewerReview?.updatedAt]);
+    setIsEditing(false);
+    resetForm();
+    setNotice(null);
+    setState(null);
+  }, [pack.packKey, auth.user?.id]);
+
+  useEffect(() => {
+    if (isEditing) titleInputRef.current?.focus();
+  }, [isEditing]);
+
+  // Post-save/post-delete focus runs from an effect, not a rAF fired inside the async
+  // handler: the Edit button (collapsed row) and title input (blank form) are only
+  // attached to their refs after React commits the transition, so a rAF could beat the
+  // commit and no-op, dropping focus to <body> when the Save/Delete button unmounts.
+  useEffect(() => {
+    if (!pendingFocus) return;
+    if (pendingFocus === "edit") editButtonRef.current?.focus();
+    else titleInputRef.current?.focus();
+    setPendingFocus(null);
+  }, [pendingFocus]);
 
   const submitReview = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -114,6 +157,9 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
       await apiRequest("/api/reviews", { method: "PUT", body: JSON.stringify(input) }, auth.csrfToken);
       setNotice("Review saved.");
       await load();
+      setIsEditing(false);
+      resetForm();
+      setPendingFocus("edit");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save review.");
     } finally {
@@ -133,6 +179,9 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
       );
       setNotice("Review deleted.");
       await load();
+      setIsEditing(false);
+      resetForm();
+      setPendingFocus("title");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to delete review.");
     } finally {
@@ -194,7 +243,9 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
       {auth.user ? (
         <div className="reviewComposer">
           <div className="reviewComposerHeader">
-            <strong>{viewerReview ? "Update your review" : "Review this pack"}</strong>
+            <strong>
+              {viewerReview ? (isEditing ? "Update your review" : "Your review") : "Review this pack"}
+            </strong>
             <Button
               variant={state?.viewerHasStarred ? "secondary" : "ghost"}
               className={state?.viewerHasStarred ? "savePackButton active" : "savePackButton"}
@@ -208,68 +259,97 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
               {state?.viewerHasStarred ? "Saved" : "Save"}
             </Button>
           </div>
-          <form onSubmit={(event) => void submitReview(event)}>
-            <fieldset className="ratingField">
-              <legend>Rating</legend>
-              {[1, 2, 3, 4, 5].map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={rating >= value ? "active" : ""}
-                  aria-label={`${value} star${value === 1 ? "" : "s"}`}
-                  onClick={() => setRating(value)}
-                >
-                  <Star size={18} fill={rating >= value ? "currentColor" : "none"} />
-                </button>
-              ))}
-            </fieldset>
-            <Input
-              label="Title"
-              value={title}
-              maxLength={120}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="Short summary"
-            />
-            <label className="reviewBodyField">
-              <span>Review</span>
-              <textarea
-                value={body}
-                rows={5}
-                maxLength={4000}
-                onChange={(event) => setBody(event.target.value)}
-                placeholder="What worked, what did not, and who should use it?"
-                required
-              />
-            </label>
-            <label className="checkboxRow">
-              <input
-                type="checkbox"
-                checked={recommend}
-                onChange={(event) => setRecommend(event.target.checked)}
-              />
-              <span>Recommend this pack</span>
-            </label>
-            <div className="formActions">
-              {viewerReview ? (
-                <Button
-                  variant="danger"
-                  type="button"
-                  onClick={() => void deleteReview()}
-                  iconStart={<Trash2 size={15} />}
-                >
-                  Delete
-                </Button>
-              ) : null}
-              <Button
-                variant="primary"
-                type="submit"
-                loading={isSubmitting}
-                iconStart={isSubmitting ? undefined : <Save size={15} />}
-              >
-                {isSubmitting ? "Saving" : "Save review"}
-              </Button>
-            </div>
-          </form>
+          {/* Loading gate: the composer body waits for the initial GET so a returning
+              reviewer never sees a blank form flash (and lose a draft) before the
+              server truth (viewerReview) is known. The header row stays rendered. */}
+          {state !== null &&
+            (viewerReview && !isEditing ? (
+              <div className="viewerReviewSummary">
+                <p>
+                  You rated this pack {viewerReview.rating}/5 on{" "}
+                  {new Date(viewerReview.updatedAt).toLocaleDateString()}.
+                </p>
+                <div className="formActions">
+                  <Button
+                    ref={editButtonRef}
+                    variant="secondary"
+                    type="button"
+                    onClick={startEditing}
+                    iconStart={<Pencil size={15} />}
+                  >
+                    Edit review
+                  </Button>
+                  <Button
+                    variant="danger"
+                    type="button"
+                    onClick={() => void deleteReview()}
+                    loading={isSubmitting}
+                    iconStart={isSubmitting ? undefined : <Trash2 size={15} />}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={(event) => void submitReview(event)}>
+                <fieldset className="ratingField">
+                  <legend>Rating</legend>
+                  {[1, 2, 3, 4, 5].map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={rating >= value ? "active" : ""}
+                      aria-label={`${value} star${value === 1 ? "" : "s"}`}
+                      onClick={() => setRating(value)}
+                    >
+                      <Star size={18} fill={rating >= value ? "currentColor" : "none"} />
+                    </button>
+                  ))}
+                </fieldset>
+                <Input
+                  ref={titleInputRef}
+                  label="Title"
+                  value={title}
+                  maxLength={120}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="Short summary"
+                />
+                <label className="reviewBodyField">
+                  <span>Review</span>
+                  <textarea
+                    value={body}
+                    rows={5}
+                    maxLength={4000}
+                    onChange={(event) => setBody(event.target.value)}
+                    placeholder="What worked, what did not, and who should use it?"
+                    required
+                  />
+                </label>
+                <label className="checkboxRow">
+                  <input
+                    type="checkbox"
+                    checked={recommend}
+                    onChange={(event) => setRecommend(event.target.checked)}
+                  />
+                  <span>Recommend this pack</span>
+                </label>
+                <div className="formActions">
+                  {isEditing ? (
+                    <Button variant="ghost" type="button" onClick={cancelEditing}>
+                      Cancel
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="primary"
+                    type="submit"
+                    loading={isSubmitting}
+                    iconStart={isSubmitting ? undefined : <Save size={15} />}
+                  >
+                    {isSubmitting ? "Saving" : "Save review"}
+                  </Button>
+                </div>
+              </form>
+            ))}
         </div>
       ) : (
         <div className="signInPromptInline">
@@ -288,10 +368,23 @@ export function ReviewPanel({ pack, auth, signIn, devSignIn, onReviewSummary }: 
         </div>
       )}
 
-      {notice ? <p className="formNotice">{notice}</p> : null}
+      <p className="formNotice" role="status">
+        {notice}
+      </p>
       {error ? (
         <div className="formError" role="alert">
           <ErrorState compact message={error} />
+          {/* Recovery path for a failed INITIAL load only (state === null): the composer
+              body is gated on state, so without this a transient GET failure would lock a
+              signed-in user out of reviewing with no retry. Save/delete errors keep state
+              non-null and already have their form, so they never render this. */}
+          {state === null && !isLoading ? (
+            <div className="formActions">
+              <Button variant="secondary" type="button" onClick={() => void load()}>
+                Retry
+              </Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
       {isLoading ? (

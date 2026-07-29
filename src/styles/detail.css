@@ -25,6 +25,18 @@
   margin-bottom: var(--gc-space-4);
 }
 
+/* The author affordance keeps the UA default focus-visible outline (no `outline: none`);
+   the hover/focus underline is a supplementary, non-color affordance. */
+.detailKicker .authorLink {
+  color: var(--color-accent-text);
+  overflow-wrap: anywhere;
+}
+
+.detailKicker .authorLink:hover,
+.detailKicker .authorLink:focus-visible {
+  text-decoration: underline;
+}
+
 .detailSnapshot {
   margin-bottom: var(--gc-space-5);
 }

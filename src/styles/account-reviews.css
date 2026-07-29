@@ -60,6 +60,22 @@
   gap: 12px;
 }
 
+/* Collapsed "Your review" row: the summary line sits opposite the Edit/Delete
+   actions; flex-wrap drops the actions under the text in the narrow cockpit. */
+.viewerReviewSummary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.viewerReviewSummary p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 0.9rem;
+}
+
 .accountPanel form {
   display: grid;
   gap: var(--gc-space-3);
@@ -151,6 +167,14 @@
 .formNotice {
   margin: 0;
   color: var(--color-status-success);
+}
+
+/* The live region renders unconditionally so screen readers announce updates.
+   An absolutely-positioned empty <p> takes no grid row (no phantom gap) but STAYS
+   in the accessibility tree, which is the whole point of the always-rendered
+   role="status" region — display:none would remove it and drop announcements. */
+.formNotice:empty {
+  position: absolute;
 }
 
 .formError {

@@ -1,3 +1,4 @@
+import { packAuthor } from "./packAuthor";
 import {
   categoryForPack,
   compareVersions,
@@ -14,12 +15,14 @@ export function filterAndSortPacks(
   featuredPackKeys: string[] = [],
 ) {
   const normalizedQuery = searchState.query.trim().toLowerCase();
+  const authorFilter = searchState.author.trim().toLowerCase();
   const filtered = packs.filter((pack) => {
     const latest = latestActiveRelease(pack);
     if (!searchState.includeWithdrawn && !latest) return false;
     if (searchState.category !== "all" && categoryForPack(pack).value !== searchState.category) {
       return false;
     }
+    if (authorFilter && packAuthor(pack.source)?.toLowerCase() !== authorFilter) return false;
     if (!normalizedQuery) return true;
     const searchText =
       pack.searchText ||

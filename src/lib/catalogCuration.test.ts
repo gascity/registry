@@ -39,6 +39,7 @@ function pack(
 const featuredSearch: SearchState = {
   query: "",
   category: "all",
+  author: "",
   includeWithdrawn: true,
   sort: "featured",
   view: "grid",
