@@ -24,6 +24,7 @@ import { REGISTRY_PUBLIC_URL } from "../lib/links";
 import { isEmbedded } from "../lib/embed";
 import {
   categoryOptions,
+  hasActiveSearch,
   sortOptions,
   type SearchState,
   type SortKey,
@@ -76,6 +77,8 @@ export function HomePage({
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filterButtonRef = useRef<HTMLButtonElement | null>(null);
   const closeFiltersRef = useRef<HTMLButtonElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchActive = hasActiveSearch(searchState);
   const counts = useMemo(() => releaseCounts(catalog.packs), [catalog.packs]);
   const featuredPacks = useMemo(
     () => selectFeaturedPacks(catalog.packs, catalog.featuredPackKeys),
@@ -112,10 +115,19 @@ export function HomePage({
     updateSearchState({
       query: "",
       category: "all",
+      author: "",
       includeWithdrawn: false,
       sort: "featured",
       view: searchState.view,
     });
+    // The Clear affordance that had focus just unmounted. Keep focus contained on the
+    // sheet's Close button while it's open; on the desktop layout restore it to the
+    // search input — but never on touch, where focusing an input summons the keyboard.
+    if (filtersOpen) {
+      closeFiltersRef.current?.focus();
+    } else if (window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+      searchInputRef.current?.focus();
+    }
   };
 
   const activeFilters = activeFilterLabels(searchState);
@@ -194,6 +206,7 @@ export function HomePage({
             }}
           >
             <Input
+              ref={searchInputRef}
               label="Search registry packs"
               type="search"
               value={searchState.query}
@@ -202,27 +215,31 @@ export function HomePage({
             />
           </form>
 
-          <Card
-            variant="panel"
-            className="endpointPanel"
-            aria-label="CLI registry endpoint"
-          >
-            <Eyebrow>CLI endpoint</Eyebrow>
-            <code>{registryEndpoint}</code>
-            <CopyButton text={registryEndpoint} ariaLabel="Copy registry TOML endpoint" />
-          </Card>
+          {!searchActive ? (
+            <Card
+              variant="panel"
+              className="endpointPanel"
+              aria-label="CLI registry endpoint"
+            >
+              <Eyebrow>CLI endpoint</Eyebrow>
+              <code>{registryEndpoint}</code>
+              <CopyButton text={registryEndpoint} ariaLabel="Copy registry TOML endpoint" />
+            </Card>
+          ) : null}
         </section>
 
-        <section className="statsStrip compactStats" aria-label="Registry summary">
-          <StatGrid>
-            <Metric value={catalog.packs.length} label="packs" />
-            <Metric value={counts.active} label="active releases" />
-            <Metric value={counts.withdrawn} label="withdrawn" />
-            <Metric value="sha256" label="content identity" />
-          </StatGrid>
-        </section>
+        {!searchActive ? (
+          <section className="statsStrip compactStats" aria-label="Registry summary">
+            <StatGrid>
+              <Metric value={catalog.packs.length} label="packs" />
+              <Metric value={counts.active} label="active releases" />
+              <Metric value={counts.withdrawn} label="withdrawn" />
+              <Metric value="sha256" label="content identity" />
+            </StatGrid>
+          </section>
+        ) : null}
 
-        {featuredPacks.length > 0 ? (
+        {!searchActive && featuredPacks.length > 0 ? (
           <section className="featured" aria-labelledby="featured-title">
             <div className="sectionTitle">
               <Eyebrow>Start here</Eyebrow>
@@ -243,7 +260,10 @@ export function HomePage({
           </section>
         ) : null}
 
-        <section className="browseSection" aria-labelledby="browse-title">
+        <section
+          className={searchActive ? "browseSection searchActive" : "browseSection"}
+          aria-labelledby="browse-title"
+        >
           <div className="browseHeader">
             <button
               ref={filterButtonRef}
@@ -279,7 +299,7 @@ export function HomePage({
                 </div>
               ) : null}
               <div className="resultsToolbar">
-                <span>
+                <span role="status">
                   {catalogStatus.state === "loading"
                     ? "Loading packs"
                     : `${filteredPacks.length} result${filteredPacks.length === 1 ? "" : "s"}`}
@@ -334,6 +354,7 @@ function activeFilterLabels(searchState: SearchState) {
   if (searchState.query.trim()) labels.push(`Search: ${searchState.query.trim()}`);
   const category = categoryOptions.find((option) => option.value === searchState.category);
   if (category) labels.push(category.label);
+  if (searchState.author.trim()) labels.push(`Author: ${searchState.author.trim()}`);
   if (searchState.includeWithdrawn) labels.push("Withdrawn included");
   const sort = sortOptions.find((option) => option.value === searchState.sort);
   if (sort && sort.value !== "featured") labels.push(`Sort: ${sort.label}`);

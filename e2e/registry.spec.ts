@@ -68,6 +68,23 @@ test("home search filters catalog results", async ({ page }) => {
   await expect(
     page.locator(".browseResults .packListItem").filter({ hasText: "slack-full" }),
   ).toHaveCount(1);
+
+  // #82: searching collapses the sections above the results...
+  await expect(page.getByRole("heading", { name: "Featured packs" })).toBeHidden();
+  await expect(page.getByLabel("CLI registry endpoint")).toBeHidden();
+  // ...so the results render directly under the search input. "slack-full" is a broad
+  // substring match (name + readme + release notes), so the first row is another pack;
+  // what the bug is about is that the results toolbar count and the top result now sit
+  // on screen without scrolling (pre-fix they were ~1300px down). This assumes the
+  // header + hero fit in the default 720px viewport, so a future header that grows past
+  // that reads as that, not as a #82 regression.
+  await expect(page.locator(".resultsToolbar span[role='status']")).toBeInViewport();
+  await expect(page.locator(".browseResults .packListItem").first()).toBeInViewport();
+
+  // Clearing the query restores the full homepage.
+  await page.getByRole("searchbox", { name: "Search registry packs" }).fill("");
+  await expect(page).not.toHaveURL(/q=/);
+  await expect(page.getByRole("heading", { name: "Featured packs" })).toBeVisible();
   await expectHealthyPage(page, errors);
 });
 
@@ -209,18 +226,54 @@ test("dev auth can create and persist a local review", async ({ page }, testInfo
   const errors = trackRuntimeErrors(page);
   const handle = `e2e-${Date.now()}-${testInfo.workerIndex}`;
   const title = `E2E local review ${Date.now()}`;
+  const reviewBody = "Local file-backed reviews work without external auth or database services.";
 
   await page.goto(`/api/dev/sign-in?handle=${handle}&redirect=/packs/gascity`);
   await expect(page.getByRole("button", { name: /e2e-/ })).toBeVisible();
   await page.getByLabel("Title").fill(title);
-  await page
-    .getByRole("textbox", { name: "Review" })
-    .fill("Local file-backed reviews work without external auth or database services.");
+  await page.getByRole("textbox", { name: "Review" }).fill(reviewBody);
   await page.getByRole("button", { name: "Save review" }).click();
   await expect(page.getByText("Review saved.")).toBeVisible();
+  // The form collapses after a confirmed save — no stale editable input remains.
+  await expect(page.getByRole("textbox", { name: "Review" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Edit review" })).toBeVisible();
 
   await page.reload();
   await expect(page.getByText(title)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit review" })).toBeVisible();
+
+  // Edit re-opens a pre-filled form — proof the values survived until a confirmed save.
+  await page.getByRole("button", { name: "Edit review" }).click();
+  await expect(page.getByLabel("Title")).toHaveValue(title);
+  await page.getByLabel("Title").fill(`${title} updated`);
+
+  // AC#3: a failed save preserves the entered values and keeps the form open. One-shot
+  // PUT 500; the follow-up GET refetch (and any other verb) falls through untouched.
+  await page.route(
+    "**/api/reviews",
+    (route) =>
+      route.request().method() === "PUT"
+        ? route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"boom"}' })
+        : route.fallback(),
+    { times: 1 },
+  );
+  await page.getByRole("button", { name: "Save review" }).click();
+  await expect(page.locator(".formError")).toBeVisible();
+  await expect(page.getByLabel("Title")).toHaveValue(`${title} updated`);
+  await expect(page.getByRole("textbox", { name: "Review" })).toHaveValue(reviewBody);
+
+  // The retry succeeds and the form collapses again with the updated review listed.
+  await page.getByRole("button", { name: "Save review" }).click();
+  await expect(page.getByText("Review saved.")).toBeVisible();
+  await expect(page.getByText(`${title} updated`)).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Review" })).toHaveCount(0);
+
+  // Chromium logs the deliberate 500 above as a failed-resource console error; drop
+  // that one expected entry so the health check still catches anything unexpected.
+  const expectedFailure =
+    "console:Failed to load resource: the server responded with a status of 500 (Internal Server Error)";
+  const failureIndex = errors.indexOf(expectedFailure);
+  if (failureIndex !== -1) errors.splice(failureIndex, 1);
   await expectHealthyPage(page, errors);
 });
 
@@ -730,6 +783,34 @@ for (const width of [320, 390, 768, 1024, 1440]) {
     await expectHealthyPage(page, errors);
   });
 }
+
+test("pack author is visible and links to the author's packs", async ({ page }) => {
+  const errors = trackRuntimeErrors(page);
+
+  // The hermetic harness serves the committed catalog whose sources are all
+  // github.com/gastownhall/…, so "gastownhall" is the deterministic author.
+  await page.goto("/packs/gascity");
+  const author = page.getByRole("link", { name: "Browse packs by gastownhall" });
+  await expect(author).toHaveText("by gastownhall");
+  await author.click();
+
+  await expect(page).toHaveURL(/\?author=gastownhall/);
+  await expect(page).toHaveTitle("Packs by gastownhall | Gas City Registry");
+  await expect(page.getByLabel("Active filters").getByText("Author: gastownhall")).toBeVisible();
+  await expect(page.locator(".browseResults .packListItem").first()).toBeVisible();
+
+  // A stale/hand-typed author with no matching packs falls through to the empty state.
+  await page.goto("/?author=nobody-here");
+  await expect(page.getByText("No packs found")).toBeVisible();
+
+  // Clearing drops the author filter. Scope the click to the active-filters row: the desktop
+  // sidebar's "Clear filters" button is also in the a11y tree and getByRole name-matches by
+  // substring.
+  await page.goto("/?author=gastownhall");
+  await page.locator(".activeFilters").getByRole("button", { name: "Clear" }).click();
+  await expect(page).not.toHaveURL(/author=/);
+  await expectHealthyPage(page, errors);
+});
 
 test("embedded in an apex iframe renders just the window, not a nested cockpit", async ({ page }) => {
   // Load a same-origin host first (frame-ancestors 'self' rejects a cross-origin

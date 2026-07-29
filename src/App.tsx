@@ -79,6 +79,27 @@ function App() {
     setSearchState(readSearchState(""));
   }, []);
 
+  // "by {owner}" in a pack kicker lands on the home browse view filtered to that author.
+  // Reset query/category/sort so the list shows ALL of the author's packs; preserve
+  // includeWithdrawn (so a withdrawn-only pack reached with withdrawn=true still lists) and
+  // view (cosmetic). pushState (replace=false) so browser Back returns to the pack.
+  const navigateAuthor = useCallback(
+    (author: string) => {
+      navigateHome(
+        {
+          query: "",
+          category: "all",
+          author,
+          includeWithdrawn: searchState.includeWithdrawn,
+          sort: "featured",
+          view: searchState.view,
+        },
+        false,
+      );
+    },
+    [navigateHome, searchState],
+  );
+
   // A pack has exactly one URL. `/packs/owner%2Fpack` still parses (shared links must keep
   // working), so rewrite it to the canonical two-segment form in place. Not routed through
   // updateUrl: that drops window.location.hash, and the ownership-verification callback lands on
@@ -108,7 +129,10 @@ function App() {
   const activePack =
     route.kind === "pack" ? catalog.packs.find((pack) => pack.name === route.name) : undefined;
 
-  useEffect(() => updatePageMetadata(route, catalog, activePack), [route, catalog, activePack]);
+  useEffect(
+    () => updatePageMetadata(route, catalog, activePack, searchState),
+    [route, catalog, activePack, searchState],
+  );
 
   const frame = (children: React.ReactNode) => {
     // Manifest/sub-nav hrefs are logical (root-relative), so strip the mount.
@@ -215,6 +239,7 @@ function App() {
         devSignIn={() => devSignIn()}
         onBack={() => navigateHome(searchState)}
         navigateTo={navigateTo}
+        navigateAuthor={navigateAuthor}
       />,
     );
   }
@@ -234,8 +259,10 @@ function updatePageMetadata(
   route: RouteState,
   catalog: RegistryCatalogState,
   activePack: CatalogPack | undefined,
+  searchState: SearchState,
 ) {
   const isPack = route.kind === "pack" && activePack;
+  const authorFilter = route.kind === "home" ? searchState.author.trim() : "";
   const title = isPack
     ? `${activePack.name} | Gas City Registry`
     : route.kind === "account"
@@ -250,6 +277,8 @@ function updatePageMetadata(
         ? "Pack Ownership Verification | Gas City Registry"
         : route.kind === "publish"
           ? "Publish A Pack | Gas City Registry"
+      : authorFilter
+        ? `Packs by ${authorFilter} | Gas City Registry`
       : "Registry | Gas City";
   const description = isPack
     ? activePack.description
@@ -261,6 +290,8 @@ function updatePageMetadata(
         ? "Authorize Gas City CLI access to the Gas City Registry."
       : route.kind === "publish"
         ? "How to publish a new pack pointer to the Gas City Registry aggregate."
+      : authorFilter
+        ? `Gas City Registry packs published from GitHub source owner ${authorFilter}.`
     : "Browse versioned Gas City packs, registry releases, and import commands.";
   const imagePath = isPack ? activePack.ogImage : catalog.ogImage;
   const image = imagePath

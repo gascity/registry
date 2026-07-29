@@ -50,11 +50,17 @@ export function parseRoute(rawPathname: string): RouteState {
 
 export function readSearchState(search: string) {
   const params = new URLSearchParams(search);
+  const category = params.get("category");
   const sort = params.get("sort");
   const view = params.get("view");
+  const author = params.get("author");
   return {
     query: params.get("q") ?? "",
-    category: params.get("category") ?? "all",
+    category: categoryOptions.some((option) => option.value === category) ? (category as string) : "all",
+    // Constrain to the GitHub owner shape (like category/sort against their allowlists):
+    // derived authors are GitHub owners, so anything else is a crafted value that would
+    // otherwise reach document.title / og tags / the filter chip — reject it to "".
+    author: /^[A-Za-z0-9-]{1,39}$/.test(author ?? "") ? (author as string) : "",
     includeWithdrawn: params.get("withdrawn") === "true",
     sort: sortOptions.some((option) => option.value === sort) ? (sort as SortKey) : "featured",
     view: view === "grid" ? "grid" : ("list" as ViewMode),
@@ -66,6 +72,7 @@ export type SearchState = ReturnType<typeof readSearchState>;
 export function buildSearchString({
   query,
   category,
+  author,
   includeWithdrawn,
   sort,
   view,
@@ -73,11 +80,25 @@ export function buildSearchString({
   const params = new URLSearchParams();
   if (query.trim()) params.set("q", query.trim());
   if (category !== "all") params.set("category", category);
+  if (author.trim()) params.set("author", author.trim());
   if (includeWithdrawn) params.set("withdrawn", "true");
   if (sort !== "featured") params.set("sort", sort);
   if (view === "grid") params.set("view", "grid");
   const next = params.toString();
   return next ? `?${next}` : "";
+}
+
+/** True when the query or author filter narrows the catalog — the homepage collapses
+ *  the sections above the results (stats, featured, CLI endpoint) only in this mode.
+ *  Query and author only: category and withdrawn are driven by controls that live INSIDE
+ *  the browse section, so collapsing ~600px above them would yank the page mid-interaction
+ *  (Safari has no scroll anchoring); sort and view are pure presentation of the full
+ *  catalog. Author is never set from a control inside the browse section — it arrives only
+ *  from the pack-detail "by {owner}" link or a deep link — so collapsing to it is safe and
+ *  lands the author's packs directly under the search bar. Whitespace-only is not narrowing,
+ *  consistent with buildSearchString (omits the key) and filterAndSortPacks (no-op filter). */
+export function hasActiveSearch({ query, author }: SearchState): boolean {
+  return query.trim() !== "" || author.trim() !== "";
 }
 
 export function updateUrl(pathname: string, search: string, replace = false) {

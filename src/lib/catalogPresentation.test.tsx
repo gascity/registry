@@ -38,6 +38,7 @@ function pack(over: Partial<CatalogPack> = {}): CatalogPack {
 const searchState = {
   query: "",
   category: "all" as const,
+  author: "",
   includeWithdrawn: false,
   sort: "featured" as const,
   view: "grid" as const,
@@ -193,6 +194,7 @@ function renderPackDetail(candidate: CatalogPack, hash: string) {
         devSignIn={() => undefined}
         onBack={() => undefined}
         navigateTo={() => undefined}
+        navigateAuthor={() => undefined}
       />,
     );
   } finally {

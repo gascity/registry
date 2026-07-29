@@ -3,7 +3,14 @@
 // base.ts's MOUNT_BASE is "" and stripBase/withBase are identities here. That is the standalone
 // build's configuration, which is the one the tests below are written against.
 import { describe, expect, test } from "bun:test";
-import { packPath, parseRoute } from "./urlState";
+import {
+  buildSearchString,
+  hasActiveSearch,
+  packPath,
+  parseRoute,
+  readSearchState,
+  type SearchState,
+} from "./urlState";
 
 describe("packPath", () => {
   // Byte-for-byte what it emitted before the two-segment change. Every pack in the committed
@@ -80,4 +87,79 @@ describe("packPath / parseRoute round trip", () => {
       expect(parseRoute(packPath(name))).toEqual({ kind: "pack", name });
     });
   }
+});
+
+const idleState: SearchState = {
+  query: "",
+  category: "all",
+  author: "",
+  includeWithdrawn: false,
+  sort: "featured",
+  view: "list",
+};
+
+describe("hasActiveSearch", () => {
+  test("a non-empty query is an active search", () => {
+    expect(hasActiveSearch({ ...idleState, query: "slack" })).toBe(true);
+  });
+
+  test("an empty or whitespace-only query is not", () => {
+    expect(hasActiveSearch(idleState)).toBe(false);
+    expect(hasActiveSearch({ ...idleState, query: "   " })).toBe(false);
+  });
+
+  // An author filter also collapses the page: it only ever arrives from the pack-detail
+  // link or a deep link, never from a control inside the browse section, so landing on the
+  // author's packs directly under the search bar is the intended behavior.
+  test("a non-empty author is an active search", () => {
+    expect(hasActiveSearch({ ...idleState, author: "wespd" })).toBe(true);
+  });
+
+  test("a whitespace-only author is not", () => {
+    expect(hasActiveSearch({ ...idleState, author: "   " })).toBe(false);
+  });
+
+  // The collapse is query/author only: category/withdrawn controls live inside the browse
+  // section (collapsing above them would yank the page), and sort/view are presentation.
+  test("category, withdrawn, sort, and view alone are not an active search", () => {
+    expect(hasActiveSearch({ ...idleState, category: "integration" })).toBe(false);
+    expect(hasActiveSearch({ ...idleState, includeWithdrawn: true })).toBe(false);
+    expect(hasActiveSearch({ ...idleState, sort: "name" })).toBe(false);
+    expect(hasActiveSearch({ ...idleState, view: "grid" })).toBe(false);
+  });
+});
+
+describe("search state author", () => {
+  test("the author key round-trips through readSearchState", () => {
+    expect(readSearchState("?author=wespd").author).toBe("wespd");
+    expect(readSearchState("").author).toBe("");
+  });
+
+  test("buildSearchString emits the author key only when set", () => {
+    expect(buildSearchString({ ...readSearchState(""), author: "wespd" })).toBe("?author=wespd");
+    expect(buildSearchString(readSearchState(""))).toBe("");
+  });
+
+  // readSearchState now constrains author to the GitHub owner shape, so a value with a
+  // space (which a real derived author can never contain) is rejected to "" — closing the
+  // tab-title / og / filter-chip spoofing vector for arbitrary ?author= copy.
+  test("an author outside the GitHub owner shape is rejected", () => {
+    expect(readSearchState("?author=a%20b").author).toBe("");
+  });
+
+  test("a valid GitHub owner round-trips and invalid shapes normalize to empty", () => {
+    expect(readSearchState("?author=WesPD-123").author).toBe("WesPD-123");
+    expect(readSearchState("?author=%3Cimg%3E").author).toBe("");
+    expect(readSearchState(`?author=${"a".repeat(40)}`).author).toBe("");
+  });
+});
+
+describe("readSearchState", () => {
+  // Mirrors the sort validation: an unknown ?category=bogus would otherwise filter the
+  // catalog to nothing with no active-filter chip and no way back but the sidebar.
+  test("an unknown category falls back to all", () => {
+    expect(readSearchState("?category=bogus").category).toBe("all");
+    expect(readSearchState("?category=integration").category).toBe("integration");
+    expect(hasActiveSearch(readSearchState("?category=bogus"))).toBe(false);
+  });
 });
