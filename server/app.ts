@@ -27,7 +27,7 @@ import {
   PublishRequestValidationError,
   nameClaimMatchesRequest,
   normalizePublishRequestInput,
-  packNameScope,
+  packNamePolicyViolation,
   packRoutePath,
   publishRequestNextStep,
   publishRequestUnread,
@@ -1145,6 +1145,33 @@ async function validateAndStorePublishRequest(
   const priorStatus = publishRequest.status;
   let validated: PublishRequestRow;
   try {
+    // The namespace rule (H1a/H1b), from the SAME definition assertPublishRequestCanMerge enforces
+    // at approve — 422 here, 403 there. Without it validation was namespace-blind, so the only
+    // feedback a publisher got about the name was PACK_NAME_MISMATCH, whose old advice ("pack.toml
+    // declares X") steered them onto the reserved BARE name: that submission passed validation and
+    // parked as a pending_review row the gate can never approve, while their correctly-scoped
+    // attempt was the one that failed. Refusing here turns that dead end into a durable
+    // validation_failed row carrying the rename instruction.
+    //
+    // FIRST, before the pack.toml fetch and the `gc pack release hash` subprocess: one indexed
+    // claim read precedes all network and subprocess spend, and it guarantees the authoritative
+    // instruction fires before PACK_NAME_MISMATCH ever can.
+    //
+    // Here rather than in publish-validation.ts: this is outside the injectable
+    // validatePublishRequest seam (so no test stub or the hermetic Playwright harness can fork
+    // enforcement), it is the single choke point for all three validation entry points, and it has
+    // the store access H1a's grandfather escape needs — the set of publishable bare names is
+    // DB-derived, so it must be a live claim read, never a static list.
+    //
+    // Deliberately inside this try: a store hiccup on the claim read degrades to the existing 500
+    // PUBLISH_VALIDATION_FAILED + validation_failed row, recoverable by re-validating, exactly as a
+    // transient upstream fetch failure already does. Validation confers no forward authority — the
+    // gate re-runs the rule on live claim state at approve.
+    const violation = packNamePolicyViolation(
+      publishRequest,
+      await store.getPackNameClaim(publishRequest.requestedName),
+    );
+    if (violation) throw new RequestError(422, violation.code, violation.message);
     const entry = await validatePublishRequest(publishRequest, config);
     validated = await store.markPublishRequestValidated(id, entry, options);
   } catch (error) {
@@ -1398,33 +1425,16 @@ async function assertPublishRequestCanMerge(
   // registryEntry.name: requestedName is what the store keys the claim by, so measuring anything
   // else could pass the gate for one name and pin another.
   const requestedName = publishRequest.requestedName;
-  const scope = packNameScope(requestedName);
-  const repoOwnerLogin = publishRequest.repository.owner.toLowerCase();
   const claim = await store.getPackNameClaim(requestedName);
 
-  // H1a — bare (unscoped) names are reserved. They are the base/ingested half of the namespace,
-  // and the only bare names a publish may use are the ones already claimed when this gate
-  // shipped (the closed grandfathered set). No staff bypass exists on purpose: first-party packs
-  // arrive through sources.toml ingest, never through publish, so a bypass would only ever be
-  // used to hand out a reserved name.
-  if (!scope && !claim) {
-    throw new RequestError(
-      403,
-      "PUBLISH_NAME_RESERVED",
-      `Unscoped pack names are reserved. Publish ${requestedName} as ${repoOwnerLogin}/${requestedName} instead.`,
-    );
-  }
-
-  // H1b — a scoped name's scope must be the GitHub owner of the source repo, case-folded. Step 2
-  // already proved control of that repo, and proving repo control IS proving scope control, so
-  // this needs no separate verification flow.
-  if (scope && scope !== repoOwnerLogin) {
-    throw new RequestError(
-      403,
-      "PUBLISH_SCOPE_MISMATCH",
-      `Pack name scope ${JSON.stringify(scope)} does not match the source repository owner ${JSON.stringify(publishRequest.repository.owner)}.`,
-    );
-  }
+  // H1a/H1b, from the one definition validation also enforces (packNamePolicyViolation in
+  // server/publish.ts). Same codes, same 403, same position — after the ownership step, because
+  // both rules are measured against the repo step 2 proved. Validation refuses these earlier with
+  // 422, but that answer is fail-fast feedback and never carried-forward authority: a claim can be
+  // minted or released in the window, so the rule re-runs here against LIVE claim state, inside the
+  // approve path's per-name lock. Neither override key opens either code.
+  const violation = packNamePolicyViolation(publishRequest, claim);
+  if (violation) throw new RequestError(403, violation.code, violation.message);
 
   // H2 — the name's existing claim pins it to a REPO (not a person, so teammates can cut
   // releases). A mismatch is a takeover attempt; staff can authorize an audited RE-PIN instead,

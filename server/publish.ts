@@ -82,6 +82,54 @@ export function packRoutePath(name: string) {
   return `/packs/${packNameSegments(name).map(encodeURIComponent).join("/")}`;
 }
 
+export type PackNamePolicyViolation = {
+  code: "PUBLISH_NAME_RESERVED" | "PUBLISH_SCOPE_MISMATCH";
+  message: string;
+};
+
+// H1a + H1b: is this name legal for this source repository at all? A pure, store-free predicate —
+// the claim is passed in because H1a's grandfather escape needs it and both callers already read it.
+//
+// Lives here, and returns a violation instead of throwing, because BOTH the merge gate and
+// validation consume the byte-identical rule at different statuses: validateAndStorePublishRequest
+// refuses 422 before any upstream fetch, and assertPublishRequestCanMerge refuses 403 at approve.
+// One Source of Truth — two copies could admit a submission the gate later refuses, which is
+// exactly the trap that produced the zombie pending_review row this rule exists to stop: the
+// scoped, correct name failed validation while the reserved bare name sailed through it.
+export function packNamePolicyViolation(
+  request: Pick<PublishRequestRow, "requestedName" | "repository">,
+  claim: PackNameClaim | null,
+): PackNamePolicyViolation | undefined {
+  const scope = packNameScope(request.requestedName);
+  const ownerLower = request.repository.owner.toLowerCase();
+
+  // H1a — bare (unscoped) names are reserved. They are the base/ingested half of the namespace,
+  // and the only bare names a publish may use are the ones already claimed when this rule shipped
+  // (the closed grandfathered set, read LIVE from the store — never a static list). No staff bypass
+  // exists on purpose: first-party packs arrive through sources.toml ingest, never through publish,
+  // so a bypass would only ever be used to hand out a reserved name.
+  if (!scope && !claim) {
+    const scoped = `${ownerLower}/${request.requestedName}`;
+    return {
+      code: "PUBLISH_NAME_RESERVED",
+      message: `Unscoped pack names are reserved. Publish this pack as ${JSON.stringify(scoped)}: set [pack].name = ${JSON.stringify(scoped)} in pack.toml, commit, and request that name.`,
+    };
+  }
+
+  // H1b — a scoped name's scope must be the GitHub owner of the source repo, case-folded. At the
+  // gate, step 2 has already proved control of that repo, and proving repo control IS proving scope
+  // control, so this needs no separate verification flow. There is no override at either surface.
+  if (scope && scope !== ownerLower) {
+    const scoped = `${ownerLower}/${request.requestedName.slice(scope.length + 1)}`;
+    return {
+      code: "PUBLISH_SCOPE_MISMATCH",
+      message: `Pack name scope ${JSON.stringify(scope)} does not match the source repository owner ${JSON.stringify(request.repository.owner)}. Publish this pack as ${JSON.stringify(scoped)}: set [pack].name = ${JSON.stringify(scoped)} in pack.toml and request that name.`,
+    };
+  }
+
+  return undefined;
+}
+
 // Does an incoming publish come from the repo a name claim is pinned to? Compares GitHub's
 // numeric repository id when BOTH sides know it (rename-stable), and otherwise falls back to the
 // case-folded repo full name — claim-only publishes and grandfathered claims prove no ids. The

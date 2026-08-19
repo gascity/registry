@@ -1,6 +1,7 @@
 import { parse } from "smol-toml";
 import type { ServerConfig } from "./config";
 import { RequestError } from "./http";
+import { packNameScope } from "./publish";
 import type { PublishRegistryEntry, PublishRequestRow } from "./types";
 
 type PackToml = {
@@ -31,11 +32,7 @@ export async function validatePublishRequestForRegistry(
   const packToml = await fetchTextLimited(packTomlUrl(request), maxPackTomlBytes, fetchFn);
   const actualPackName = packNameFromToml(packToml, request.packPath);
   if (actualPackName !== request.requestedName) {
-    throw new RequestError(
-      422,
-      "PACK_NAME_MISMATCH",
-      `pack.toml declares ${JSON.stringify(actualPackName)}, not ${JSON.stringify(request.requestedName)}.`,
-    );
+    throw new RequestError(422, "PACK_NAME_MISMATCH", packNameMismatchMessage(request, actualPackName));
   }
 
   const readme = await fetchReadme(request, fetchFn);
@@ -172,6 +169,31 @@ function packNameFromToml(text: string, packPath: string) {
     throw new RequestError(422, "PACK_NAME_MISSING", `${displayPackPath(packPath)}/pack.toml is missing [pack].name.`);
   }
   return name;
+}
+
+// A mismatch message is an instruction, and this one used to point somewhere illegal: naming only
+// the declared name made "submit the name pack.toml declares" the locally-rational fix, and for a
+// BARE declared name that is precisely the submission the registry reserves. That is how one repo
+// produced two dead publishes — the correctly-scoped request refused here, and the reserved bare
+// name it steered the author onto parked as a row the approve gate can never merge.
+//
+// The namespace rule now runs BEFORE this check (validateAndStorePublishRequest in server/app.ts),
+// so requestedName is known policy-legal whenever this fires: "make pack.toml match the request" is
+// always safe advice. Only variant B additionally offers the declared name, and only because a
+// scope equal to the source repo's owner is exactly what H1b accepts. Variant selection is static
+// on the declared name — this module stays deliberately store-free.
+function packNameMismatchMessage(request: PublishRequestRow, declared: string) {
+  const wanted = JSON.stringify(request.requestedName);
+  const packTomlPath = `${displayPackPath(request.packPath)}/pack.toml`;
+  const preamble = `pack.toml declares ${JSON.stringify(declared)}, but this request is for ${wanted}.`;
+  const declaredScope = packNameScope(declared);
+  if (!declaredScope) {
+    return `${preamble} Unscoped names are reserved and cannot be newly published — update [pack].name to ${wanted} in ${packTomlPath}, commit, and resubmit the new commit.`;
+  }
+  if (declaredScope === request.repository.owner.toLowerCase()) {
+    return `${preamble} Update [pack].name to ${wanted} in ${packTomlPath} (commit and resubmit), or submit the name pack.toml declares.`;
+  }
+  return `${preamble} Update [pack].name to ${wanted} in ${packTomlPath}, commit, and resubmit the new commit.`;
 }
 
 function descriptionFromReadme(text: string | undefined) {

@@ -680,7 +680,7 @@
             }
           },
           "422": {
-            "description": "Invalid create input, or synchronous validation failed after creation. The latter includes both the machine-readable error and the durable validation_failed request.",
+            "description": "Invalid create input, or synchronous validation failed after creation. The latter includes both the machine-readable error and the durable validation_failed request. Validation judges the NAME as well as the contents: `PUBLISH_NAME_RESERVED` (unscoped pack names are reserved unless the registry already holds a claim for that name) and `PUBLISH_SCOPE_MISMATCH` (a scoped name's scope must equal the source repository's owner, case-folded) are refused here, before pack.toml is fetched. Both codes also appear as 403 on the approve route, which re-checks the same rule against live claim state; clients keying on `error.code` need no change, clients keying on (status, code) pairs must accept both.",
             "content": {
               "application/json": {
                 "schema": {
@@ -977,7 +977,7 @@
             }
           },
           "422": {
-            "description": "Validation failed. The response includes both the machine-readable error and the durable validation_failed request.",
+            "description": "Validation failed. The response includes both the machine-readable error and the durable validation_failed request. Namespace policy is checked first, so `PUBLISH_NAME_RESERVED` (unscoped pack names are reserved unless the registry already holds a claim for that name) and `PUBLISH_SCOPE_MISMATCH` (a scoped name's scope must equal the source repository's owner, case-folded) are refused here — including for queued rows that predate the check, which fail their next validation with the rename instruction. Both codes also appear as 403 on the approve route, which re-checks the same rule against live claim state.",
             "content": {
               "application/json": {
                 "schema": {

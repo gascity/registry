@@ -38,14 +38,21 @@ http://127.0.0.1:5173/api/dev/sign-in?handle=alice     # a plain user
 
 **Pack names are partitioned.** Ingested (first-party) packs are bare-named; every direct publish
 must be **scoped** `owner/pack`, where `owner` is the lowercase GitHub owner of the source repo.
-Approving anything else is refused:
+Anything else is refused:
 
-- `403 PUBLISH_NAME_RESERVED` — an unscoped name with no existing claim. There is no override;
-  first-party packs arrive through `sources.toml` ingest, not through publish.
-- `403 PUBLISH_SCOPE_MISMATCH` — the scope segment is not the source repo's owner.
-- `409 PUBLISH_NAME_OWNER_MISMATCH` — the name is already claimed by a different repo. Releases
-  must come from the claimed repo; staff can re-point the claim with a **Name re-pin reason**
-  (`namePinOverrideReason`), which is audited with the old and new binding.
+- `422 PUBLISH_NAME_RESERVED` — an unscoped name with no existing claim. Refused at submit, before
+  the `pack.toml` fetch. There is no override; first-party packs arrive through `sources.toml`
+  ingest, not through publish.
+- `422 PUBLISH_SCOPE_MISMATCH` — the scope segment is not the source repo's owner. Same, at submit.
+- `409 PUBLISH_NAME_OWNER_MISMATCH` — the name is already claimed by a different repo, and this one
+  is refused at approve. Releases must come from the claimed repo; staff can re-point the claim with
+  a **Name re-pin reason** (`namePinOverrideReason`), which is audited with the old and new binding.
+
+The two name codes never park a row in `pending_review` — the submission lands as
+`validation_failed` carrying the rename instruction. Approve re-checks the same rule against live
+claim state and answers `403` with the same codes, but the only rows that can still reach it are
+ones queued before the check shipped, or one seeded straight into
+`.registry-data/registry.local.json`.
 
 So while testing, publish `alice/my-pack` from `github.com/alice/anything`, not `my-pack`.
 
@@ -182,8 +189,12 @@ finds the real problem fastest):
       `pending_review`, or returns non-2xx with a durable `validation_failed` request and
       machine-readable error code.
 - [ ] **Namespace** — a scoped name matching the source repo's owner (`alice/my-pack` from
-      `github.com/alice/...`) approves; an unscoped name is refused `PUBLISH_NAME_RESERVED`, and a
-      foreign scope is refused `PUBLISH_SCOPE_MISMATCH`. Neither is overridable.
+      `github.com/alice/...`) approves; an unscoped name is refused at submit with
+      `422 PUBLISH_NAME_RESERVED` and a foreign scope with `422 PUBLISH_SCOPE_MISMATCH`. Neither is
+      overridable, and neither reaches the queue — each leaves a durable `validation_failed` request
+      naming the scoped name to use instead. Approve answers `403` with the same codes, but only a
+      row queued before the check shipped can still trigger it, so look for one in the queue rather
+      than trying to submit one.
 - [ ] **Verify ownership (Trust tab)** — open a published pack → **Trust** tab → verify via GitHub
       (hits `/api/ownership/github/start`; needs the App's **Metadata: Read** and you being repo
       **admin**). A claim-only request from a verified owner then approves **without** a staff
