@@ -70,9 +70,19 @@ jobs:
 
 const publishErrors = [
   {
+    code: "PUBLISH_NAME_RESERVED",
+    meaning: "The requested name is unscoped. Bare names belong to the ingested catalog and are reserved unless the registry already holds a claim for one.",
+    action: "Publish as <github-owner>/<name>: set [pack].name to the scoped name in pack.toml, commit, then request that name.",
+  },
+  {
+    code: "PUBLISH_SCOPE_MISMATCH",
+    meaning: "The name's scope is not the GitHub owner of the source repository, case-folded. Proving control of a repo proves control of that owner's scope and no other.",
+    action: "Publish as <github-owner>/<name> for the repo you are publishing from: set [pack].name in pack.toml and request that name.",
+  },
+  {
     code: "PACK_NAME_MISMATCH",
     meaning: "The name requested from the registry differs from [pack].name in pack.toml.",
-    action: "Make the two names identical, commit and push, then submit the new commit.",
+    action: "Set [pack].name to the requested name in pack.toml, commit and push, then submit the new commit.",
   },
   {
     code: "UPSTREAM_FETCH_FAILED",

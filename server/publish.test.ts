@@ -9,15 +9,18 @@ import {
 import {
   normalizePackPath,
   normalizePublishRequestInput,
+  packNamePolicyViolation,
   packNameScope,
   packNameSegments,
   packRoutePath,
   parseGitHubRepositoryUrl,
   PublishRequestValidationError,
+  type PackNamePolicyViolation,
 } from "./publish";
 import { computePackHash, validatePublishRequestForRegistry } from "./publish-validation";
 import { createStore } from "./store";
 import type { ServerConfig } from "./config";
+import type { PackNameClaim } from "./types";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
 const hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -47,6 +50,106 @@ describe("pack name URL helpers (pinned to src/lib)", () => {
     expect(packNameScope("gascity")).toBeUndefined();
     expect(packNameScope("cacc-twin-team")).toBeUndefined();
     expect(packNameScope("gascity/")).toBeUndefined();
+  });
+});
+
+// The ONE definition of H1a/H1b, consumed by validateAndStorePublishRequest (422, before any
+// upstream fetch) and by assertPublishRequestCanMerge (403, at approve). Both surfaces read these
+// exact strings, so pinning them here pins what a publisher is told at either one.
+describe("pack namespace policy (H1a/H1b)", () => {
+  const claimFor = (name: string): PackNameClaim => ({
+    name,
+    repoFullName: "tdupu/mathcity",
+    githubOwnerLogin: "tdupu",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  const requestFor = (requestedName: string, owner: string) => ({
+    requestedName,
+    repository: {
+      host: "github.com" as const,
+      owner,
+      name: "mathcity",
+      fullName: `${owner}/mathcity`,
+    },
+  });
+
+  const cases: Array<{
+    label: string;
+    requestedName: string;
+    owner: string;
+    claim: PackNameClaim | null;
+    expected: PackNamePolicyViolation | undefined;
+  }> = [
+    {
+      label: "a new bare name is reserved",
+      requestedName: "mathcity",
+      owner: "TDupu",
+      claim: null,
+      expected: {
+        code: "PUBLISH_NAME_RESERVED",
+        message:
+          'Unscoped pack names are reserved. Publish this pack as "tdupu/mathcity": set [pack].name = "tdupu/mathcity" in pack.toml, commit, and request that name.',
+      },
+    },
+    {
+      // The grandfather escape, and why the claim is a LIVE store read rather than a static list:
+      // the set is DB-derived (approve-time minting plus init()'s backfill) and staff can re-pin it.
+      label: "an already-claimed bare name is grandfathered",
+      requestedName: "cacc-twin-team",
+      owner: "wespd",
+      claim: claimFor("cacc-twin-team"),
+      expected: undefined,
+    },
+    {
+      label: "a scope matching the repo owner is legal case-insensitively",
+      requestedName: "tdupu/mathcity",
+      owner: "TDupu",
+      claim: null,
+      expected: undefined,
+    },
+    {
+      label: "a foreign scope is refused",
+      requestedName: "microsoft/mathcity",
+      owner: "TDupu",
+      claim: null,
+      expected: {
+        code: "PUBLISH_SCOPE_MISMATCH",
+        message:
+          'Pack name scope "microsoft" does not match the source repository owner "TDupu". Publish this pack as "tdupu/mathcity": set [pack].name = "tdupu/mathcity" in pack.toml and request that name.',
+      },
+    },
+    {
+      // A claim never excuses a foreign scope: H1a's escape is bare-only, and H1b has no override
+      // at either surface.
+      label: "a foreign scope is refused even when the name is claimed",
+      requestedName: "microsoft/mathcity",
+      owner: "TDupu",
+      claim: claimFor("microsoft/mathcity"),
+      expected: {
+        code: "PUBLISH_SCOPE_MISMATCH",
+        message:
+          'Pack name scope "microsoft" does not match the source repository owner "TDupu". Publish this pack as "tdupu/mathcity": set [pack].name = "tdupu/mathcity" in pack.toml and request that name.',
+      },
+    },
+  ];
+
+  for (const { label, requestedName, owner, claim, expected } of cases) {
+    test(label, () => {
+      expect(packNamePolicyViolation(requestFor(requestedName, owner), claim)).toEqual(expected);
+    });
+  }
+
+  // Every refusal names a replacement that would itself pass the rule — otherwise the message
+  // steers the publisher into the next refusal, which is how the reserved bare name got submitted
+  // in the first place.
+  test("the suggested name in each refusal is itself policy-legal", () => {
+    for (const { requestedName, owner, claim, expected } of cases) {
+      if (!expected) continue;
+      const suggested = expected.message.match(/set \[pack\]\.name = "([^"]+)"/)?.[1];
+      expect(suggested).toBeTruthy();
+      expect(packNamePolicyViolation(requestFor(suggested!, owner), claim)).toBeUndefined();
+    }
   });
 });
 
@@ -375,6 +478,84 @@ describe("publish request validation", () => {
       computeHash: async () => hash,
     });
     await expect(promise).rejects.toThrow(/pack\.toml declares/i);
+  });
+
+  // The message that produced the incident. It named only the DECLARED name, so "submit what
+  // pack.toml declares" read as the fix — and when the declared name is bare, that is the one
+  // submission the registry reserves. Each variant below has to point somewhere the namespace rule
+  // would actually accept, and only the one that can name the declared name does.
+  describe("pack name mismatch guidance", () => {
+    const mismatchRequest = {
+      id: "prq_variants",
+      status: "pending_validation" as const,
+      // Original-case owner: the scope comparison is case-folded, so a declared "tdupu/..." is the
+      // publisher's OWN scope here and variant B may offer it.
+      repository: {
+        host: "github.com" as const,
+        owner: "TDupu",
+        name: "mathcity",
+        fullName: "TDupu/mathcity",
+      },
+      repoUrl: "https://github.com/TDupu/mathcity",
+      sourceUrl: `https://github.com/TDupu/mathcity/tree/${commit}`,
+      packPath: ".",
+      commit,
+      requestedName: "tdupu/mathcity",
+      requestedVersion: "0.2.1",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      submitterUnreadAt: null,
+      submittedBy: { id: "usr_tdupu", handle: "tdupu", displayName: "TDupu", role: "user" as const },
+    };
+    const mismatchMessage = async (declared: string) => {
+      const promise = validatePublishRequestForRegistry(mismatchRequest, testConfig(), {
+        fetchFn: async (url) => {
+          const path = new URL(String(url)).pathname;
+          if (path.endsWith("/pack.toml")) return new Response(`[pack]\nname = ${JSON.stringify(declared)}\n`);
+          return new Response("# mathcity");
+        },
+        computeHash: async () => hash,
+      });
+      return await promise.then(
+        () => {
+          throw new Error(`expected ${JSON.stringify(declared)} to be refused`);
+        },
+        (error: Error) => error.message,
+      );
+    };
+
+    test("a bare declared name is told the name is reserved, and never offered back", async () => {
+      expect(await mismatchMessage("mathcity")).toBe(
+        'pack.toml declares "mathcity", but this request is for "tdupu/mathcity". Unscoped names are reserved and cannot be newly published — update [pack].name to "tdupu/mathcity" in ./pack.toml, commit, and resubmit the new commit.',
+      );
+    });
+
+    test("a declared name in the publisher's own scope is offered as the second fix", async () => {
+      expect(await mismatchMessage("tdupu/other-pack")).toBe(
+        'pack.toml declares "tdupu/other-pack", but this request is for "tdupu/mathcity". Update [pack].name to "tdupu/mathcity" in ./pack.toml (commit and resubmit), or submit the name pack.toml declares.',
+      );
+    });
+
+    test("a foreign-scoped declared name gets the pack.toml edit only", async () => {
+      expect(await mismatchMessage("microsoft/mathcity")).toBe(
+        'pack.toml declares "microsoft/mathcity", but this request is for "tdupu/mathcity". Update [pack].name to "tdupu/mathcity" in ./pack.toml, commit, and resubmit the new commit.',
+      );
+    });
+
+    // The property the three strings exist to hold: every fix a variant PRESCRIBES is legal under
+    // the namespace rule, and the declared name is offered back only when it is legal too.
+    test("no variant steers the publisher into a name the namespace rule would refuse", async () => {
+      for (const declared of ["mathcity", "tdupu/other-pack", "microsoft/mathcity"]) {
+        const message = await mismatchMessage(declared);
+        const prescribed = message.match(/\[pack\]\.name to "([^"]+)"/)?.[1];
+        expect(packNamePolicyViolation({ ...mismatchRequest, requestedName: prescribed! }, null))
+          .toBeUndefined();
+        const offersDeclared = message.includes("or submit the name pack.toml declares");
+        expect(offersDeclared).toBe(
+          packNamePolicyViolation({ ...mismatchRequest, requestedName: declared }, null) === undefined,
+        );
+      }
+    });
   });
 });
 

@@ -908,20 +908,42 @@ describe("local registry publish integration", () => {
       const publisher = await harness.signIn("bare-namer", undefined, { orgMember: true });
       const admin = await harness.signIn("admin", "admin");
 
-      const bare = await harness.publishWithGitHubActionsToken(
+      // The refusal now lands at SUBMIT: validation runs the same rule, so a reserved name never
+      // becomes a pending_review row that nothing downstream could ever approve.
+      const bare = await harness.publishExpectingError(
+        publisher,
         await harness.createPack("bare-new", "1.0.0", { name: "integration-bare-new" }),
+        422,
+        "PUBLISH_NAME_RESERVED",
       );
-      expect(bare.submissionMethod).toBe("github_actions_oidc");
-      const error = await harness.approveExpectingError(admin, bare.id, 403, "PUBLISH_NAME_RESERVED");
-      // The refusal names the scoped form the publisher should have used.
-      expect(error.message).toContain(`${owner}/integration-bare-new`);
+      // The refusal names the scoped form the publisher should have used, and the row it leaves
+      // behind says the same thing where the publisher will actually read it.
+      expect(bare.error.message).toContain(`${owner}/integration-bare-new`);
+      expect(bare.publishRequest).toMatchObject({
+        status: "validation_failed",
+        actionRequiredBy: "submitter",
+        statusReason: bare.error.message,
+      });
 
-      // No staff bypass: neither override key opens a reserved name.
-      await harness.approveExpectingError(admin, bare.id, 403, "PUBLISH_NAME_RESERVED", {
+      // The approve gate is NOT weakened by validation refusing first. A repo-proven, policy-illegal
+      // row seeded store-direct — the shape the pre-gate world produced — is still refused, and
+      // neither override key opens a reserved name.
+      const seeded = await harness.seedValidatedPublish(
+        publisher.userId,
+        await harness.createPack("bare-seeded", "1.0.0", { name: "integration-bare-seeded" }),
+        {
+          submissionMethod: "github_actions_oidc",
+          sourceIdentity: sourceIdentityFor(`${owner}/${repo}`),
+        },
+      );
+      const error = await harness.approveExpectingError(admin, seeded.id, 403, "PUBLISH_NAME_RESERVED");
+      expect(error.message).toContain(`${owner}/integration-bare-seeded`);
+      await harness.approveExpectingError(admin, seeded.id, 403, "PUBLISH_NAME_RESERVED", {
         ownershipOverrideReason: "I know these people",
         namePinOverrideReason: "let them have it",
       });
       expect(await harness.store.getPackNameClaim("integration-bare-new")).toBeNull();
+      expect(await harness.store.getPackNameClaim("integration-bare-seeded")).toBeNull();
 
       // The same pack under its owner's scope is fine — the gate blocks the shape, not the pack.
       const scoped = await harness.publishWithSession(
@@ -942,28 +964,307 @@ describe("local registry publish integration", () => {
       const attacker = await harness.signIn("scope-squatter", undefined, { orgMember: true });
       const admin = await harness.signIn("admin", "admin");
 
-      // Repo-proven for acme/registry-fixtures, but the name claims the `microsoft` scope.
-      const squat = await harness.publishWithGitHubActionsToken(
-        await harness.createPack("scope-squat", "1.0.0", { name: "microsoft/integration-scope-squat" }),
+      // Repo-proven for acme/registry-fixtures, but the name claims the `microsoft` scope. The
+      // strongest credential in the system does not buy a foreign scope, and validation says so at
+      // submit rather than parking a row for a staff click.
+      const squat = await expectRefusedSubmit(
+        await harness.publishWithGitHubActionsTokenRaw(
+          await harness.createPack("scope-squat", "1.0.0", { name: "microsoft/integration-scope-squat" }),
+        ),
+        422,
+        "PUBLISH_SCOPE_MISMATCH",
       );
-      const error = await harness.approveExpectingError(admin, squat.id, 403, "PUBLISH_SCOPE_MISMATCH");
-      expect(error.message).toContain("microsoft");
-      expect(error.message).toContain(owner);
-
-      // Not overridable either: staff cannot hand out a scope whose owner nobody proved.
-      await harness.approveExpectingError(admin, squat.id, 403, "PUBLISH_SCOPE_MISMATCH", {
-        ownershipOverrideReason: "vouched for",
-        namePinOverrideReason: "vouched for",
+      expect(squat.error.message).toContain("microsoft");
+      expect(squat.error.message).toContain(owner);
+      expect(squat.publishRequest).toMatchObject({
+        status: "validation_failed",
+        actionRequiredBy: "submitter",
+        statusReason: squat.error.message,
       });
 
       // A claim-only submission can't route around it either — the asserted repo owner is still
       // what the scope is compared against.
-      const claimOnly = await harness.publishWithPersonalToken(
+      const claimOnly = await harness.publishExpectingError(
         attacker,
         await harness.createPack("scope-squat-cli", "1.0.0", { name: "microsoft/integration-scope-cli" }),
+        422,
+        "PUBLISH_SCOPE_MISMATCH",
       );
-      await harness.approveExpectingError(admin, claimOnly.id, 403, "PUBLISH_SCOPE_MISMATCH");
+      expect(claimOnly.publishRequest?.status).toBe("validation_failed");
+
+      // Not overridable at approve either: staff cannot hand out a scope whose owner nobody proved,
+      // so a policy-illegal row seeded store-direct stays unmergeable with both override keys.
+      const seeded = await harness.seedValidatedPublish(
+        attacker.userId,
+        await harness.createPack("scope-seeded", "1.0.0", { name: "microsoft/integration-scope-seeded" }),
+        {
+          submissionMethod: "github_actions_oidc",
+          sourceIdentity: sourceIdentityFor(`${owner}/${repo}`),
+        },
+      );
+      await harness.approveExpectingError(admin, seeded.id, 403, "PUBLISH_SCOPE_MISMATCH", {
+        ownershipOverrideReason: "vouched for",
+        namePinOverrideReason: "vouched for",
+      });
       expect(await harness.store.getPackNameClaim("microsoft/integration-scope-squat")).toBeNull();
+      expect(await harness.store.getPackNameClaim("microsoft/integration-scope-seeded")).toBeNull();
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // THE INCIDENT. Two publishes of one repo+commit: the correctly-scoped name FAILED validation
+  // (pack.toml still declared the bare name) while the reserved bare name PASSED it and parked as a
+  // pending_review row the approve gate can never merge. Validation was namespace-blind, so the only
+  // thing it ever said about a name was PACK_NAME_MISMATCH — and that message made submitting the
+  // reserved name the locally-rational fix. Both shapes are now refused where the author is looking.
+  test("a policy-illegal name fails validation and lands a durable, actionable validation_failed row", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const publisher = await harness.signIn("policy-fail-pub", undefined, { orgMember: true });
+
+      for (const { slug, requestedName, code, fix } of [
+        {
+          slug: "policy-bare",
+          requestedName: "integration-policy-bare",
+          code: "PUBLISH_NAME_RESERVED",
+          fix: `${owner}/integration-policy-bare`,
+        },
+        {
+          slug: "policy-scope",
+          requestedName: "someone-else/integration-policy-scope",
+          code: "PUBLISH_SCOPE_MISMATCH",
+          fix: `${owner}/integration-policy-scope`,
+        },
+      ]) {
+        const refused = await harness.publishExpectingError(
+          publisher,
+          await harness.createPack(slug, "1.0.0", { name: requestedName }),
+          422,
+          code,
+        );
+        // The instruction is the whole point of the refusal: it names the one legal replacement, in
+        // the pack.toml terms the author has to edit anyway.
+        expect(refused.error.message).toContain(`set [pack].name = ${JSON.stringify(fix)}`);
+
+        const row = refused.publishRequest;
+        expect(row?.requestedName).toBe(requestedName);
+        expect(row?.status).toBe("validation_failed");
+        expect(row?.actionRequiredBy).toBe("submitter");
+        // Persisted verbatim into BOTH the fields the status surfaces render, and no half-built
+        // registry entry survives the refusal.
+        expect(row?.statusReason).toBe(refused.error.message);
+        expect(row?.validationError).toBe(refused.error.message);
+        expect(row?.registryEntry).toBeUndefined();
+        // Durable, not just echoed: the row is what the author's account page will show.
+        expect((await harness.store.getPublishRequest(row!.id))?.statusReason).toBe(refused.error.message);
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // H1a's escape is a LIVE claim lookup, never a static list — the grandfathered set is DB-derived
+  // (approve-time minting plus init()'s backfill) and staff can still re-pin it. A name's legality
+  // therefore has to be answered at validation time against the store, not frozen at deploy time.
+  test("a grandfathered bare name validates once the claim exists, and not before", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const maintainer = await harness.signIn("grandfather-pub");
+      const admin = await harness.signIn("admin", "admin");
+      const bare = "integration-grandfathered";
+      const legacyRepo = `wespd/${bare}`;
+      const legacyPack = (version: string, over: { commit?: string } = {}) =>
+        harness.createPack("grandfather", version, {
+          name: bare,
+          repoUrl: `https://github.com/${legacyRepo}`,
+          ...over,
+        });
+
+      // Unclaimed, so the reserved-name rule bites even for the repo that will end up holding it.
+      await harness.publishExpectingError(maintainer, await legacyPack("0.9.0"), 422, "PUBLISH_NAME_RESERVED");
+
+      // The pre-gate world's approved release mints the claim...
+      await harness.seedApprovedPublish(maintainer.userId, admin.userId, await legacyPack("1.0.0"));
+      expect(await harness.store.getPackNameClaim(bare)).toMatchObject({ repoFullName: legacyRepo });
+
+      // ...and the same bare name now validates straight through to the queue and approves.
+      const next = await harness.publishWithGitHubActionsToken(await legacyPack("1.1.0", { commit: secondCommit }));
+      expect(next.status).toBe("pending_review");
+      expect((await harness.approve(admin, next.id)).status).toBe("approved");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // WHERE the check lives, pinned. It sits in app.ts ahead of the injectable validatePublishRequest
+  // seam, so no test stub — and not index.harness.ts, which replaces the validator wholesale for
+  // browser e2e — can fork enforcement between production and a harness. Running first is also what
+  // keeps a doomed submission off the network and off the `gc pack release hash` subprocess.
+  test("the namespace rule runs before the injected validator and cannot be stubbed around", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const publisher = await harness.signIn("bypass-pub", undefined, { orgMember: true });
+      const before = harness.validatorCalls();
+
+      await harness.publishExpectingError(
+        publisher,
+        await harness.createPack("bypass-bare", "1.0.0", { name: "integration-bypass-bare" }),
+        422,
+        "PUBLISH_NAME_RESERVED",
+      );
+      await harness.publishExpectingError(
+        publisher,
+        await harness.createPack("bypass-scope", "1.0.0", { name: "someone-else/integration-bypass" }),
+        422,
+        "PUBLISH_SCOPE_MISMATCH",
+      );
+      expect(harness.validatorCalls()).toBe(before);
+
+      // The control, so the counter is measuring something: a legal name does reach the validator.
+      const legal = await harness.publishWithSession(publisher, await harness.createPack("bypass-legal", "1.0.0"));
+      expect(legal.status).toBe("pending_review");
+      expect(harness.validatorCalls()).toBe(before + 1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The author's way out, end to end. A refusal that cannot be corrected is just a slower dead end,
+  // and each step here is a distinct mechanism: the rename lands under a different dedupe key, a
+  // corrected commit rides the supersede CAS, and an identical re-run re-validates in place.
+  test("a refused name leaves every correction path open", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const publisher = await harness.signIn("no-trap-pub", undefined, { orgMember: true });
+      const scoped = `${owner}/integration-no-trap`;
+
+      const refused = await harness.publishExpectingError(
+        publisher,
+        await harness.createPack("no-trap", "1.0.0", { name: "integration-no-trap" }),
+        422,
+        "PUBLISH_NAME_RESERVED",
+      );
+
+      // (i) The rename the message prescribes: a different dedupe key, so a fresh row that validates
+      // clean rather than a 409 against the refused one.
+      const renamed = await harness.publishWithSession(
+        publisher,
+        await harness.createPack("no-trap", "1.0.0", { name: scoped }),
+      );
+      expect(renamed.id).not.toBe(refused.publishRequest?.id);
+      expect(renamed.status).toBe("pending_review");
+
+      // (ii) A corrected commit under the same name@version supersedes its own predecessor.
+      const recommitted = await harness.publishWithSession(
+        publisher,
+        await harness.createPack("no-trap", "1.0.0", { name: scoped, commit: secondCommit }),
+      );
+      expect(recommitted.id).not.toBe(renamed.id);
+      expect((await harness.store.getPublishRequest(renamed.id))?.status).toBe("rejected");
+
+      // (iii) An identical re-run re-validates the SAME row: a CI retry is not an error.
+      const replay = await harness.publishWithSession(
+        publisher,
+        await harness.createPack("no-trap", "1.0.0", { name: scoped, commit: secondCommit }),
+      );
+      expect(replay.id).toBe(recommitted.id);
+      expect(replay.status).toBe("pending_review");
+
+      // The refused bare row stays inert — validation_failed, never approvable, only staff Reject
+      // closes it. That is the accepted cost of the rename path.
+      expect((await harness.store.getPublishRequest(refused.publishRequest!.id))?.status).toBe(
+        "validation_failed",
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // Refusing earlier must not soften anything downstream. Policy-illegal rows no longer REACH
+  // tryAutoApprove (so ops lose that population from the gate_refused count, which is a reporting
+  // shift, not a permission one), while every such row already standing in the queue — tdupu's
+  // parked bare `mathcity` is exactly one — is still refused at approve with the same code.
+  test("validation refusing first does not weaken the approve gate or the auto-approve delegation", async () => {
+    const harness = await createPublishHarness({ autoApprove: true });
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const publisher = await harness.signIn("weaken-pub");
+
+      // The strongest submission shape in the system — repo-proven OIDC, the one auto-approve exists
+      // for — dies at validation with no auto-approve decision recorded at all, because
+      // tryAutoApprove is reachable only through a successful markPublishRequestValidated.
+      const illegal = await expectRefusedSubmit(
+        await harness.publishWithGitHubActionsTokenRaw(
+          await harness.createPack("weaken-oidc", "1.0.0", { name: "integration-weaken-oidc" }),
+        ),
+        422,
+        "PUBLISH_NAME_RESERVED",
+      );
+      expect(illegal.publishRequest?.status).toBe("validation_failed");
+      expect(harness.autoApproveDeclineReason(illegal.publishRequest!.id)).toBeUndefined();
+
+      // And the rows validation can no longer produce are still refused exactly where they were.
+      for (const { slug, name, code } of [
+        { slug: "weaken-bare", name: "integration-weaken-bare", code: "PUBLISH_NAME_RESERVED" },
+        { slug: "weaken-scope", name: "someone-else/integration-weaken-scope", code: "PUBLISH_SCOPE_MISMATCH" },
+      ]) {
+        const seeded = await harness.seedValidatedPublish(
+          publisher.userId,
+          await harness.createPack(slug, "1.0.0", { name }),
+          {
+            submissionMethod: "github_actions_oidc",
+            sourceIdentity: sourceIdentityFor(`${owner}/${repo}`),
+          },
+        );
+        await harness.approveExpectingError(admin, seeded.id, 403, code);
+        expect(await harness.store.getPackNameClaim(name)).toBeNull();
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
+  // The line the move is drawn along: H1a/H1b judge the NAME, which is static and knowable at
+  // submit; H2 judges the submitter's PROOF against a live claim and carries the staff re-pin that
+  // makes repo migration possible. Only the first moved into validation.
+  test("a claimed name from the wrong repo still validates and is refused only at approve", async () => {
+    const harness = await createPublishHarness();
+    try {
+      const admin = await harness.signIn("admin", "admin");
+      const incumbent = await harness.signIn("h2-incumbent");
+      const name = `${owner}/integration-h2-pin`;
+
+      await harness.seedApprovedPublish(
+        incumbent.userId,
+        admin.userId,
+        await harness.createPack("h2-incumbent", "1.0.0", {
+          name,
+          repoUrl: `https://github.com/${owner}/h2-incumbent-repo`,
+        }),
+      );
+
+      // A sibling repo under the SAME owner: namespace-legal, so validation passes it into the queue
+      // exactly as before and the claim pin is what says no.
+      const sibling = await harness.publishWithGitHubActionsToken(
+        await harness.createPack("h2-sibling", "1.1.0", {
+          name,
+          repoUrl: `https://github.com/${owner}/h2-sibling-repo`,
+        }),
+      );
+      expect(sibling.status).toBe("pending_review");
+      await harness.approveExpectingError(admin, sibling.id, 409, "PUBLISH_NAME_OWNER_MISMATCH");
+
+      // ...and the audited re-pin still moves it, which is the repo-migration path that would be
+      // unreachable if H2 had been pulled forward into validation with the name rules.
+      const approved = await harness.approve(
+        admin,
+        sibling.id,
+        undefined,
+        "Repo migration: verified out of band.",
+      );
+      expect(approved.status).toBe("approved");
+      expect((await harness.store.getPackNameClaim(name))?.repoFullName).toBe(`${owner}/h2-sibling-repo`);
     } finally {
       await harness.close();
     }
@@ -1660,14 +1961,19 @@ describe("local registry publish integration", () => {
         verificationMethod: "github_app_user_token",
       });
 
-      // A FOREIGN-scoped name now reaches H1b instead of dying at step 2. Proving admin on a repo
-      // buys only that owner's namespace.
-      const foreignScope = await harness.publishWithPersonalToken(
+      // A FOREIGN-scoped name never reaches the queue at all now: H1b runs at validation, so the
+      // 403 that used to wait for a staff click is a 422 at submit. Proving admin on a repo buys
+      // only that owner's namespace, at either surface.
+      const foreignScope = await harness.publishExpectingError(
         publisher,
         await harness.createPack("community-scope", "1.0.0", { name: "someone-else/community-scope" }),
+        422,
+        "PUBLISH_SCOPE_MISMATCH",
       );
-      expect(foreignScope.submissionMethod).toBe("api_token");
-      await harness.approveExpectingError(admin, foreignScope.id, 403, "PUBLISH_SCOPE_MISMATCH");
+      expect(foreignScope.publishRequest).toMatchObject({
+        submissionMethod: "api_token",
+        status: "validation_failed",
+      });
 
       // A name already claimed by a different repo now reaches H2, not step 2.
       const claimed = await harness.publishWithGitHubActionsToken(
@@ -2632,11 +2938,14 @@ describe("auto-approve repeat releases", () => {
         expect(tryConsumeRateLimit(autoApproveRateLimitKey(name), autoApproveRateLimit)).toBe(true);
       }
 
-      // A gate-refused release (foreign scope) must NOT consume the 10th token.
+      // A gate-refused release must NOT consume the 10th token. The refusal has to be one that
+      // still REACHES the gate, so it is H2's, in clause 10's shape: a sibling repo under the same
+      // owner cutting a release of a name the claim pins elsewhere. (A foreign scope would no
+      // longer do — validation refuses that at submit, and auto-approve never sees the row.)
       const hostile = await harness.publishWithGitHubActionsToken(
         await harness.createPack("auto-flood", "0.2.0", {
           name,
-          repoUrl: "https://github.com/evil/flood-pack",
+          repoUrl: `https://github.com/${owner}/sibling-flood-pack`,
         }),
       );
       harness.expectDeferredToStaff(hostile, "gate_refused");
@@ -2857,6 +3166,7 @@ async function createPublishHarness(
     const match = /^\[registry\] auto-approve declined (\S+) \(.*\): (\S+)$/.exec(line);
     if (match?.[1] && match[2]) autoApproveDeclines.push({ requestId: match[1], reason: match[2] });
   });
+  let validatorCalls = 0;
   let importCandidate: GitHubPublishCandidate | null = null;
   // The repo + commit the next minted GitHub Actions token proves. publishWithGitHubActionsToken
   // points this at whatever repo the pack claims, so a test can hold a repo-proven token for a
@@ -2871,6 +3181,10 @@ async function createPublishHarness(
     store,
     distRoot: pathToFileURL(`${distRoot}/`),
     validatePublishRequest: async (request, currentConfig) => {
+      // Counted so a test can prove the namespace rule runs BEFORE this seam: it lives in app.ts,
+      // outside the injection point, and an illegal name must never reach the pack.toml fetch or
+      // the `gc pack release hash` subprocess this stands in for.
+      validatorCalls += 1;
       if (options.validationFailure === "unexpected") {
         throw new Error("validator exploded");
       }
@@ -2987,6 +3301,36 @@ async function createPublishHarness(
       },
     });
     return store.approvePublishRequest(adminUserId, validated.id);
+  }
+
+  // The same store-direct write, stopped at `pending_review`. Validation now refuses a
+  // policy-illegal name at submit, so this is the only way left to stand a policy-illegal row up in
+  // front of the approve gate — which is exactly what the do-not-weaken tests need: the gate must
+  // still refuse the rows the pre-gate world (and tdupu's parked bare `mathcity`) left behind.
+  async function seedValidatedPublish(
+    submitterUserId: string,
+    pack: TestPack,
+    over: { submissionMethod?: PublishSubmissionMethod; sourceIdentity?: PublishSourceIdentity } = {},
+  ) {
+    const created = await store.createPublishRequest(
+      submitterUserId,
+      pack,
+      over.submissionMethod ?? "web_session",
+      over.sourceIdentity,
+    );
+    return store.markPublishRequestValidated(created.id, {
+      name: created.requestedName,
+      description: pack.requestedDescription ?? `${created.requestedName} pack.`,
+      source: created.sourceUrl,
+      sourceKind: "git",
+      release: {
+        version: created.requestedVersion,
+        ref: created.requestedRef ?? created.commit,
+        commit: created.commit,
+        hash: packHash(created),
+        description: `Publish ${created.requestedName} ${created.requestedVersion}.`,
+      },
+    });
   }
 
   async function signIn(
@@ -3157,9 +3501,11 @@ async function createPublishHarness(
     );
   }
 
-  // A submit that must be REFUSED before any row exists, so a test can pin the status and code of
-  // an input the mint grammar rejects. Same path as publishWithPersonalToken; it just does not
-  // assert 2xx.
+  // A submit that must be REFUSED, so a test can pin the status and code. Same path as
+  // publishWithPersonalToken; it just does not assert 2xx. Two refusal shapes reach it: an input the
+  // mint grammar rejects (no row exists, body is `{error}` alone) and a namespace-policy violation
+  // (the row was created, then validation refused it — body carries the durable validation_failed
+  // row too), which is why the whole payload comes back rather than just the error.
   async function publishExpectingError(
     client: SignedInClient,
     pack: TestPack,
@@ -3171,16 +3517,15 @@ async function createPublishHarness(
       csrfToken: client.csrfToken,
       body: { label: `publish ${pack.slug}` },
     });
-    const response = await nextMachineClient().request("/api/publish-requests?validate=1", {
-      method: "POST",
-      bearerToken: created.token.token,
-      body: pack,
-    });
-    const text = await response.text();
-    expect(response.status, text).toBe(status);
-    const { error } = JSON.parse(text) as { error: { code: string; message: string } };
-    expect(error.code).toBe(code);
-    return error;
+    return expectRefusedSubmit(
+      await nextMachineClient().request("/api/publish-requests?validate=1", {
+        method: "POST",
+        bearerToken: created.token.token,
+        body: pack,
+      }),
+      status,
+      code,
+    );
   }
 
   async function approve(
@@ -3290,12 +3635,14 @@ async function createPublishHarness(
     store,
     dbUrl: testDb?.url,
     publicClient,
+    validatorCalls: () => validatorCalls,
     autoApproveDeclineReason,
     expectDeferredToStaff,
     expectAutoApproved,
     publishWithGitHubActionsTokenRaw,
     createPack,
     seedApprovedPublish,
+    seedValidatedPublish,
     signIn,
     publishWithSession,
     publishWithPersonalToken,
@@ -3434,6 +3781,20 @@ function githubCandidateFor(pack: TestPack): GitHubPublishCandidate {
 
 function publishRequestFromResponse(response: { publishRequest: PublishRequestRow }) {
   return response.publishRequest;
+}
+
+// Reads the refusal body of a non-2xx submit, whatever credential drove it. Asserting the CODE
+// (not just a 4xx) is what keeps these tests honest: each name has to fail at its OWN rule, not at
+// a neighbouring one that happens to also say no.
+async function expectRefusedSubmit(response: Response, status: number, code: string) {
+  const text = await response.text();
+  expect(response.status, text).toBe(status);
+  const payload = JSON.parse(text) as {
+    error: { code: string; message: string };
+    publishRequest?: PublishRequestRow;
+  };
+  expect(payload.error.code, text).toBe(code);
+  return payload;
 }
 
 class TestHttpClient {

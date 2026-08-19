@@ -9,7 +9,8 @@ const commit = "c".repeat(40);
 
 // Every direct publish is SCOPED `owner/pack`, where owner is the GitHub owner of the source repo
 // (all fixture repos live under `e2e-fixture`). An unscoped name is reserved and would be refused
-// at approve with PUBLISH_NAME_RESERVED.
+// with PUBLISH_NAME_RESERVED — 422 at submit, and again 403 at approve on any row that predates
+// the submit-time check.
 const scope = "e2e-fixture";
 
 // Each test uses its OWN source repo (derived from its unique pack slug). The harness runs a
