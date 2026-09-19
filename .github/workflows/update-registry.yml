@@ -80,13 +80,29 @@ jobs:
             exit 0
           fi
 
-          branch="chore/aggregate-$(date -u +%Y%m%dT%H%M%SZ)"
+          # ONE long-lived refresh branch and ONE open PR, updated in place. Every hourly run
+          # used to mint chore/aggregate-<timestamp> and open a new PR; when CI stayed red for a
+          # reason unrelated to the refresh, nothing merged and nothing closed, and the repo
+          # accumulated 500+ identical open PRs. Now: force-push the same branch, reuse the open
+          # PR if there is one, and close any leftover per-timestamp refresh PRs from older runs.
+          branch="chore/aggregate-refresh"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          git checkout -B "$branch"
           git add public/registry.toml public/catalog.json public/og
           git commit -m "chore: update aggregate registry"
-          git push origin "$branch"
+          git push --force origin "$branch"
+          # Close superseded refresh PRs (older per-timestamp branches) so the queue never grows.
+          gh pr list --state open --limit 1000 --json number,headRefName \
+            --jq '.[] | select(.headRefName | startswith("chore/aggregate-")) | select(.headRefName != "chore/aggregate-refresh") | .number' \
+          | while read -r old; do
+              gh pr close "$old" --delete-branch --comment "Superseded by the rolling refresh PR on \`chore/aggregate-refresh\`; each hourly run now updates that single PR in place." || true
+            done
+          existing=$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "reusing open refresh PR #$existing"
+            pr="$existing"
+          else
 
           cat > /tmp/pr-body.md <<'BODY'
           Hourly upstream refresh of `public/registry.toml`, `public/catalog.json` and `public/og`.
@@ -104,6 +120,7 @@ jobs:
           fi
           pr=$(gh pr list --head "$branch" --json number --jq '.[0].number')
           echo "opened PR #$pr on $branch"
+          fi
 
           # Only the built-in token needs the dispatch workaround: its PR's own run is
           # queued approval-gated and nothing would approve it unattended. An App/PAT identity
@@ -137,8 +154,9 @@ jobs:
             fi
           fi
 
-          # A plain merge — protection is satisfied, nothing is bypassed.
-          if ! gh pr merge "$pr" --squash --delete-branch; then
+          # A plain merge — protection is satisfied, nothing is bypassed. Keep the rolling branch
+          # (no --delete-branch): the next run force-pushes it again.
+          if ! gh pr merge "$pr" --squash; then
             echo "::error::CI passed but merging PR #$pr was refused; check branch protection"
             exit 1
           fi
