@@ -45,7 +45,7 @@ jobs:
         if: github.event_name != 'pull_request'
         run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/gascity/gascity-registry
           tags: |
@@ -86,7 +86,7 @@ jobs:
       # works.gascity.com/registry/. The Dockerfile's grep guard fails the build if the apex
       # assets weren't actually prefixed (catches a dropped build-arg = the asset-escape bug).
       - id: apex-meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/gascity/gascity-registry
           tags: |
