@@ -87,13 +87,15 @@ export type IdentityClaims = {
   handle?: string;
   displayName?: string;
   avatarUrl?: string;
-  // True when the auth adapter accepts the `registry-staff` role for this login. Gas City OIDC
-  // requires both the signed current-broker claim and the persistent realm role. Drives a
-  // promote-only elevation to admin in ensureUser.
+  // Whether the auth adapter accepts the `registry-admin` role for this login. Gas City OIDC
+  // requires both the signed current-broker claim and the persistent realm role. Live-synced
+  // onto the admin role in ensureUser: true promotes a `user` to `admin`, false demotes an
+  // `admin` to `user`; a `moderator` is never changed by login. Undefined means the identity
+  // source makes no admin assertion at all (WorkOS, GitHub Actions publishing, dev sign-in), so
+  // the stored role is left as it is. The OIDC adapter always sets a boolean.
   assertedAdmin?: boolean;
   // True when the auth adapter accepts the `registry-member` role for this login. Live-synced
-  // onto users.org_member in ensureUser on EVERY login (absent => false => de-provision), unlike
-  // assertedAdmin's promote-only elevation.
+  // onto users.org_member in ensureUser on EVERY login (absent => false => de-provision).
   assertedOrgMember?: boolean;
 };
 

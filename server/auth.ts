@@ -486,8 +486,11 @@ function buildIdentityFromOidcTokenResponse(
 
   const verifiedRoles = realmRoles(claims);
   const privilegedRoleSourceAllowed = verifiedBroker === null || verifiedBroker === GASCITY_SSO_IDP;
+  // Registry admin comes only from the dedicated registry-admin role. registry-staff alone
+  // (the staff-session marker) never makes anyone admin. Always a boolean on this path, so
+  // ensureUser live-syncs the admin role from it on every OIDC login.
   identity.assertedAdmin =
-    privilegedRoleSourceAllowed && verifiedRoles.includes(STAFF_REALM_ROLE);
+    privilegedRoleSourceAllowed && verifiedRoles.includes(REGISTRY_ADMIN_REALM_ROLE);
   identity.assertedOrgMember =
     privilegedRoleSourceAllowed && verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE);
   return identity;
@@ -614,11 +617,16 @@ async function fetchUserInfo(discovery: Discovery, accessToken: string): Promise
 // These are persistent Keycloak user roles, not current-login provenance. The OIDC identity
 // builder may turn them into Registry assertions only after the broker-session boundary is
 // verified (or when that Gas City-specific boundary is explicitly disabled for generic OIDC).
-// registry-staff promotes a user to Registry admin.
+// registry-staff marks a verified Gas City staff session: it is required on the gascity-sso rail
+// and forbidden on every customer rail. It does NOT confer Registry admin.
 const STAFF_REALM_ROLE = "registry-staff";
 
-// registry-member marks a verified @gascity org member. It is live-synced in ensureUser (unlike
-// the promote-only staff role), so losing the trusted assertion de-provisions on the next login.
+// registry-admin confers Registry admin. The identity provider grants it to a narrower set than
+// registry-staff. It is live-synced in ensureUser, so losing it demotes an admin on the next login.
+const REGISTRY_ADMIN_REALM_ROLE = "registry-admin";
+
+// registry-member marks a verified @gascity org member. Like registry-admin it is live-synced in
+// ensureUser, so losing the trusted assertion de-provisions on the next login.
 const REGISTRY_MEMBER_REALM_ROLE = "registry-member";
 
 const GITHUB_IDP = "github";
@@ -646,6 +654,7 @@ function enforceVerifiedBrokerBoundary(claims: JWTPayload): VerifiedBroker {
   const verifiedRoles = strictRealmRoles(claims);
   const carriesRegistryPrivilege =
     verifiedRoles.includes(STAFF_REALM_ROLE) ||
+    verifiedRoles.includes(REGISTRY_ADMIN_REALM_ROLE) ||
     verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE);
   if (verifiedBroker !== GASCITY_SSO_IDP && carriesRegistryPrivilege) {
     throw new AuthError(

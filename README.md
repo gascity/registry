@@ -103,8 +103,9 @@ GITHUB_APP_WEBHOOK_SECRET=<registry GitHub App webhook secret>
 REGISTRY_GC_BIN=/usr/local/bin/gc
 ```
 
-Production auth is OIDC/Keycloak (`auth.gascity.com`); the `registry-staff` (admin)
-and `registry-member` (org publisher) roles ride the id_token. Production also requires the
+Production auth is OIDC/Keycloak (`auth.gascity.com`); the `registry-admin` (admin),
+`registry-staff` (verified staff session) and `registry-member` (org publisher) roles ride the
+id_token. Admin and org membership are live-synced from them on every sign-in. Production also requires the
 signed, per-session `idp_connection` claim. GitHub and validated customer `sso-*` brokers remain
 nonstaff; privileged roles are honored only on the Gas City SSO rail.
 A configured Accounts resolver maps the verified OIDC `sub` to the stable Accounts `user_id`, so
