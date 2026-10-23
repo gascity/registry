@@ -487,10 +487,14 @@ function buildIdentityFromOidcTokenResponse(
   const verifiedRoles = realmRoles(claims);
   const privilegedRoleSourceAllowed = verifiedBroker === null || verifiedBroker === GASCITY_SSO_IDP;
   // Registry admin comes only from the dedicated registry-admin role. registry-staff alone
-  // (the staff-session marker) never makes anyone admin. Always a boolean on this path, so
-  // ensureUser live-syncs the admin role from it on every OIDC login.
-  identity.assertedAdmin =
+  // (the staff-session marker) never makes anyone admin.
+  // With the Gas City broker boundary enforced, the assertion is a boolean, so ensureUser
+  // live-syncs the admin role on every login (absent role => demote). A generic OIDC issuer
+  // (boundary off) only ever asserts presence: absent is undefined, never false, so it keeps
+  // the promote-only behavior and never demotes an admin granted some other way.
+  const hasAdminRole =
     privilegedRoleSourceAllowed && verifiedRoles.includes(REGISTRY_ADMIN_REALM_ROLE);
+  identity.assertedAdmin = hasAdminRole ? true : verifiedBroker === null ? undefined : false;
   identity.assertedOrgMember =
     privilegedRoleSourceAllowed && verifiedRoles.includes(REGISTRY_MEMBER_REALM_ROLE);
   return identity;

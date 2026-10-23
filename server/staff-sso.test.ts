@@ -65,27 +65,27 @@ describe("identityFromOidcTokenResponse derives assertedAdmin from realm_access.
     expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(true);
   });
 
-  test("registry-staff alone -> assertedAdmin false (staff marker, not admin)", () => {
+  test("registry-staff alone -> no admin assertion (staff marker, not admin)", () => {
     const claims = {
       sub: "staff-1",
       email: "staff@gascity.com",
       realm_access: { roles: ["default-roles", "registry-staff"] },
     } as unknown as JWTPayload;
-    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(false);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBeUndefined();
   });
 
-  test("no registry-admin role -> assertedAdmin false", () => {
+  test("no registry-admin role -> no admin assertion (generic OIDC never asserts false)", () => {
     const claims = {
       sub: "ext-1",
       email: "someone@github.io",
       realm_access: { roles: ["default-roles"] },
     } as unknown as JWTPayload;
-    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(false);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBeUndefined();
   });
 
-  test("no realm_access at all -> assertedAdmin false", () => {
+  test("no realm_access at all -> no admin assertion", () => {
     const claims = { sub: "ext-2", email: "x@github.io" } as unknown as JWTPayload;
-    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(false);
+    expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBeUndefined();
   });
 
   test("malformed realm_access shapes are not trusted (defensive)", () => {
@@ -98,7 +98,7 @@ describe("identityFromOidcTokenResponse derives assertedAdmin from realm_access.
       null,
     ]) {
       const claims = { sub: "atk", realm_access } as unknown as JWTPayload;
-      expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBe(false);
+      expect(identityFromOidcTokenResponse(claims, {}, genericOidcConfig).assertedAdmin).toBeUndefined();
     }
   });
 });
@@ -125,10 +125,9 @@ describe("identityFromOidcTokenResponse derives assertedOrgMember from realm_acc
 
   test("registry-member and registry-admin are independent rails", () => {
     const member = { sub: "m", realm_access: { roles: ["registry-member"] } } as unknown as JWTPayload;
-    expect(identityFromOidcTokenResponse(member, {}, genericOidcConfig)).toMatchObject({
-      assertedOrgMember: true,
-      assertedAdmin: false,
-    });
+    const memberIdentity = identityFromOidcTokenResponse(member, {}, genericOidcConfig);
+    expect(memberIdentity.assertedOrgMember).toBe(true);
+    expect(memberIdentity.assertedAdmin).toBeUndefined();
     const admin = { sub: "a", realm_access: { roles: ["registry-admin"] } } as unknown as JWTPayload;
     expect(identityFromOidcTokenResponse(admin, {}, genericOidcConfig)).toMatchObject({
       assertedOrgMember: false,
@@ -562,7 +561,18 @@ describe("identityFromOidcTokenResponse enforces the verified broker boundary", 
       email: "staff@example.com",
       realm_access: { roles: ["registry-staff"] },
     } as unknown as JWTPayload;
-    expect(identityFromOidcTokenResponse(staffOnly, {}, genericConfig).assertedAdmin).toBe(false);
+    expect(identityFromOidcTokenResponse(staffOnly, {}, genericConfig).assertedAdmin).toBeUndefined();
+  });
+
+  test("with the boundary enforced, a trusted login without registry-admin asserts false", () => {
+    const claims = {
+      sub: "staff-only-enforced",
+      email: "staff@gascity.com",
+      email_verified: true,
+      idp_connection: "gascity-sso",
+      realm_access: { roles: ["registry-staff"] },
+    } as unknown as JWTPayload;
+    expect(identityFromOidcTokenResponse(claims, {}, oidcConfig).assertedAdmin).toBe(false);
   });
 
   test("userinfo cannot forge the broker or hide a verified GitHub staff email", () => {
@@ -670,6 +680,58 @@ describe("ensureUser live-syncs the admin role from the registry-admin assertion
       const asserted = identityFromOidcTokenResponse(claims, {}, oidcConfig);
       const user = await store.ensureUser(asserted);
       expect(user.role).toBe("user");
+    });
+  });
+
+  test("boundary off (generic OIDC): no role leaves an existing admin admin", async () => {
+    await withStore(async (store) => {
+      const withRole = {
+        sub: "generic-admin",
+        email: "admin@example.com",
+        realm_access: { roles: ["registry-admin"] },
+      } as unknown as JWTPayload;
+      const first = await store.ensureUser(identityFromOidcTokenResponse(withRole, {}, genericOidcConfig));
+      expect(first.role).toBe("admin");
+      const withoutRole = {
+        sub: "generic-admin",
+        email: "admin@example.com",
+        realm_access: { roles: ["default-roles"] },
+      } as unknown as JWTPayload;
+      const again = await store.ensureUser(identityFromOidcTokenResponse(withoutRole, {}, genericOidcConfig));
+      expect(again.role).toBe("admin");
+
+      // A manual admin on a generic issuer is never demoted either.
+      const manual = await store.ensureUser(identity({ subject: "generic-manual" }));
+      await store.setUserRoleForDev(manual.id, "admin");
+      const relogin = await store.ensureUser(
+        identityFromOidcTokenResponse(
+          { sub: "generic-manual", realm_access: { roles: [] } } as unknown as JWTPayload,
+          {},
+          genericOidcConfig,
+        ),
+      );
+      expect(relogin.role).toBe("admin");
+    });
+  });
+
+  test("boundary enforced: a trusted login without registry-admin demotes an existing admin", async () => {
+    await withStore(async (store) => {
+      const claims = (roles: string[]) =>
+        ({
+          sub: "enforced-admin",
+          email: "staff@gascity.com",
+          email_verified: true,
+          idp_connection: "gascity-sso",
+          realm_access: { roles },
+        }) as unknown as JWTPayload;
+      const first = await store.ensureUser(
+        identityFromOidcTokenResponse(claims(["registry-staff", "registry-admin"]), {}, oidcConfig),
+      );
+      expect(first.role).toBe("admin");
+      const again = await store.ensureUser(
+        identityFromOidcTokenResponse(claims(["registry-staff"]), {}, oidcConfig),
+      );
+      expect(again.role).toBe("user");
     });
   });
 
