@@ -1115,6 +1115,8 @@ export class PostgresRegistryStore implements RegistryStore {
 
   async ensureUser(identity: IdentityClaims): Promise<SessionUser> {
     const now = new Date();
+    const adminAssertion =
+      identity.assertedAdmin === undefined ? null : identity.assertedAdmin === true;
     const handle = normalizeHandle(identity.handle ?? identity.email?.split("@")[0]) ?? "user";
     const displayName = identity.displayName?.trim() || handle;
     const id = newId("user");
@@ -1151,17 +1153,20 @@ export class PostgresRegistryStore implements RegistryStore {
               handle = COALESCE(NULLIF(handle, ''), ${handle}),
               display_name = COALESCE(NULLIF(display_name, ''), ${displayName}),
               avatar_url = ${identity.avatarUrl ?? null},
-              -- Staff entitlement: an auth-boundary-verified registry-staff assertion promotes to admin.
-              -- Promote-only and re-checked at the row (race-safe): never downgrades, and never
-              -- overrides a deliberate moderator/admin grant (preserves manual roles + de-escalations).
+              -- Admin entitlement: LIVE-synced from the auth-boundary-verified registry-admin
+              -- assertion, like org_member below, and re-checked at the row (race-safe). Asserted
+              -- true promotes a plain user to admin; asserted false demotes admin -> user; a
+              -- moderator is never changed by login. NULL (the identity source makes no admin
+              -- assertion) keeps the role.
               role = CASE
-                       WHEN ${!!identity.assertedAdmin} AND role NOT IN ('admin', 'moderator')
-                       THEN 'admin' ELSE role
+                       WHEN ${adminAssertion}::boolean IS TRUE AND role NOT IN ('admin', 'moderator')
+                       THEN 'admin'
+                       WHEN ${adminAssertion}::boolean IS FALSE AND role = 'admin' THEN 'user'
+                       ELSE role
                      END,
               -- Org-publisher entitlement: LIVE-synced from the trusted registry-member assertion
-              -- on every login (contrast the promote-only role above: role protects manual
-              -- grants; org_member's only source of truth is the auth adapter, so losing it must
-              -- de-provision on next login).
+              -- on every login; org_member's only source of truth is the auth adapter, so losing
+              -- it must de-provision on next login.
               org_member = ${!!identity.assertedOrgMember},
               updated_at = ${now}
           WHERE id = ${existing[0].id}
@@ -3074,14 +3079,16 @@ class FileRegistryStore implements RegistryStore {
       user.gascityUserId = stableId;
       user.gascityAccountId = identity.gasCityAccountId;
       user.oidcSubject = identity.subject;
-      // Promote-only staff elevation (mirrors the Postgres store): an auth-boundary-verified
-      // registry-staff assertion raises the default user role to admin, but never downgrades
-      // or overrides a deliberate moderator/admin grant.
-      if (identity.assertedAdmin && user.role !== "admin" && user.role !== "moderator") {
+      // Admin is live-synced from the auth-boundary-verified registry-admin assertion (mirrors
+      // the Postgres store): true promotes a plain user to admin, false demotes admin -> user, and a
+      // moderator is never changed by login. Undefined (no admin assertion) keeps the role.
+      if (identity.assertedAdmin === true && user.role !== "admin" && user.role !== "moderator") {
         user.role = "admin";
+      } else if (identity.assertedAdmin === false && user.role === "admin") {
+        user.role = "user";
       }
-      // Live-synced (contrast the promote-only role above): the auth adapter is the sole source
-      // of truth for org membership, so losing the assertion de-provisions on next login.
+      // Live-synced: the auth adapter is the sole source of truth for org membership, so losing
+      // the assertion de-provisions on next login.
       user.orgMember = !!identity.assertedOrgMember;
       await this.save();
       return user;

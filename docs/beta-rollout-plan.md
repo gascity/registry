@@ -91,7 +91,9 @@ Residual sub-decisions (safe defaults chosen; revisit if wrong):
   Dockerfile from source). `works.gascity.com/registry` (apex) = GHCR image from `main` +
   Flux. `main`→`production` merge is the release. `production-smoke.yml` polls read endpoints.
 - **Authz.** Roles `user`/`moderator`/`admin` (`types.ts:7`). `admin` only via the SSO
-  `registry-staff` realm role (`auth.ts:352`, promote-only `store.ts:772`). Per-pack
+  `registry-admin` realm role, live-synced on every login when the broker boundary is enforced
+  (promote-only for a generic OIDC issuer); `registry-staff` marks the staff session but no
+  longer confers admin. Originally `admin` came from `registry-staff`, promote-only. Per-pack
   ownership via GitHub-App-verified `pack_ownerships` + `publisher_members`. Org id
   (`gasCityAccountId`) is captured at login but **never used for authz**; `publisher_members`
   is written but never read for authz.

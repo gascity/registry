@@ -164,9 +164,10 @@ three ways that matter:
 
 - **No dev-auth.** You sign in with **GitHub** (product login) — `/api/dev/sign-in` and the CLI
   `--dev-auth` flag are localhost-only and refused here.
-- **Staff is SSO-asserted.** Moderation requires the `registry-staff` realm role; enter the staff
-  surface via **`/staff`** (which routes the login through the staff IdP), then open
-  `/admin/publish-requests`.
+- **Staff is SSO-asserted.** Moderation requires a Registry `admin` (from the `registry-admin`
+  realm role, on top of the `registry-staff` staff-session role) or a `moderator` (a role set
+  directly in the database, which login never changes); enter the staff surface via **`/staff`**
+  (which routes the login through the staff IdP), then open `/admin/publish-requests`.
 - **A real GitHub App does the ownership/import work.** The `gas-city-registry-verifier` App backs
   both *Find Packs From GitHub* (import) and Trust-tab ownership verification. The e2e/harness fakes
   the GitHub API, so this pass is the **first real exercise of that App's permissions** — the two
