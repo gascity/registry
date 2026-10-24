@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Stage 1: build the gc binary used for publish request validation.
-FROM golang:1.26.10-alpine AS gc-build
+FROM golang:1.26.10-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS gc-build
 WORKDIR /src/gascity
 # gascity v1.3.3 — includes `gc … --dev-auth` (#3343), which the CLI e2e + manual-testing
 # doc rely on. The previous pin predated that flag. Bump in lockstep with the CLI contract.
@@ -13,7 +13,7 @@ RUN set -eux; \
   /out/gc pack release hash --help >/dev/null
 
 # Stage 2: build the website and typecheck the server.
-FROM oven/bun:1 AS build
+FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS build
 WORKDIR /app
 # .npmrc maps @gascity/* to GitHub Packages + reads ${NODE_AUTH_TOKEN}; pass the
 # token as a BuildKit secret (never baked into a layer).
@@ -36,7 +36,7 @@ RUN if [ "$REGISTRY_WEB_BASE" != "/" ]; then \
     fi
 
 # Stage 3: serve static assets and /api through the Bun BFF.
-FROM oven/bun:1-alpine
+FROM oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
