@@ -31,7 +31,7 @@
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "smol-toml": "^1.7.1",
+    "smol-toml": "^1.9.1",
     "@gascity/tokens": "^0.4.1",
     "@gascity/ui": "^0.7.2",
     "@gascity/shell": "^0.9.3",
@@ -46,12 +46,13 @@
     "@vitejs/plugin-react": "^6.0.2",
     "openapi-typescript": "^7.13.0",
     "typescript": "~6.0.3",
-    "vite": "^8.0.16"
+    "vite": "^8.3.3"
   },
   "overrides": {
-    "brace-expansion": ">=5.0.9",
+    "brace-expansion": "^2.1.7",
     "js-yaml": "^4.3.2",
     "nanoid": "^3.3.18",
-    "postcss": ">=8.5.18"
+    "postcss": "^8.5.30",
+    "source-map-js": "^1.2.2"
   }
 }
