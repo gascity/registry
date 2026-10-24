@@ -6,14 +6,16 @@ on:
     - cron: "17 * * * *"
 
 permissions:
-  contents: write
-  packages: read # the @gascity/* deps live on GitHub Packages (org-internal)
-  pull-requests: write # the refresh lands via a PR, not a direct push to main
-  actions: write # only for the built-in-token fallback, which must dispatch CI itself
+  contents: read
 
 jobs:
   update:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: write
+      packages: read # the @gascity/* deps live on GitHub Packages (org-internal)
+      pull-requests: write # the refresh lands via a PR, not a direct push to main
+      actions: write # only for the built-in-token fallback, which must dispatch CI itself
     env:
       AGGREGATE_APP_ID: ${{ secrets.AGGREGATE_APP_ID }}
     steps:

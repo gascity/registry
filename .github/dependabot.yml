@@ -31,3 +31,13 @@ updates:
       time: "09:30"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
+
+  # Keeps the digest-pinned base images in the Dockerfile current.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "10:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5

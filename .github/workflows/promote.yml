@@ -16,7 +16,6 @@ on:
 permissions:
   contents: read
   actions: read
-  packages: write
 
 concurrency:
   group: promote
@@ -28,6 +27,10 @@ env:
 jobs:
   promote:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      packages: write
     # workflow_run's branches filter matches head_branch, which a fork PR can spoof (a fork branch
     # named "main"). Trust only a push, from THIS repo, on main, that succeeded — never a PR/fork.
     if: >-
