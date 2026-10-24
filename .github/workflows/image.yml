@@ -55,7 +55,7 @@ jobs:
             type=raw,value=main-${{ steps.epoch.outputs.epoch }},enable={{is_default_branch}}
 
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
@@ -96,7 +96,7 @@ jobs:
             type=raw,value=apex-main-${{ steps.epoch.outputs.epoch }},enable={{is_default_branch}}
 
       - id: apex-build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
