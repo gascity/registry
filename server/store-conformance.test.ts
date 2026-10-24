@@ -418,7 +418,7 @@ for (const lane of lanes) {
       await store.ping(); // file: no-op; postgres: real SELECT 1 against the CI container
     });
 
-    test("ensureUser upserts on subject and elevates role promote-only", async () => {
+    test("ensureUser upserts on subject and live-syncs the admin role", async () => {
       const id = identity({ displayName: "First" });
       const u1 = await store.ensureUser(id);
       expect(u1.role).toBe("user");
@@ -430,17 +430,28 @@ for (const lane of lanes) {
       expect(u2.id).toBe(u1.id);
       expect(u2.displayName).toBe("First");
 
-      // assertedAdmin promotes to admin, and a later non-staff login (same subject) does
-      // NOT downgrade — the elevation is promote-only.
-      const staffId = identity({ assertedAdmin: true });
-      const staff = await store.ensureUser(staffId);
-      expect(staff.role).toBe("admin");
-      const relogin = await store.ensureUser({ ...staffId, assertedAdmin: false });
-      expect(relogin.id).toBe(staff.id);
-      expect(relogin.role).toBe("admin");
+      // The admin role is live-synced from assertedAdmin: true promotes, a later login that
+      // asserts false (same subject) demotes, and one with no assertion leaves the role alone.
+      const adminId = identity({ assertedAdmin: true });
+      const admin = await store.ensureUser(adminId);
+      expect(admin.role).toBe("admin");
+      const unasserted = await store.ensureUser({ ...adminId, assertedAdmin: undefined });
+      expect(unasserted.role).toBe("admin");
+      const relogin = await store.ensureUser({ ...adminId, assertedAdmin: false });
+      expect(relogin.id).toBe(admin.id);
+      expect(relogin.role).toBe("user");
+      const promoted = await store.ensureUser(adminId);
+      expect(promoted.id).toBe(admin.id);
+      expect(promoted.role).toBe("admin");
 
+      // A moderator is never changed by login, whatever the assertion.
       const moderated = await store.setUserRoleForDev(u1.id, "moderator");
       expect(moderated.role).toBe("moderator");
+      for (const assertedAdmin of [true, false, undefined]) {
+        const again = await store.ensureUser({ ...id, assertedAdmin });
+        expect(again.id).toBe(u1.id);
+        expect(again.role).toBe("moderator");
+      }
     });
 
     test("ensureUser live-syncs org membership; isOrgMember reflects the last login", async () => {
