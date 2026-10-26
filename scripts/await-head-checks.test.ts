@@ -173,8 +173,32 @@ describe("nextPageUrl", () => {
   });
 });
 
+type RefreshWorkflow = {
+  concurrency?: unknown;
+  jobs: Record<string, { "timeout-minutes"?: number }>;
+};
+
 describe("update-registry workflow", () => {
   const workflow = readFileSync(new URL("../.github/workflows/update-registry.yml", import.meta.url), "utf8");
+  const parsed = Bun.YAML.parse(workflow) as RefreshWorkflow;
+
+  test("runs one refresh at a time and lets the running one finish", () => {
+    // Every run force-pushes the same branch, so an overlapping run replaces the commit the
+    // other one is waiting on and that run fails for nothing. Queue the newer run instead of
+    // cancelling the older one, which may be about to merge a good refresh.
+    expect(parsed.concurrency).toEqual({ group: "update-registry", "cancel-in-progress": false });
+  });
+
+  test("stops waiting while the job's one-hour App token can still poll and merge", () => {
+    // actions/create-github-app-token mints an installation token that expires after one hour.
+    // Polling and `gh pr merge` both fail after that, so the wait and the job end first.
+    const helperTimeoutSeconds = Number(/--timeout (\d+)/.exec(workflow)?.[1]);
+    const jobTimeoutMinutes = parsed.jobs.update?.["timeout-minutes"];
+    expect(helperTimeoutSeconds).toBeLessThanOrEqual(50 * 60);
+    expect(jobTimeoutMinutes).toBeDefined();
+    expect(jobTimeoutMinutes!).toBeLessThanOrEqual(60);
+    expect(jobTimeoutMinutes! * 60).toBeGreaterThan(helperTimeoutSeconds + 5 * 60);
+  });
 
   test("waits on the pushed SHA instead of `gh pr checks --watch`", () => {
     const commands = workflow.split("\n").filter((line) => !line.trimStart().startsWith("#"));

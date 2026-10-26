@@ -8,9 +8,19 @@ on:
 permissions:
   contents: read
 
+# Every run force-pushes the same refresh branch, so an overlapping run would replace the commit
+# the other one is waiting on and that run would fail for nothing. Queue the newer run behind the
+# running one instead of cancelling it: the running one may be about to merge a good refresh.
+concurrency:
+  group: update-registry
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    # The App installation token minted below expires after one hour, and nothing can poll or
+    # merge after that. This also caps how long a stuck run can hold the concurrency group.
+    timeout-minutes: 60
     permissions:
       contents: write
       packages: read # the @gascity/* deps live on GitHub Packages (org-internal)
@@ -138,8 +148,9 @@ jobs:
             # never merges. The helper polls the pushed SHA (so the previous head's checks never
             # count), waits for checks to register, then for all of them to finish, and only
             # passes once "CI / required" — the check main's protection requires — succeeded.
+            # --timeout leaves room to merge before the one-hour App token expires.
             if ! bun scripts/await-head-checks.ts --repo "$GITHUB_REPOSITORY" --sha "$sha" \
-              --require "CI / required" --register-timeout 600 --timeout 3600 --interval 20; then
+              --require "CI / required" --register-timeout 600 --timeout 2700 --interval 20; then
               echo "::error::CI failed on the aggregate refresh; PR #$pr left open for inspection"
               exit 1
             fi
