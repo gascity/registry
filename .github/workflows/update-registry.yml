@@ -8,9 +8,19 @@ on:
 permissions:
   contents: read
 
+# Every run force-pushes the same refresh branch, so an overlapping run would replace the commit
+# the other one is waiting on and that run would fail for nothing. Queue the newer run behind the
+# running one instead of cancelling it: the running one may be about to merge a good refresh.
+concurrency:
+  group: update-registry
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    # The App installation token minted below expires after one hour, and nothing can poll or
+    # merge after that. This also caps how long a stuck run can hold the concurrency group.
+    timeout-minutes: 60
     permissions:
       contents: write
       packages: read # the @gascity/* deps live on GitHub Packages (org-internal)
@@ -94,6 +104,9 @@ jobs:
           git add public/registry.toml public/catalog.json public/og
           git commit -m "chore: update aggregate registry"
           git push --force origin "$branch"
+          # Everything below is keyed on this SHA: the PR's head (and its checks) can still be
+          # the previous push for a moment, and we must neither watch nor merge that commit.
+          sha=$(git rev-parse HEAD)
           # Close superseded refresh PRs (older per-timestamp branches) so the queue never grows.
           gh pr list --state open --limit 1000 --json number,headRefName \
             --jq '.[] | select(.headRefName | startswith("chore/aggregate-")) | select(.headRefName != "chore/aggregate-refresh") | .number' \
@@ -130,7 +143,14 @@ jobs:
           # deliberately has no Actions:write, so it could not dispatch anyway.
           if [ -n "${NON_DEFAULT_IDENTITY:-}" ]; then
             echo "non-default identity: relying on the PR's own CI run"
-            if ! gh pr checks "$pr" --watch --interval 20 --fail-fast; then
+            # Not `gh pr checks --watch`: run straight after the force-push, before GitHub has
+            # registered any check on the new head, it exits "no checks reported" and the PR
+            # never merges. The helper polls the pushed SHA (so the previous head's checks never
+            # count), waits for checks to register, then for all of them to finish, and only
+            # passes once "CI / required" — the check main's protection requires — succeeded.
+            # --timeout leaves room to merge before the one-hour App token expires.
+            if ! bun scripts/await-head-checks.ts --repo "$GITHUB_REPOSITORY" --sha "$sha" \
+              --require "CI / required" --register-timeout 600 --timeout 2700 --interval 20; then
               echo "::error::CI failed on the aggregate refresh; PR #$pr left open for inspection"
               exit 1
             fi
@@ -141,7 +161,9 @@ jobs:
             run_id=""
             for _ in $(seq 1 30); do
               sleep 10
-              run_id=$(gh run list --workflow=ci.yml --branch "$branch" \
+              # --commit, not just --branch: the previous push's dispatched run is on the same
+              # branch and would otherwise be picked up as ours.
+              run_id=$(gh run list --workflow=ci.yml --branch "$branch" --commit "$sha" \
                 --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // empty')
               [ -n "$run_id" ] && break
             done
@@ -156,9 +178,10 @@ jobs:
             fi
           fi
 
-          # A plain merge — protection is satisfied, nothing is bypassed. Keep the rolling branch
-          # (no --delete-branch): the next run force-pushes it again.
-          if ! gh pr merge "$pr" --squash; then
+          # A plain merge — protection is satisfied, nothing is bypassed. --match-head-commit
+          # refuses the merge if the PR head is no longer the commit whose checks we watched.
+          # Keep the rolling branch (no --delete-branch): the next run force-pushes it again.
+          if ! gh pr merge "$pr" --squash --match-head-commit "$sha"; then
             echo "::error::CI passed but merging PR #$pr was refused; check branch protection"
             exit 1
           fi
