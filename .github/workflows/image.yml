@@ -35,7 +35,7 @@ jobs:
       # The gascity-registry package is connected to this repo (org.opencontainers.image.source
       # below), so the per-repo GITHUB_TOKEN (packages: write) publishes it — no PAT.
       - if: github.event_name != 'pull_request'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
