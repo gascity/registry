@@ -1,0 +1,134 @@
+# Actions cache has no ceiling of its own: entries are branch-scoped, so every branch that
+# builds mints its own set and nothing ages them out until the repository reaches the 10 GB
+# `max_cache_size_gb` GitHub enforces per repo. From there GitHub evicts this repository's own
+# least-recently-used entries on every save, so builds keep losing caches they are about to
+# want, and the estate oscillates between full and empty. gascity/infra's release-chain-health
+# monitor reports that state as "out of Actions cache headroom" (gascity/infra#1534).
+#
+# Holding the estate to a budget below the cap keeps eviction predictable and under our own
+# control rather than GitHub's. This is the janitor already running in gasworks-platform;
+# everything is derived from github.repository, so the file is unchanged apart from its
+# schedule.
+name: cache-janitor
+
+on:
+  schedule:
+    # Nightly, off the :00/:30 stampede.
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+    inputs:
+      budget_gb:
+        description: 'Override the cache budget in GB for this run (testing).'
+        required: false
+        type: string
+
+permissions: {}
+
+jobs:
+  evict:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      actions: write   # delete cache entries
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Repository variable CACHE_BUDGET_GB overrides this; a dispatch input overrides both.
+      BUDGET_GB: ${{ inputs.budget_gb || vars.CACHE_BUDGET_GB || '5' }}
+      MAX_AGE_DAYS: '7'
+      # A cache used this recently is still doing its job; evicting one to fit the budget is
+      # the signal that the budget is too small.
+      HOT_HOURS: '24'
+    steps:
+      - name: Evict stale and over-budget caches
+        run: |
+          set -euo pipefail
+
+          budget_bytes=$(awk -v gb="$BUDGET_GB" 'BEGIN { printf "%.0f", gb * 1024 * 1024 * 1024 }')
+          cutoff_epoch=$(( $(date -u +%s) - MAX_AGE_DAYS * 86400 ))
+          echo "budget: ${BUDGET_GB} GB (${budget_bytes} bytes); max age: ${MAX_AGE_DAYS} days"
+
+          # Oldest access first, so the list is already in LRU order.
+          list_caches() {
+            gh api --paginate \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100&sort=last_accessed_at&direction=asc" \
+              --jq '.actions_caches[] | [.id, .size_in_bytes, .last_accessed_at, .key] | @tsv'
+          }
+
+          list_caches > all-caches.tsv
+          before_count=$(wc -l < all-caches.tsv)
+          before_bytes=$(awk -F'\t' '{ s += $2 } END { printf "%.0f", s + 0 }' all-caches.tsv)
+          echo "before: ${before_count} caches, ${before_bytes} bytes"
+
+          deleted_stale=0
+          deleted_lru=0
+          deleted_hot=0
+          running_bytes="$before_bytes"
+          hot_epoch=$(( $(date -u +%s) - HOT_HOURS * 3600 ))
+
+          delete_cache() {
+            gh api -X DELETE \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/caches/$1" >/dev/null
+          }
+
+          # Pass 1 — anything untouched for longer than MAX_AGE_DAYS.
+          while IFS=$'\t' read -r id size accessed key; do
+            [ -n "${id:-}" ] || continue
+            accessed_epoch=$(date -u -d "$accessed" +%s)
+            if [ "$accessed_epoch" -lt "$cutoff_epoch" ]; then
+              delete_cache "$id"
+              deleted_stale=$(( deleted_stale + 1 ))
+              running_bytes=$(( running_bytes - size ))
+              echo "stale  -${size}B  ${accessed}  ${key}"
+            else
+              printf '%s\t%s\t%s\t%s\n' "$id" "$size" "$accessed" "$key" >> survivors.tsv
+            fi
+          done < all-caches.tsv
+
+          # Pass 2 — least-recently-used first until the estate fits the budget. Evicting a
+          # cache that was used in the last HOT_HOURS is counted separately: that is eviction
+          # cannibalising caches still in active service, and it is the signal the guard below
+          # keys on. (Fitting the budget is not itself a signal — this loop can always reach
+          # any budget by deleting more, so "still over budget afterwards" is unreachable.)
+          if [ -f survivors.tsv ]; then
+            while IFS=$'\t' read -r id size accessed key; do
+              [ "$running_bytes" -gt "$budget_bytes" ] || break
+              delete_cache "$id"
+              deleted_lru=$(( deleted_lru + 1 ))
+              running_bytes=$(( running_bytes - size ))
+              if [ "$(date -u -d "$accessed" +%s)" -ge "$hot_epoch" ]; then
+                deleted_hot=$(( deleted_hot + 1 ))
+                echo "lru(HOT) -${size}B  ${accessed}  ${key}"
+              else
+                echo "lru      -${size}B  ${accessed}  ${key}"
+              fi
+            done < survivors.tsv
+          fi
+
+          list_caches > after-caches.tsv || true
+          after_count=$(wc -l < after-caches.tsv)
+          after_bytes=$(awk -F'\t' '{ s += $2 } END { printf "%.0f", s + 0 }' after-caches.tsv)
+
+          human() { awk -v b="$1" 'BEGIN { printf "%.2f GB", b / 1024 / 1024 / 1024 }'; }
+          {
+            echo "### cache-janitor — ${GITHUB_REPOSITORY}"
+            echo ''
+            echo "| | caches | size |"
+            echo "|---|---:|---:|"
+            echo "| before | ${before_count} | $(human "$before_bytes") |"
+            echo "| after | ${after_count} | $(human "$after_bytes") |"
+            echo ''
+            echo "deleted: ${deleted_stale} stale (> ${MAX_AGE_DAYS}d), ${deleted_lru} over-budget (LRU), of which ${deleted_hot} still in active use (< ${HOT_HOURS}h)"
+            echo "budget: ${BUDGET_GB} GB"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # The one thing here a human needs to decide. Ageing caches out is routine and says
+          # nothing; having to delete caches that were used in the last ${HOT_HOURS}h to get
+          # under the budget says the budget no longer fits what this repo caches — so builds
+          # will start missing caches that eviction just took. Raise CACHE_BUDGET_GB or cache
+          # less. Unlike the quota failure this replaces, this red says exactly one thing.
+          if [ "$deleted_hot" -gt 0 ]; then
+            echo "::error::evicted ${deleted_hot} cache(s) used within the last ${HOT_HOURS}h to fit the ${BUDGET_GB} GB budget — the budget is too small for this repository"
+            exit 1
+          fi
+          echo "cache estate within budget: $(human "$after_bytes") <= ${BUDGET_GB} GB, no caches in active use were evicted"
