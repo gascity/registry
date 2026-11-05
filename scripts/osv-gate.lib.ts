@@ -4,12 +4,16 @@ import { parse } from "smol-toml";
 // A finding blocks when its CVSS score is 7.0 or higher, or, when it carries no
 // score, when its advisory labels itself HIGH or CRITICAL, unless one of its ids
 // or aliases has an unexpired [[IgnoredVulns]] entry in osv-scanner.toml. An
-// expired entry accepts nothing, so a lapsed waiver turns the scan red.
+// expired entry accepts nothing, so a lapsed waiver turns the scan red. A
+// known-malicious package (an OSV MAL-* record from the OpenSSF
+// malicious-packages feed) always blocks: those records carry no score and no
+// label, so the CVSS rule alone would pass them.
 
 export const HIGH_CVSS = 7.0;
 const CRITICAL_CVSS = 9.0;
 const MEDIUM_CVSS = 4.0;
-const BLOCKING_LABELS = new Set(["HIGH", "CRITICAL"]);
+export const MALICIOUS = "MALICIOUS";
+const BLOCKING_LABELS = new Set(["HIGH", "CRITICAL", MALICIOUS]);
 const FALLBACK_LABELS = ["CRITICAL", "HIGH", "MODERATE", "MEDIUM", "LOW"];
 
 export class GateInputError extends Error {}
@@ -87,7 +91,9 @@ export function osvFindings(report: OsvReport, cwd = process.cwd()): Finding[] {
         if (ids.length === 0) throw new GateInputError(`osv-scanner group without ids in ${source}`);
         let severity = "UNSCORED";
         const raw = (group.max_severity ?? "").trim();
-        if (raw) {
+        if (ids.some((id) => id.startsWith("MAL-"))) {
+          severity = MALICIOUS;
+        } else if (raw) {
           const score = Number(raw);
           if (!Number.isFinite(score)) throw new GateInputError(`osv-scanner max_severity ${JSON.stringify(raw)} is not a number`);
           severity = `${labelForScore(score)} ${raw}`;

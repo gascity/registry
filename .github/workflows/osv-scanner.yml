@@ -101,9 +101,12 @@ jobs:
           bun-version: "1.4.4"
 
       - name: Install dependencies
+        # The gate needs only smol-toml, so no dependency's install script runs
+        # here: this job's token (NODE_AUTH_TOKEN below) can write code scanning
+        # alerts.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Gate on unaccepted HIGH/CRITICAL findings
         run: |

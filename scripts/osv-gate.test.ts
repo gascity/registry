@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decide, GateInputError, osvFindings, parseAllowlist, render, type Finding, type OsvReport } from "./osv-gate.lib";
+import { decide, GateInputError, MALICIOUS, osvFindings, parseAllowlist, render, type Finding, type OsvReport } from "./osv-gate.lib";
 
 const TODAY = "2026-11-05";
 
@@ -75,6 +75,25 @@ describe("osv-scanner findings", () => {
       ["HIGH", true],
       ["UNSCORED", false],
     ]);
+  });
+
+  test("a known-malicious package blocks without a score", () => {
+    // OpenSSF malicious-packages records (MAL-*) carry no CVSS score and no label;
+    // a MAL alias also outranks a low score on a grouped advisory.
+    const findings = osvFindings(
+      report(
+        [
+          { ids: ["MAL-2025-20690"], aliases: ["MAL-2025-20690"], max_severity: "" },
+          { ids: ["GHSA-low"], aliases: ["GHSA-low", "MAL-2025-1"], max_severity: "3.1" },
+        ],
+        [{ id: "MAL-2025-20690" }, { id: "GHSA-low", database_specific: { severity: "LOW" } }] as never,
+      ),
+    );
+    expect(findings.map((f) => [f.severity, f.gating])).toEqual([
+      [MALICIOUS, true],
+      [MALICIOUS, true],
+    ]);
+    expect(decide(findings, [], TODAY).blocking).toHaveLength(2);
   });
 
   test("a clean report has no findings", () => {
@@ -173,6 +192,8 @@ describe("osv-scanner.yml", () => {
     expect(runs).toContain("--config osv-scanner.toml");
     expect(runs).toContain('endswith("/bun.lock")');
     expect(runs).toContain("bun scripts/osv-gate.ts");
+    // The job holds security-events: write; no dependency install script runs under it.
+    expect(runs).toContain("bun install --frozen-lockfile --ignore-scripts");
     const upload = (scan.steps ?? []).find((step) => step.uses?.startsWith("github/codeql-action/upload-sarif@"));
     expect(upload?.with?.sarif_file).toBe("osv-results/osv-scanner.sarif");
   });
