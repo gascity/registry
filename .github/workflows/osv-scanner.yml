@@ -1,0 +1,116 @@
+name: osv-scanner
+
+# Dependency vulnerability scan of bun.lock, reported to code scanning.
+#
+# GitHub's dependency graph does not resolve bun.lock (its SBOM lists 36 of
+# the 206 packages the lock pins), so Dependabot alerts cannot see most of
+# this repo's dependencies. osv-scanner reads bun.lock natively and its SARIF
+# turns every finding into a code-scanning alert, which is the coverage the
+# dependency graph would have given. `bun audit` in ci.yml stays as the
+# pull-request check against the npm advisory feed; this adds the OSV
+# database, the scheduled re-check, and the alerts.
+#
+# scripts/osv-gate.ts fails the job on a HIGH/CRITICAL finding (CVSS >= 7.0,
+# or an unscored advisory labelled HIGH/CRITICAL) that osv-scanner.toml does
+# not accept. Every waiver there has an expiry date; on the day after it, the
+# finding blocks again.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, for advisories published against a lock that has not changed.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osv-scanner-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Pinned so a scanner release cannot change the verdict without a reviewed
+  # commit; the vulnerability data is still fetched fresh on every run.
+  OSV_SCANNER_VERSION: "v2.7.0"
+  OSV_SCANNER_SHA256: "160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b"
+
+jobs:
+  scan:
+    name: Scan bun.lock
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read # bun install reads the org-internal @gascity/* packages
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        run: |
+          set -euo pipefail
+          bin_dir="${RUNNER_TEMP}/osv-scanner-bin"
+          mkdir -p "$bin_dir"
+          curl -fsSL --retry 3 -o "$bin_dir/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  $bin_dir/osv-scanner" | sha256sum -c -
+          chmod +x "$bin_dir/osv-scanner"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Scan lockfiles
+        run: |
+          set -euo pipefail
+          mkdir -p osv-results
+          # Exit 1 means "found vulnerabilities", which the gate judges; any
+          # other nonzero status means the scan did not complete. The JSON run
+          # lists every package (--all-packages), so the check below can see
+          # that bun.lock was read even when it has no findings.
+          for format in json sarif; do
+            status=0
+            extra=()
+            if [ "$format" = json ]; then extra=(--all-packages); fi
+            osv-scanner scan source -r . --config osv-scanner.toml "${extra[@]}" \
+              --format "$format" --output-file "osv-results/osv-scanner.$format" || status=$?
+            if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+              echo "::error::osv-scanner --format $format exited $status: the scan did not complete"
+              exit "$status"
+            fi
+          done
+          # The point of this workflow: fail loudly if bun.lock stops being read.
+          jq -e '[.results[].source.path | select(endswith("/bun.lock"))] | length > 0' \
+            osv-results/osv-scanner.json > /dev/null \
+            || { echo "::error::osv-scanner did not scan bun.lock"; exit 1; }
+
+      - name: Upload SARIF results
+        # Forks do not get security-events: write, so skip rather than fail there.
+        if: ${{ always() && hashFiles('osv-results/osv-scanner.sarif') != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        with:
+          sarif_file: osv-results/osv-scanner.sarif
+          category: osv-scanner
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Install dependencies
+        # The gate needs only smol-toml, so no dependency's install script runs
+        # here: this job's token (NODE_AUTH_TOKEN below) can write code scanning
+        # alerts.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Gate on unaccepted HIGH/CRITICAL findings
+        run: |
+          bun scripts/osv-gate.ts \
+            --allowlist osv-scanner.toml \
+            --osv osv-results/osv-scanner.json \
+            --summary "$GITHUB_STEP_SUMMARY"
