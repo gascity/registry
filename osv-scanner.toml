@@ -1,0 +1,18 @@
+# Accepted dependency risks for osv-scanner (.github/workflows/osv-scanner.yml).
+#
+# osv-scanner reads this file natively (`--config osv-scanner.toml`), and
+# scripts/osv-gate.ts applies the same entries to decide the job's verdict.
+# An entry matches a finding through any of its ids or aliases, so a CVE id
+# also covers the GHSA of the same advisory.
+#
+# Every entry must carry all three fields (scripts/osv-gate.test.ts parses this
+# file, and the gate rejects an entry without them):
+#
+#   [[IgnoredVulns]]
+#   id = "GHSA-xxxx-xxxx-xxxx"          # or the CVE id
+#   ignoreUntil = 2027-01-31             # a date; every waiver expires
+#   reason = "why the risk is accepted, and what clears it"
+#
+# On the day after ignoreUntil, both osv-scanner and the gate treat the finding
+# as new again and the job fails until the dependency moves or the waiver is
+# re-reviewed. No risk is accepted today.

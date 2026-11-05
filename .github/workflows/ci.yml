@@ -71,6 +71,7 @@ jobs:
           test -f scripts/generate-registry.parity.test.ts
           test -f src/lib/packName.test.ts
           test -f src/lib/urlState.test.ts
+          test -f scripts/osv-gate.test.ts
           bun run test:unit
 
       - name: Store conformance and publish integration (real Postgres)
