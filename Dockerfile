@@ -13,7 +13,7 @@ RUN set -eux; \
   /out/gc pack release hash --help >/dev/null
 
 # Stage 2: build the website and typecheck the server.
-FROM oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS build
+FROM oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS build
 WORKDIR /app
 # .npmrc maps @gascity/* to GitHub Packages + reads ${NODE_AUTH_TOKEN}; pass the
 # token as a BuildKit secret (never baked into a layer).
@@ -36,7 +36,7 @@ RUN if [ "$REGISTRY_WEB_BASE" != "/" ]; then \
     fi
 
 # Stage 3: serve static assets and /api through the Bun BFF.
-FROM oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
+FROM oven/bun:1.4.5-alpine@sha256:da816670775f4c2b4e990b6b1847cf5540dcdc721a42033dd331ce7a88ba6a3b
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
